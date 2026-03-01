@@ -1,0 +1,13 @@
+【Gitで保存するとき】
+
+cd "/c/Users/muuma/.gemini/antigravity/scratch/exness-live-bot"
+
+pwd
+
+git remote add origin https://github.com/muman84g/anti-exness.git
+git branch -M main
+git push -u origin main
+
+
+【GitからDLするとき】
+git clone https://github.com/muman84g/anti-exness.git
