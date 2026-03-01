@@ -11,3 +11,16 @@ git push -u origin main
 
 【GitからDLするとき】
 git clone https://github.com/muman84g/anti-exness.git
+
+
+【変更したデータを上書き】
+git status#変更部が赤文字であることを確認
+
+git add .#変更データを確認
+
+git status#変更部が緑になったことを確認
+
+git commit -m "内容を記載"#セーブ
+
+git push
+
