@@ -2,12 +2,12 @@ import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime
 import time
+from live_config import MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
 
 def test_mt5_connection():
     # Attempt to initialize MT5 with explicit path
     print("Initialize MT5...")
-    mt5_path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
-    if not mt5.initialize(path=mt5_path):
+    if not mt5.initialize(path=MT5_PATH, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
         print(f"initialize() failed, error code = {mt5.last_error()}")
         return
     

@@ -1,6 +1,6 @@
 【Gitで保存するとき】
 
-cd "/c/Users/muuma/.gemini/antigravity/scratch/exness-live-bot"
+cd "C:/Users/muuma/.gemini/antigravity/scratch/anti-exness"
 
 pwd
 

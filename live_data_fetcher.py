@@ -2,7 +2,7 @@ import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timezone
 import pytz
-from live_config import MT5_PATH
+from live_config import MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
 from base_interfaces import BaseDataManager
 
 class MT5DataManager(BaseDataManager):
@@ -10,9 +10,17 @@ class MT5DataManager(BaseDataManager):
         self.path = path
         
     def connect(self) -> bool:
-        if not mt5.initialize(path=self.path):
+        if not mt5.initialize(path=self.path, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
             print(f"MT5 initialize failed: {mt5.last_error()}")
             return False
+        
+        # Verify if actually logged in (sometimes initialize succeeds but not logged in)
+        account_info = mt5.account_info()
+        if account_info is None:
+            print("Successfully initialized but failed to login. Check your credentials.")
+            return False
+            
+        print(f"Logged in to MT5 Account: {account_info.login}")
         return True
         
     def disconnect(self):
