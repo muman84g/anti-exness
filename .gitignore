@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+.env
+
+# Trading data & sensitive configs
+live_trades.json
+live_config.py
+*.log
+
+# IDE files
+.vscode/
+.idea/
+.gemini/
+.agent/
+brain/
