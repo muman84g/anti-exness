@@ -1,4 +1,4 @@
-import MetaTrader5 as mt5
+from mt5_compat import mt5  # Cross-platform wrapper (auto-selects Windows/Linux)
 import pandas as pd
 from datetime import datetime, timezone
 import pytz

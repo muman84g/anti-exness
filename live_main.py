@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 import pytz
 import pandas as pd
-import MetaTrader5 as mt5
+from mt5_compat import mt5  # Cross-platform wrapper (auto-selects Windows/Linux)
 
 from config import TICKERS_INFO
 from live_config import YF_TO_MT5, MT5_TO_YF, USE_META_API
