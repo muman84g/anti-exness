@@ -1,4 +1,5 @@
 【Gitで保存するとき】
+git ini #Gitを使えるようにする
 
 cd "C:/Users/muuma/.gemini/antigravity/scratch/anti-exness"
 
@@ -11,7 +12,7 @@ git push -u origin main
 
 【GitからDLするとき】
 git clone https://github.com/muman84g/anti-exness.git
-
+gitgit
 
 【変更したデータを上書き】
 git status#変更部が赤文字であることを確認
