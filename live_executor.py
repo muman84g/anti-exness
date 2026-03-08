@@ -1,4 +1,4 @@
-import MetaTrader5 as mt5
+from mt5_compat import mt5  # Cross-platform wrapper (auto-selects Windows/Linux)
 import logging
 from base_interfaces import BaseExecutor
 

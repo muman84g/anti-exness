@@ -70,7 +70,7 @@ class MetaApiBridge(BaseDataManager, BaseExecutor):
         return asyncio.run(self._open_position_async(symbol, order_type, lot_size, sl, tp))
 
     async def _open_position_async(self, symbol, order_type, lot_size, sl, tp):
-        import MetaTrader5 as mt5
+        from mt5_compat import mt5
         action = 'BUY' if order_type == mt5.ORDER_TYPE_BUY else 'SELL'
         try:
             result = await self.connection.create_market_order(symbol, action, lot_size, sl, tp)
