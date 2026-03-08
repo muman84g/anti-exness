@@ -7,6 +7,8 @@ pwd
 
 git remote add origin https://github.com/muman84g/anti-exness.git
 git branch -M main
+git add .
+git commit -m "???"
 git push -u origin main
 
 
