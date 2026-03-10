@@ -25,7 +25,18 @@ ZSCORE_EXIT = 0.3
 RISK_USD = 5.0 # Fixed risk per trade for demo purposes
 TRAIN_WINDOW_DAYS = 30
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import os
+
+# --- Logging Setup ---
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),  # ファイルに保存
+        logging.StreamHandler()                            # 画面にも表示
+    ]
+)
 
 class LiveBot:
     def __init__(self):
