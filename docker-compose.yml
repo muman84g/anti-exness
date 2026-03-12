@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  exness-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: exness-bot:latest
+    container_name: exness-bot
+
+    # ── クラッシュ時の自動再起動 ─────────────────────────────
+    restart: always
+
+    # ── ログ設定 ─────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"   # ログファイルの最大サイズ
+        max-file: "5"     # 保持するログファイル数
+
+    # ── ボリューム ────────────────────────────────────────────
+    # live_trades.json をホスト側に永続化（コンテナ再起動後も保持）
+    volumes:
+      - ./live_trades.json:/app/live_trades.json
+      - ./bot.log:/app/bot.log
+      # live_config.py はサーバーに手動コピーしてマウント
+      - ./live_config.py:/app/live_config.py:ro
+
+    # ── 環境変数 ──────────────────────────────────────────────
+    environment:
+      - DISPLAY=:99
+      - WINEPREFIX=/root/.wine

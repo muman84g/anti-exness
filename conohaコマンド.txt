@@ -1,0 +1,27 @@
+【起動するとき】
+# 1. 仮想ディスプレイ（まだ動いてないとき only）
+Xvfb :99 -screen 0 1024x768x16 &
+
+# 2. MT5起動（初回ログイン後は自動再ログイン）
+DISPLAY=:99 wine ~/.wine/drive_c/Program\ Files/MetaTrader\ 5/terminal64.exe &
+sleep 10   # MT5が立ち上がるまで待つ
+
+# 3. Botを実行
+cd /home/muu/python_program/anti-exness
+python3 live_main.py
+
+
+【停止するとき】
+# Botだけ止める
+Ctrl + C
+
+# WineとMT5も止める
+wineserver -k
+
+# Xvfbも止める（再起動するまで不要なら）
+kill $(pgrep Xvfb)
+
+【状態確認】
+ps aux | grep python    # Bot動いてる？
+ps aux | grep wine      # Wine動いてる？
+ps aux | grep Xvfb      # Xvfb動いてる？
