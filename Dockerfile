@@ -55,7 +55,7 @@ RUN Xvfb :99 -screen 0 1024x768x16 &\
     wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.ltd.official/mt5/mt5setup.exe" && \
     # MT5 をサイレントインストール
     DISPLAY=:99 wine /tmp/mt5setup.exe /auto && \
-    sleep 15 && \
+    sleep 60 && \
     rm /tmp/mt5setup.exe
 
 # ── Bot ファイルのコピー ─────────────────────────────────────
