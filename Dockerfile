@@ -45,7 +45,7 @@ RUN Xvfb :99 -screen 0 1024x768x16 & \
     sleep 5 && \
     wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.ltd.official/mt5/mt5setup.exe" && \
     # wgetでダウンロードしたexeを wine 経由で start /wait を使って実行
-    DISPLAY=:99 xvfb-run -a wine cmd /c "start /wait /tmp/mt5setup.exe /auto" && \
+    cd /tmp && DISPLAY=:99 xvfb-run -a wine cmd /c "start /wait mt5setup.exe /auto" && \
     sleep 30 && \
     rm /tmp/mt5setup.exe
 
