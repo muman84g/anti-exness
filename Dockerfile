@@ -37,6 +37,17 @@ RUN pip3 install --no-cache-dir \
     statsmodels \
     rpyc
 
+# ── Windows Python のインストール (Wine内) ─────────────────────
+# mt5linux は Wine 内の Windows Python で動作する MetaTrader5 ライブラリと通信するため必須です
+RUN wget -q -O /tmp/python-installer.exe https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe && \
+    xvfb-run -a wine /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 && \
+    sleep 30 && \
+    rm /tmp/python-installer.exe
+
+# ── Wine内の Python に MetaTrader5 と rpyc をインストール ────
+RUN xvfb-run -a wine "C:\Program Files\Python310\python.exe" -m pip install --upgrade pip && \
+    xvfb-run -a wine "C:\Program Files\Python310\python.exe" -m pip install MetaTrader5 rpyc
+
 # ── MT5の事前インストール済みディレクトリのコピー ────────
 # MT5のサイレントインストーラはWine上で動作が非常に不安定なため、
 # Windows側で既にインストール済みの「MetaTrader 5」フォルダをコンテナに直接コピーします。
