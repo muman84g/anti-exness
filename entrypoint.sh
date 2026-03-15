@@ -44,10 +44,13 @@ sleep 20
 # Python(Linux)からのリクエストを受け付けるため、Wine環境内のWindows用Pythonで
 # mt5linux のバックグラウンドサーバーを立ち上げます。
 echo "[3/4] mt5linux rpyc サーバーを Wine 内で起動中..."
-DISPLAY=:99 WINEPREFIX=/root/.wine wine "C:\Program Files\Python310\python.exe" -m mt5linux &
+DISPLAY=:99 WINEPREFIX=/root/.wine wine "C:\users\root\AppData\Local\Programs\Python\Python310\python.exe" -m mt5linux &
 MT5LINUX_PID=$!
 sleep 10
 echo "      mt5linux サーバー起動完了 (PID: $MT5LINUX_PID)"
+echo "      --- mt5linux server logs ---"
+cat /tmp/mt5linux_server.log
+echo "      ----------------------------"
 
 # ── 4. Bot 本体の起動 ────────────────────────────────────────
 echo "[4/4] live_main.py を起動中..."
