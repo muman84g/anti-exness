@@ -1,70 +1,34 @@
 # Project Handover: Exness Live Bot
 
-## 現在の進捗状況
+## 達成したマイルストーン 🎉 (2026/03/16 更新)
 - **MT5 (Windows)**: Windows環境での動作確認済み。
-- **MetaApi Bridge**: `metaapi_bridge.py` 実装済み（ただし月額$30のため保留）。
-- **mt5linux方式**: CentOS 9 の Wine 8.0 で `wow64` 問題により断念。
-  - 原因: CentOS 9 は wine.i686 (32bit) パッケージを提供しておらず、Wine の wow64 モードが動作しない。
-- **Git管理**: ローカルリポジトリ初期化・`.gitignore` 設定済み。
-- **Docker ファイル**: 作成完了 ✅
-  - `Dockerfile` (Ubuntu 22.04 + Wine32 + MT5 + mt5linux)
-  - `entrypoint.sh` (起動スクリプト)
-  - `docker-compose.yml` (自動再起動設定)
-  - `deploy/setup_centos.sh` (Docker インストール手順)
-- **`live_config.py`**: `MT5_PATH` を Windows/Linux 自動切り替えに対応
+- **Docker 移行と環境構築**: CentOSにて Docker (Ubuntu 22.04 + Wine32 + MT5) 環境の構築に成功。
+  - **MT5の配置手法**: Windows側から「コピー」することで完全解決。
+  - **Pythonブリッジ通信 (mt5linux)**: 構築完了！
+    - Wine環境でのインストーラサイレント落ち問題を **埋め込み(embeddable) ZIP版の直接展開** で解決。
+    - Wine環境下で、バックグラウンドPythonタスクが落ちる問題を **`pythonw.exe` の使用** と **`PYTHONHASHSEED=0`** で解決。
+    - Pythonの浮動小数点計算がWineのC-Runtime不足で落ちる問題（fetestexceptエラー）を、 **`winetricks win10 vcrun2015` の導入** によって完全解決。
+  - **通信テスト**: **`rpyc` サーバーが立ち上がり、Linux側のPythonからの接続（accepted）が成功しました！！！！！🚀**
 
-## 現在の進捗状況 (2026/03/13 更新)
-- **MT5 (Windows)**: Windows環境での動作確認済み。
-- **Docker 移行**: CentOS 9 での運用のため、Docker (Ubuntu 22.04 + Wine32 + MT5) 環境に移行中。
-- **CentOS サーバー設定**: 
-  - Docker, docker-compose のインストール完了 (`setup_centos.sh` 実行済み)
-  - リポジトリのクローン (`git pull`) 完了
-  - `live_config.py` の配置完了
-- **Docker ビルドとMT5インストールの問題と解決手段**: 
-  - Dockerコンテナ内で `mt5setup.exe` (Webインストーラ) をWine経由で実行しようとしたが、バックグラウンドでの展開処理が正常に完了しないというWine特有のトラブルに遭遇。
-  - **解決策**: Windows側で既にインストール済みの「MetaTrader 5」フォルダをそのままLinuxサーバーにコピーし、Dockerfile内でコンテナ内に配置（COPY）する堅牢な方式へと根本からアプローチを変更しました。
-  - これに伴う Dockerfile、entrypoint.sh、.gitignore の修正はすべて完了し、GitHubの `main` ブランチにPush済みです。
+## 現在の状況（残りのエラー）
+Linux側のPythonでBot本体 (`live_main.py`) が起動し、ついにMT5側（Wine側）と通信がつながった直後、以下のエラーで止まっています。
 
-## 次のステップ（デスクトップPCでやること）
-
-MT5のアプリ本体ディレクトリ（約400MB）はサイズが大きすぎるため、Gitリポジトリの管理からは意図的に除外（`.gitignore`に追加）しています。
-そのため、デスクトップPCから手動でCentOSサーバーの作業ディレクトリにMT5本体を転送してから、サーバー上で再ビルドを行う必要があります。
-
-### Step 1: デスクトップPCから CentOS サーバーへ MT5 本体を転送
-
-デスクトップPCの PowerShell または コマンドプロンプトを開き、以下のコマンドでデスクトップPC側の MT5 インストールフォルダをサーバーへ直接アップロード（SCP転送）してください。
-※パスワードを聞かれたら、CentOSサーバーの `muu` ユーザーのパスワードを入力してください。容量が大きいため転送には数分かかります。
-
-```powershell
-scp -P 499 -r "C:\Program Files\MetaTrader 5" muu@118.27.2.117:/home/muu/python_program/anti-exness/
+```text
+ModuleNotFoundError: No module named 'metaapi_cloud_sdk'
 ```
 
-### Step 2: CentOS サーバーでの再ビルド
+これは、単に **Ubuntu側のPythonに `metaapi_cloud_sdk` というライブラリがインストールされていないだけ（`pip install` の記載漏れ）**という、非常に軽微で平和的なエラーです！
 
-転送が完了したら、CentOS サーバーに SSH ログインし、以下のコマンドを実行します。
+## 次のステップ（再起動後、次回チャットでやること）
+PCの再起動後、新しく開いたAntigravityのチャット画面で、この `handover.md` を読み込ませて以下を依頼してください。
 
-```bash
-cd /home/muu/python_program/anti-exness
+---
+**【次回プロンプト用テキスト（コピーして貼り付けてください）】**
 
-# 1. GitHub から最新の Dockerfile や起動スクリプトを取り込む
-git pull
+> おはよう！PC再起動したので、いま開いている `handover.md` を読んで現状を把握してほしい。
+> 前回の通信で、Wine上のMT5とLinuxのPython間のブリッジ通信をついに確立できたところまで進んでいる！
+>
+> 最後に残っているのが、Linux側での `ModuleNotFoundError: No module named 'metaapi_cloud_sdk'` というエラーだけ。
+> `Dockerfile` の Linux側 Python (`pip3 install`) のリストにこれを追記して、再度コンテナを起動したい。修正と指示をお願い！
 
-# 2. 失敗している古いコンテナを停止・削除
-sudo docker-compose down
-
-# 3. キャッシュを使わずに完全に再ビルド
-# （ここで、先ほどSCPで転送した MT5 フォルダがコンテナ内に組み込まれます）
-sudo docker-compose build --no-cache
-
-# 4. コンテナを起動
-sudo docker-compose up -d
-
-# 5. ログを確認
-sudo docker logs -f exness-bot
-```
-
-### Step 3: 動作確認
-ログで `[2/4] MT5 ターミナルを Wine で起動中...` を通過し、`mt5linux サーバー準備完了` などのメッセージが出力されていれば大成功です！
-
-## アンティグラビティへの引き継ぎ指示
-このファイルを読み込んだ後、「ノートPCからデスクトップPCに移動して手順に従いSCP転送と再ビルドを試みた結果（またはエラー内容）を報告します。続きをサポートして」と伝えてください。
+---
