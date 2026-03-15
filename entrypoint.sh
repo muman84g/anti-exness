@@ -41,15 +41,13 @@ echo "      MT5 起動完了 (PID: $MT5_PID)"
 sleep 20
 
 # ── 3. mt5linux rpyc サーバーの起動 ─────────────────────────
-# mt5linux は Python から Wine 内の MT5 に TCP 経由で接続するブリッジ
-echo "[3/4] mt5linux rpyc サーバーを起動中..."
-DISPLAY=:99 python3 -c "
-from mt5linux import MetaTrader5
-mt5 = MetaTrader5()
-# rpyc サーバーはバックグラウンドで自動起動される
-print('mt5linux サーバー準備完了')
-" &
-sleep 5
+# Python(Linux)からのリクエストを受け付けるため、Wine環境内のWindows用Pythonで
+# mt5linux のバックグラウンドサーバーを立ち上げます。
+echo "[3/4] mt5linux rpyc サーバーを Wine 内で起動中..."
+DISPLAY=:99 WINEPREFIX=/root/.wine wine "C:\Program Files\Python310\python.exe" -m mt5linux &
+MT5LINUX_PID=$!
+sleep 10
+echo "      mt5linux サーバー起動完了 (PID: $MT5LINUX_PID)"
 
 # ── 4. Bot 本体の起動 ────────────────────────────────────────
 echo "[4/4] live_main.py を起動中..."
