@@ -36,7 +36,7 @@ MT5のアプリ本体ディレクトリ（約400MB）はサイズが大きすぎ
 ※パスワードを聞かれたら、CentOSサーバーの `muu` ユーザーのパスワードを入力してください。容量が大きいため転送には数分かかります。
 
 ```powershell
-scp -r "C:\Program Files\MetaTrader 5" muu@118-27-2-117:/home/muu/python_program/anti-exness/
+scp -P 499 -r "C:\Program Files\MetaTrader 5" muu@118.27.2.117:/home/muu/python_program/anti-exness/
 ```
 
 ### Step 2: CentOS サーバーでの再ビルド
