@@ -42,7 +42,12 @@ RUN pip3 install --no-cache-dir \
 # ── Windows Python のインストール (Wine内) ─────────────────────
 # exeインストーラはWine上でサイレント失敗しやすいため、embeddable zip版を直接展開します
 # Python 3.10以上はWineのCryptGenRandomバグの影響を受けやすいため、安定した3.9.13を使用します
-RUN mkdir -p /root/.wine/drive_c/Python39 && \
+# PythonのC-runtime依存(ucrt)を解決するため、先にwinetricksでucrtbaseをインストールします
+RUN xvfb-run -a wine wineboot --init && \
+    sleep 5 && \
+    xvfb-run -a winetricks -q ucrtbase && \
+    sleep 5 && \
+    mkdir -p /root/.wine/drive_c/Python39 && \
     wget -q -O /tmp/python-3.9.13-embed.zip https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip && \
     unzip -q /tmp/python-3.9.13-embed.zip -d /root/.wine/drive_c/Python39/ && \
     # get-pip.py を使って pip をインストール
