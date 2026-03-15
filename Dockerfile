@@ -8,6 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV WINEPREFIX=/root/.wine
 ENV WINEARCH=win64
+ENV PYTHONHASHSEED=0
 
 # ── 必要なパッケージのインストール ──────────────────────────
 RUN dpkg --add-architecture i386 && \
@@ -40,19 +41,20 @@ RUN pip3 install --no-cache-dir \
 
 # ── Windows Python のインストール (Wine内) ─────────────────────
 # exeインストーラはWine上でサイレント失敗しやすいため、embeddable zip版を直接展開します
-RUN mkdir -p /root/.wine/drive_c/Python310 && \
-    wget -q -O /tmp/python-3.10.11-embed.zip https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip && \
-    unzip -q /tmp/python-3.10.11-embed.zip -d /root/.wine/drive_c/Python310/ && \
+# Python 3.10以上はWineのCryptGenRandomバグの影響を受けやすいため、安定した3.9.13を使用します
+RUN mkdir -p /root/.wine/drive_c/Python39 && \
+    wget -q -O /tmp/python-3.9.13-embed.zip https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip && \
+    unzip -q /tmp/python-3.9.13-embed.zip -d /root/.wine/drive_c/Python39/ && \
     # get-pip.py を使って pip をインストール
     wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
-    xvfb-run -a wine "C:\Python310\python.exe" Z:\\tmp\\get-pip.py && \
-    # embed用設定変更（pipが動作するようにpython310._pthのコメントアウトを外す）
-    sed -i 's/^#import site/import site/' /root/.wine/drive_c/Python310/python310._pth && \
-    rm /tmp/python-3.10.11-embed.zip /tmp/get-pip.py
+    xvfb-run -a wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
+    # embed用設定変更（pipが動作するようにpython39._pthのコメントアウトを外す）
+    sed -i 's/^#import site/import site/' /root/.wine/drive_c/Python39/python39._pth && \
+    rm /tmp/python-3.9.13-embed.zip /tmp/get-pip.py
 
 # ── Wine内の Python に MetaTrader5 と rpyc をインストール ────
-RUN xvfb-run -a wine "C:\Python310\python.exe" -m pip install --upgrade pip && \
-    xvfb-run -a wine "C:\Python310\python.exe" -m pip install MetaTrader5 rpyc mt5linux
+RUN xvfb-run -a wine "C:\Python39\python.exe" -m pip install --upgrade pip && \
+    xvfb-run -a wine "C:\Python39\python.exe" -m pip install MetaTrader5 rpyc mt5linux
 
 # ── MT5の事前インストール済みディレクトリのコピー ────────
 # MT5のサイレントインストーラはWine上で動作が非常に不安定なため、
