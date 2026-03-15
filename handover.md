@@ -20,98 +20,40 @@
   - Docker, docker-compose のインストール完了 (`setup_centos.sh` 実行済み)
   - リポジトリのクローン (`git pull`) 完了
   - `live_config.py` の配置完了
-- **Docker ビルド**: 実行完了したが、コンテナ起動時に**「MT5 ターミナルが見つかりません」**というエラーが発生中。
-  - 原因: Dockerビルド時に `mt5setup.exe /auto` が完了する前に次のステップに進んでしまい、Wine環境にMT5がインストールされていない。
+- **Docker ビルドとMT5インストールの問題と解決手段**: 
+  - Dockerコンテナ内で `mt5setup.exe` (Webインストーラ) をWine経由で実行しようとしたが、バックグラウンドでの展開処理が正常に完了しないというWine特有のトラブルに遭遇。
+  - **解決策**: Windows側で既にインストール済みの「MetaTrader 5」フォルダをそのままLinuxサーバーにコピーし、Dockerfile内でコンテナ内に配置（COPY）する堅牢な方式へと根本からアプローチを変更しました。
+  - これに伴う Dockerfile、entrypoint.sh、.gitignore の修正はすべて完了し、GitHubの `main` ブランチにPush済みです。
 
-## 次のステップ（明日やること）
+## 次のステップ（デスクトップPCでやること）
 
-この問題を解決するため、`Dockerfile` の MT5 インストール部分をより確実な方法（`xvfb-run` と `cmd /c start /wait`）に書き換える必要があります。
+MT5のアプリ本体ディレクトリ（約400MB）はサイズが大きすぎるため、Gitリポジトリの管理からは意図的に除外（`.gitignore`に追加）しています。
+そのため、デスクトップPCから手動でCentOSサーバーの作業ディレクトリにMT5本体を転送してから、サーバー上で再ビルドを行う必要があります。
 
-### Step 1: Dockerfile の修正と Push（Windows PC から）
-Windows PC の `Dockerfile` を開き、中身を以下の内容に**すべて上書き**して保存し、GitHub に Push してください。
+### Step 1: デスクトップPCから CentOS サーバーへ MT5 本体を転送
 
-```dockerfile
-# ============================================================
-# Dockerfile: Exness MT5 Live Bot (Ubuntu + Wine + mt5linux)
-# ============================================================
-FROM ubuntu:22.04
+デスクトップPCの PowerShell または コマンドプロンプトを開き、以下のコマンドでデスクトップPC側の MT5 インストールフォルダをサーバーへ直接アップロード（SCP転送）してください。
+※パスワードを聞かれたら、CentOSサーバーの `muu` ユーザーのパスワードを入力してください。容量が大きいため転送には数分かかります。
 
-# ── 環境変数 ────────────────────────────────────────────────
-ENV DEBIAN_FRONTEND=noninteractive
-ENV DISPLAY=:99
-ENV WINEPREFIX=/root/.wine
-ENV WINEARCH=win64
-
-# ── 必要なパッケージのインストール ──────────────────────────
-RUN dpkg --add-architecture i386 && \
-    apt-get update && \
-    apt-get install -y \
-        xvfb \
-        wine \
-        wine32 \
-        wine64 \
-        winetricks \
-        wget \
-        curl \
-        python3 \
-        python3-pip \
-        supervisor \
-        cabextract \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Python 依存ライブラリのインストール ─────────────────────
-RUN pip3 install --no-cache-dir \
-    mt5linux \
-    pandas \
-    pytz \
-    scikit-learn \
-    lightgbm \
-    statsmodels \
-    rpyc
-
-# ── MT5のインストール (winetricks経由の確実な方法) ────────
-# Xvfbを起動しながらWinetricks経由でサイレントインストール
-RUN Xvfb :99 -screen 0 1024x768x16 & \
-    sleep 2 && \
-    DISPLAY=:99 WINEPREFIX=/root/.wine wine wineboot --init && \
-    sleep 5 && \
-    wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.ltd.official/mt5/mt5setup.exe" && \
-    # wgetでダウンロードしたexeを wine 経由で start /wait を使って実行
-    DISPLAY=:99 xvfb-run -a wine cmd /c "start /wait /tmp/mt5setup.exe /auto" && \
-    sleep 30 && \
-    rm /tmp/mt5setup.exe
-
-# ── Bot ファイルのコピー ─────────────────────────────────────
-WORKDIR /app
-COPY . /app/
-RUN chmod +x /app/entrypoint.sh
-
-# ── 起動スクリプト ───────────────────────────────────────────
-ENTRYPOINT ["/app/entrypoint.sh"]
-```
-
-**Git Push コマンド:**
-```bash
-git add Dockerfile
-git commit -m "Fix MT5 installation using xvfb-run and start wait"
-git push
+```powershell
+scp -r "C:\Program Files\MetaTrader 5" muu@118-27-2-117:/home/muu/python_program/anti-exness/
 ```
 
 ### Step 2: CentOS サーバーでの再ビルド
 
-CentOS サーバーに SSH ログインし、以下のコマンドを実行します。
+転送が完了したら、CentOS サーバーに SSH ログインし、以下のコマンドを実行します。
 
 ```bash
 cd /home/muu/python_program/anti-exness
 
-# 1. 変更をサーバーに取り込む
+# 1. GitHub から最新の Dockerfile や起動スクリプトを取り込む
 git pull
 
-# 2. 失敗しているコンテナを停止・削除
+# 2. 失敗している古いコンテナを停止・削除
 sudo docker-compose down
 
-# 3. キャッシュを使わずに完全に再ビルド（15分ほどかかります）
+# 3. キャッシュを使わずに完全に再ビルド
+# （ここで、先ほどSCPで転送した MT5 フォルダがコンテナ内に組み込まれます）
 sudo docker-compose build --no-cache
 
 # 4. コンテナを起動
@@ -122,7 +64,7 @@ sudo docker logs -f exness-bot
 ```
 
 ### Step 3: 動作確認
-ログに `Starting Exness MT5 Live Bot...` と表示されれば完了です。
+ログで `[2/4] MT5 ターミナルを Wine で起動中...` を通過し、`mt5linux サーバー準備完了` などのメッセージが出力されていれば大成功です！
 
 ## アンティグラビティへの引き継ぎ指示
-このファイルを読み込んだ後、「CentOS サーバーでの Docker デプロイ中、MT5のインストールエラーで止まっています。Dockerfileの修正から手伝って」と伝えてください。
+このファイルを読み込んだ後、「ノートPCからデスクトップPCに移動して手順に従いSCP転送と再ビルドを試みた結果（またはエラー内容）を報告します。続きをサポートして」と伝えてください。
