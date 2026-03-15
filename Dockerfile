@@ -46,7 +46,7 @@ RUN wget -q -O /tmp/python-installer.exe https://www.python.org/ftp/python/3.10.
 
 # ── Wine内の Python に MetaTrader5 と rpyc をインストール ────
 RUN xvfb-run -a wine "C:\Program Files\Python310\python.exe" -m pip install --upgrade pip && \
-    xvfb-run -a wine "C:\Program Files\Python310\python.exe" -m pip install MetaTrader5 rpyc
+    xvfb-run -a wine "C:\Program Files\Python310\python.exe" -m pip install MetaTrader5 rpyc mt5linux
 
 # ── MT5の事前インストール済みディレクトリのコピー ────────
 # MT5のサイレントインストーラはWine上で動作が非常に不安定なため、
