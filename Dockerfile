@@ -11,16 +11,16 @@ ENV WINEARCH=win64
 ENV PYTHONHASHSEED=0
 
 # ── 必要なパッケージのインストール ──────────────────────────
+# Wine 6.0.3 (Ubuntu default) has known IPC bugs with newer MT5.
+# Use WineHQ stable (8.x+) for proper named pipe support.
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y \
         xvfb \
-        wine \
-        wine32 \
-        wine64 \
-        winetricks \
         wget \
         curl \
+        gnupg2 \
+        software-properties-common \
         python3 \
         python3-pip \
         supervisor \
@@ -28,6 +28,15 @@ RUN dpkg --add-architecture i386 && \
         unzip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# ── WineHQ 公式リポジトリから最新安定版 Wine をインストール ──
+RUN mkdir -pm755 /etc/apt/keyrings && \
+    wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key && \
+    wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources && \
+    apt-get update && \
+    apt-get install -y --install-recommends winehq-stable winetricks && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # ── Python 依存ライブラリのインストール ─────────────────────
 RUN pip3 install --no-cache-dir \
