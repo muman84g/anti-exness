@@ -37,7 +37,8 @@ RUN pip3 install --no-cache-dir \
     scikit-learn \
     lightgbm \
     statsmodels \
-    rpyc
+    rpyc \
+    metaapi_cloud_sdk
 
 # ── Windows Python のインストール (Wine内) ─────────────────────
 # exeインストーラはWine上でサイレント失敗しやすいため、embeddable zip版を直接展開します
