@@ -30,3 +30,8 @@ services:
     environment:
       - DISPLAY=:99
       - WINEPREFIX=/root/.wine
+
+    # ── DNS設定（MT5がブローカーサーバーに接続するために必要）────
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
