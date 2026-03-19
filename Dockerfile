@@ -49,21 +49,21 @@ RUN pip3 install --no-cache-dir \
     rpyc \
     metaapi_cloud_sdk
 
-# ── Windows Python のインストール (Wine内) ─────────────────────
-# exeインストーラはWine上でサイレント失敗しやすいため、embeddable zip版を直接展開します
-# Python 3.10以上はWineのCryptGenRandomバグの影響を受けやすいため、安定した3.9.13を使用します
-# PythonのC-runtime依存(ucrt)を解決するため、先にwinetricksでwin10環境とvcrun2015をインストールします
-RUN xvfb-run -a wine wineboot --init && \
+# ── Wine 初期化 + Windows Python のインストール ───────────────
+# Wine 9.x では xvfb-run -a と wineboot --init の組み合わせがハングする。
+# 手動でXvfbを起動してから wine コマンドを実行する方式に変更。
+RUN rm -f /tmp/.X99-lock && \
+    Xvfb :99 -screen 0 1024x768x16 -ac & \
     sleep 5 && \
-    xvfb-run -a winetricks -q win10 vcrun2015 && \
+    DISPLAY=:99 wine wineboot -u && \
+    sleep 5 && \
+    DISPLAY=:99 winetricks -q win10 vcrun2015 && \
     sleep 5 && \
     mkdir -p /root/.wine/drive_c/Python39 && \
     wget -q -O /tmp/python-3.9.13-embed.zip https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip && \
     unzip -q /tmp/python-3.9.13-embed.zip -d /root/.wine/drive_c/Python39/ && \
-    # get-pip.py を使って pip をインストール
     wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
-    xvfb-run -a wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
-    # embed用設定変更（pipが動作するようにpython39._pthのコメントアウトを外す）
+    DISPLAY=:99 wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
     sed -i 's/^#import site/import site/' /root/.wine/drive_c/Python39/python39._pth && \
     rm /tmp/python-3.9.13-embed.zip /tmp/get-pip.py
 
