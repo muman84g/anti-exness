@@ -29,12 +29,13 @@ RUN dpkg --add-architecture i386 && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# ── WineHQ 公式リポジトリから最新安定版 Wine をインストール ──
+# ── WineHQ 公式リポジトリから安定版 Wine (8.x系列) をインストール ──
+# Wine 9.x は Docker/headless 環境での wineboot に致命的なバグがあるため 8.0 に固定します。
 RUN mkdir -pm755 /etc/apt/keyrings && \
     wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key && \
     wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources && \
     apt-get update && \
-    apt-get install -y --install-recommends winehq-stable winetricks && \
+    apt-get install -y --install-recommends winehq-stable=8.0.2~jammy wine-stable=8.0.2~jammy wine-stable-i386=8.0.2~jammy wine-stable-amd64=8.0.2~jammy winetricks && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
