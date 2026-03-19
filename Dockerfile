@@ -7,7 +7,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV WINEPREFIX=/root/.wine
-ENV WINEARCH=win64
+# WINEARCH=win64 は Wine 9.x ではデフォルトなので明示不要（指定するとwineboot失敗の原因に）
 ENV PYTHONHASHSEED=0
 
 # ── 必要なパッケージのインストール ──────────────────────────
@@ -50,26 +50,26 @@ RUN pip3 install --no-cache-dir \
     metaapi_cloud_sdk
 
 # ── Wine 初期化 + Windows Python のインストール ───────────────
-# Wine 9.x では xvfb-run -a と wineboot --init の組み合わせがハングする。
-# 手動でXvfbを起動してから wine コマンドを実行する方式に変更。
+# Wine 9.x: WINEDLLOVERRIDES="rpcss=" でrpcssサービス起動をスキップして初期化。
+# Xvfbを手動起動してからwine コマンドを実行する。
 RUN rm -f /tmp/.X99-lock && \
     Xvfb :99 -screen 0 1024x768x16 -ac & \
     sleep 5 && \
-    DISPLAY=:99 wine wineboot -u && \
-    sleep 5 && \
-    DISPLAY=:99 winetricks -q win10 vcrun2015 && \
+    WINEDLLOVERRIDES="rpcss=" DISPLAY=:99 wineboot --init && \
+    sleep 10 && \
+    WINEDLLOVERRIDES="rpcss=" DISPLAY=:99 winetricks -q win10 vcrun2015 && \
     sleep 5 && \
     mkdir -p /root/.wine/drive_c/Python39 && \
     wget -q -O /tmp/python-3.9.13-embed.zip https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip && \
     unzip -q /tmp/python-3.9.13-embed.zip -d /root/.wine/drive_c/Python39/ && \
     wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
-    DISPLAY=:99 wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
+    WINEDLLOVERRIDES="rpcss=" DISPLAY=:99 wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
     sed -i 's/^#import site/import site/' /root/.wine/drive_c/Python39/python39._pth && \
     rm /tmp/python-3.9.13-embed.zip /tmp/get-pip.py
 
 # ── Wine内の Python に MetaTrader5 と rpyc をインストール ────
-RUN xvfb-run -a wine "C:\Python39\python.exe" -m pip install --upgrade pip && \
-    xvfb-run -a wine "C:\Python39\python.exe" -m pip install MetaTrader5 rpyc mt5linux
+RUN WINEDLLOVERRIDES="rpcss=" DISPLAY=:99 wine "C:\Python39\python.exe" -m pip install --upgrade pip && \
+    WINEDLLOVERRIDES="rpcss=" DISPLAY=:99 wine "C:\Python39\python.exe" -m pip install MetaTrader5 rpyc mt5linux
 
 # ── MT5の事前インストール済みディレクトリのコピー ────────
 # MT5のサイレントインストーラはWine上で動作が非常に不安定なため、
