@@ -1,0 +1,20 @@
+# ビルド＆バックグラウンド起動（初回や変更後）
+sudo docker compose up -d --build
+
+# ビルドせずに再起動だけ
+sudo docker compose up -d
+
+# ログをリアルタイムで見る（Ctrl+C で抜ける）
+sudo docker compose logs -f
+
+# 最新100行だけ表示
+sudo docker compose logs --tail=100
+
+#停止
+sudo docker compose down
+
+# コンテナの状態確認
+sudo docker compose ps
+
+# コンテナの中に入る（デバッグ用）
+sudo docker compose exec bot bash

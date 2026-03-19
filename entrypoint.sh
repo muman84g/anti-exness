@@ -37,8 +37,8 @@ echo "[2/4] MT5 ターミナルを Wine で起動中..."
 DISPLAY=:99 wine "$MT5_TERMINAL" &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"
-# MT5 の初期化に時間がかかるため待機
-sleep 20
+# MT5 の初期化（ログイン含む）に時間がかかるため十分に待機
+sleep 120
 
 # ── 3. mt5linux rpyc サーバーの起動 ─────────────────────────
 # Python(Linux)からのリクエストを受け付けるため、Wine環境内のWindows用Pythonで
