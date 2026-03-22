@@ -10,25 +10,33 @@
     - Pythonの浮動小数点計算がWineのC-Runtime不足で落ちる問題（fetestexceptエラー）を、 **`winetricks win10 vcrun2015` の導入** によって完全解決。
   - **通信テスト**: **`rpyc` サーバーが立ち上がり、Linux側のPythonからの接続（accepted）が成功しました！！！！！🚀**
 
-## 現在の状況（残りのエラー）
-Linux側のPythonでBot本体 (`live_main.py`) が起動し、ついにMT5側（Wine側）と通信がつながった直後、以下のエラーで止まっています。
+## 現在の状況（残りのエラー） (2026/03/20 更新)
+以下の問題を順番にクリアしてきました。
+1. **`ModuleNotFoundError: No module named 'metaapi_cloud_sdk'`**: `Dockerfile` に追記して解決済み。
+2. **`Could not resolve host: mt5.exness.com`**: コンテナ内のDNS未解決問題を `docker-compose.yml` に Google DNS (`8.8.8.8`) を追加して解決済み。MT5がブローカーに繋がるようになりました。
 
+**🚨 現在直面しているエラー 🚨**
+通信テストは成功・DNSも解決したにもかかわらず、MT5 API(Python側) の初期化でタイムアウトします。
 ```text
-ModuleNotFoundError: No module named 'metaapi_cloud_sdk'
+[ERROR] Failed to connect to MT5. Exiting.
+MT5 initialize failed: (-10005, 'IPC timeout')
 ```
 
-これは、単に **Ubuntu側のPythonに `metaapi_cloud_sdk` というライブラリがインストールされていないだけ（`pip install` の記載漏れ）**という、非常に軽微で平和的なエラーです！
+**原因分析と対策:**
+- Wineで稼働する MT5ターミナル と Linux上のPython(`mt5linux`) を繋ぐ「Named Pipe（IPC）」の接続不良です。
+- **Wine 6.0.3 (Ubuntu 22.04標準) の古い仕様が、新しいバージョンのMT5のマルチプロセス通信に対応しきれていない**（kernel32.dll名前付きパイプの不具合）ことが原因と考えられます。
+- 対策として `Dockerfile` を修正し、「Ubuntuの標準Wineを使用しつつ、問題になりやすい `rpcss` (RPCサブシステム) をバイパスして起動する (`WINEDLLOVERRIDES="rpcss="'`)」設定を施しました。WineHQリポジトリは依存関係のバグが多いため使用を中止しています。
 
 ## 次のステップ（再起動後、次回チャットでやること）
-PCの再起動後、新しく開いたAntigravityのチャット画面で、この `handover.md` を読み込ませて以下を依頼してください。
+PC再起動後、新しく開いたAntigravityのチャット画面で、この `handover.md` を読み込ませて以下を依頼してください。
 
 ---
 **【次回プロンプト用テキスト（コピーして貼り付けてください）】**
 
 > おはよう！PC再起動したので、いま開いている `handover.md` を読んで現状を把握してほしい。
-> 前回の通信で、Wine上のMT5とLinuxのPython間のブリッジ通信をついに確立できたところまで進んでいる！
->
-> 最後に残っているのが、Linux側での `ModuleNotFoundError: No module named 'metaapi_cloud_sdk'` というエラーだけ。
-> `Dockerfile` の Linux側 Python (`pip3 install`) のリストにこれを追記して、再度コンテナを起動したい。修正と指示をお願い！
+> 前回の通信で、`metaapi_cloud_sdk`の追加とDNS解決の設定は完了し、現在はMT5の `(-10005, 'IPC timeout')` エラーの解決に取り組んでいるところだよ。
+> 
+> 前回最後に、WineのIPCタイムアウト対策として、`Dockerfile` で Wine 8.0 へのダウングレードや `WINEDLLOVERRIDES="rpcss="` などの設定を行ったところまで進んでいる。
+> これからその（最後の修正をした）ソースコードをGitでpushして、CentOSサーバーで再ビルド(`docker compose up -d --build`)するから、起動後のログ確認のサポートと、もしまたIPCエラーが出た時の次のデバッグ・回避策（例えば mt5linux ではなく別のブリッジを使うなど）を一緒に考えてほしい！
 
 ---

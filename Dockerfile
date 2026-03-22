@@ -11,12 +11,16 @@ ENV WINEPREFIX=/root/.wine
 ENV PYTHONHASHSEED=0
 
 # ── 必要なパッケージのインストール ──────────────────────────
-# Wine 6.0.3 (Ubuntu default) has known IPC bugs with newer MT5.
-# Use WineHQ stable (8.x+) for proper named pipe support.
+# Ubuntu 22.04 標準のリポジトリから Wine をインストールします。
+# 安定動作のため、最新の WineHQ 9.x ではなく標準パッケージを使用します。
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y \
         xvfb \
+        wine \
+        wine32 \
+        wine64 \
+        winetricks \
         wget \
         curl \
         gnupg2 \
@@ -28,16 +32,6 @@ RUN dpkg --add-architecture i386 && \
         unzip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# ── WineHQ 公式リポジトリから安定版 Wine (8.x系列) をインストール ──
-# Wine 9.x は Docker/headless 環境での wineboot に致命的なバグがあるため 8.0 に固定します。
-RUN mkdir -pm755 /etc/apt/keyrings && \
-    wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key && \
-    wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources && \
-    apt-get update && \
-    apt-get install -y --install-recommends winehq-stable=8.0.2~jammy wine-stable=8.0.2~jammy wine-stable-i386=8.0.2~jammy wine-stable-amd64=8.0.2~jammy winetricks && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 
 # ── Python 依存ライブラリのインストール ─────────────────────
 RUN pip3 install --no-cache-dir \
