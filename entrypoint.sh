@@ -4,9 +4,8 @@
 # ============================================================
 # 起動順序:
 #   1. Xvfb（仮想ディスプレイ）
-#   2. MT5 ターミナル（Wine経由）
-#   3. mt5linux rpyc サーバー（MT5とPythonのブリッジ）
-#   4. live_main.py（Bot本体）
+#   2. MT5 ターミナル（Wine経由、/portable モード）
+#   3. live_main.py（Wine Python で直接実行）
 # ============================================================
 
 set -e
@@ -16,7 +15,7 @@ echo "  Exness MT5 Bot コンテナ起動"
 echo "======================================"
 
 # ── 1. Xvfb（仮想ディスプレイ）の起動 ──────────────────────
-echo "[1/4] Xvfb を起動中..."
+echo "[1/3] Xvfb を起動中..."
 rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1024x768x16 &
 XVFB_PID=$!
@@ -24,7 +23,6 @@ sleep 3
 echo "      Xvfb 起動完了 (PID: $XVFB_PID)"
 
 # ── 2. MT5 ターミナルの起動（Wine経由）──────────────────────
-# MT5_TERMINAL_PATH: Wine でインストールされた MT5 の実行ファイル
 MT5_TERMINAL="${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
 if [ ! -f "$MT5_TERMINAL" ]; then
@@ -33,23 +31,17 @@ if [ ! -f "$MT5_TERMINAL" ]; then
     exit 1
 fi
 
-echo "[2/4] MT5 ターミナルを Wine で起動中..."
+echo "[2/3] MT5 ターミナルを Wine で起動中..."
 DISPLAY=:99 wine "$MT5_TERMINAL" /portable &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"
-# MT5 の初期化（ログイン含む）に時間がかかるため十分に待機
+# MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
 sleep 120
 
-# ── 3. mt5linux rpyc サーバーの起動 ─────────────────────────
-# Python(Linux)からのリクエストを受け付けるため、Wine環境内のWindows用Pythonで
-# mt5linux のバックグラウンドサーバーを立ち上げます。
-echo "[3/4] mt5linux rpyc サーバーを Wine 内で起動中..."
-DISPLAY=:99 WINEPREFIX=/root/.wine wine "C:\Python39\pythonw.exe" -m mt5linux &
-MT5LINUX_PID=$!
-sleep 10
-echo "      mt5linux サーバー起動完了 (PID: $MT5LINUX_PID)"
-
-# ── 4. Bot 本体の起動 ────────────────────────────────────────
-echo "[4/4] live_main.py を起動中..."
+# ── 3. Bot 本体の起動（Wine Python から直接実行）──────────────
+# mt5linux ブリッジを使わず、Wine 内の Python で直接 MetaTrader5 API を呼ぶ。
+# Wine 内では platform.system() == "Windows" となるため、
+# mt5_compat.py は自動的にネイティブの MetaTrader5 を import する。
+echo "[3/3] live_main.py を Wine Python で起動中..."
 cd /app
-exec python3 live_main.py
+exec wine "C:\Python39\python.exe" live_main.py

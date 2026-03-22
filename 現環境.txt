@@ -1,0 +1,2 @@
+【旧】 Linux Python → rpyc → Wine Python → MT5 API → MT5 Terminal（IPC問題！）
+【新】 Wine Python → MT5 API → MT5 Terminal（同一環境・IPC不要）

@@ -9,7 +9,10 @@ from config import TICKERS_INFO
 from live_config import YF_TO_MT5, MT5_TO_YF, USE_META_API
 from live_data_fetcher import MT5DataManager
 from live_executor import MT5Executor
-from metaapi_bridge import MetaApiBridge
+try:
+    from metaapi_bridge import MetaApiBridge
+except ImportError:
+    MetaApiBridge = None  # MetaApi not available (e.g. running in Wine Python)
 from live_state import LiveState
 
 from ml_strategy import create_ml_features, create_labels, train_ml_model
