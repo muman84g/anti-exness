@@ -15,28 +15,22 @@
 1. **`ModuleNotFoundError: No module named 'metaapi_cloud_sdk'`**: `Dockerfile` に追記して解決済み。
 2. **`Could not resolve host: mt5.exness.com`**: コンテナ内のDNS未解決問題を `docker-compose.yml` に Google DNS (`8.8.8.8`) を追加して解決済み。MT5がブローカーに繋がるようになりました。
 
-**🚨 現在直面しているエラー 🚨**
-通信テストは成功・DNSも解決したにもかかわらず、MT5 API(Python側) の初期化でタイムアウトします。
-```text
-[ERROR] Failed to connect to MT5. Exiting.
-MT5 initialize failed: (-10005, 'IPC timeout')
-```
+**🚨 現在直面している課題と最新の対策 🚨**
+通信テストは成功・DNSも解決したにもかかわらず、MT5 API(Python側) の初期化で `(-10005, 'IPC timeout')` エラーが発生していました。原因は、Wine環境下での MT5ターミナル と Linux Python(`mt5linux`) 間の Windows Named Pipe (IPC) の接続不良です。
 
-**原因分析と対策:**
-- Wineで稼働する MT5ターミナル と Linux上のPython(`mt5linux`) を繋ぐ「Named Pipe（IPC）」の接続不良です。
-- **Wine 6.0.3 (Ubuntu 22.04標準) の古い仕様が、新しいバージョンのMT5のマルチプロセス通信に対応しきれていない**（kernel32.dll名前付きパイプの不具合）ことが原因と考えられます。
-- 対策として `Dockerfile` を修正し、「Ubuntuの標準Wineを使用しつつ、問題になりやすい `rpcss` (RPCサブシステム) をバイパスして起動する (`WINEDLLOVERRIDES="rpcss="'`)」設定を施しました。WineHQリポジトリは依存関係のバグが多いため使用を中止しています。
+**抜本的なアーキテクチャ変更（実装済み）:**
+この問題を根本的に回避するため、ソースコード（`Dockerfile`, `entrypoint.sh`）に以下の「2段階の抜本的対策」を実装した状態で、システムがクラッシュ・中断しました。
+1. **MT5ターミナルの `/portable` 起動 (`entrypoint.sh`)**: Windowsレジストリ依存を排除し、Named Pipeを正常に作成させるための対策。
+2. **`mt5linux` ブリッジの廃止と Wine Python での直接実行**: Linux側Pythonとのプロセス間通信(IPC)を完全に排除しました。`live_main.py` などのBot本体を、直接 Wine 内の Python 環境で実行する構造に変更し、必要な全依存パッケージ（`pandas`, `lightgbm`, `MetaTrader5` など）を `Dockerfile` でWine側のPythonにインストールするよう構成しました。
 
-## 次のステップ（再起動後、次回チャットでやること）
-PC再起動後、新しく開いたAntigravityのチャット画面で、この `handover.md` を読み込ませて以下を依頼してください。
+## 次のステップ（次回チャット再開時）
 
 ---
 **【次回プロンプト用テキスト（コピーして貼り付けてください）】**
 
-> おはよう！PC再起動したので、いま開いている `handover.md` を読んで現状を把握してほしい。
-> 前回の通信で、`metaapi_cloud_sdk`の追加とDNS解決の設定は完了し、現在はMT5の `(-10005, 'IPC timeout')` エラーの解決に取り組んでいるところだよ。
+> お疲れ様！クラッシュから復帰しました。いま開いている `handover.md` を読んで現状の進捗を把握してほしい。
+> 前回の作業で、MT5の `(-10005, 'IPC timeout')` エラー対策として、「MT5の/portable起動」および「mt5linuxブリッジを廃止してBotを直接Wine Pythonで実行するアーキテクチャへの変更」がソースコード（Dockerfile, entrypoint.sh）に実装されたところまで進んでいるよ。
 > 
-> 前回最後に、WineのIPCタイムアウト対策として、`Dockerfile` で Wine 8.0 へのダウングレードや `WINEDLLOVERRIDES="rpcss="` などの設定を行ったところまで進んでいる。
-> これからその（最後の修正をした）ソースコードをGitでpushして、CentOSサーバーで再ビルド(`docker compose up -d --build`)するから、起動後のログ確認のサポートと、もしまたIPCエラーが出た時の次のデバッグ・回避策（例えば mt5linux ではなく別のブリッジを使うなど）を一緒に考えてほしい！
+> これからその最新のソースコードをCentOSサーバーで再ビルド (`docker compose up -d --build`) してコンテナを起動するから、ログの確認サポートと、新しいアーキテクチャで正しくMT5に接続・トレードが開始できるかどうかの検証を一緒に進めてほしい！
 
 ---

@@ -3,6 +3,8 @@ Spread & Z-Score Module — compute the normalized spread and Z-score
 for a given pair of assets.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from config import ZSCORE_LOOKBACK_BARS
