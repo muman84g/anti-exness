@@ -44,5 +44,4 @@ sleep 120
 # mt5_compat.py は自動的にネイティブの MetaTrader5 を import する。
 echo "[3/3] live_main.py を Wine Python で起動中..."
 cd /app
-export PYTHONPATH="Z:\\app"
-exec wine "C:\Python39\python.exe" "Z:\app\live_main.py"
+exec wine "C:\Python39\python.exe" "C:\Python39\launcher.py"

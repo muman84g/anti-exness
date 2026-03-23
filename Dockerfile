@@ -41,8 +41,15 @@ RUN xvfb-run -a wine wineboot --init && \
     wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
     xvfb-run -a wine "C:\Python39\python.exe" Z:\\tmp\\get-pip.py && \
     sed -i 's/^#import site/import site/' /root/.wine/drive_c/Python39/python39._pth && \
-    echo 'Z:\app' >> /root/.wine/drive_c/Python39/python39._pth && \
     rm /tmp/python-3.9.13-embed.zip /tmp/get-pip.py
+
+# ── Bot起動用ランチャースクリプト ────────────────────────────
+# Wine embedded Python は ._pth / PYTHONPATH でのパス追加が不安定なため、
+# ランチャースクリプトで sys.path を明示的に設定してから Bot を起動する。
+RUN echo 'import sys, os' > /root/.wine/drive_c/Python39/launcher.py && \
+    echo 'sys.path.insert(0, r"Z:\\app")' >> /root/.wine/drive_c/Python39/launcher.py && \
+    echo 'os.chdir(r"Z:\\app")' >> /root/.wine/drive_c/Python39/launcher.py && \
+    echo 'exec(open(r"Z:\\app\\live_main.py").read())' >> /root/.wine/drive_c/Python39/launcher.py
 
 # ── Wine内の Python に全ての依存ライブラリをインストール ──────
 # Bot本体を直接Wine Pythonで実行するため、全依存をここにインストール
