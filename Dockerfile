@@ -56,6 +56,7 @@ RUN echo 'import sys, os' > /root/.wine/drive_c/Python39/launcher.py && \
 RUN xvfb-run -a wine "C:\Python39\python.exe" -m pip install --upgrade pip && \
     xvfb-run -a wine "C:\Python39\python.exe" -m pip install \
         MetaTrader5==5.0.43 \
+        "numpy<2" \
         pandas \
         pytz \
         scikit-learn \
