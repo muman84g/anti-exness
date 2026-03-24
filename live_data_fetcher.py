@@ -10,7 +10,7 @@ class MT5DataManager(BaseDataManager):
         self.path = path
         
     def connect(self) -> bool:
-        if not mt5.initialize(path=self.path, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
+        if not mt5.initialize(path=self.path, portable=True, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
             print(f"MT5 initialize failed: {mt5.last_error()}")
             return False
         
