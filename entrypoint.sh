@@ -31,12 +31,8 @@ if [ ! -f "$MT5_TERMINAL" ]; then
     exit 1
 fi
 
-echo "[2/3] MT5 ターミナルを Wine で起動中..."
-DISPLAY=:99 wine "$MT5_TERMINAL" /portable &
-MT5_PID=$!
-echo "      MT5 起動完了 (PID: $MT5_PID)"
-# MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
-sleep 120
+echo "[2/3] MT5起動はPython (mt5.initialize) に委譲します"
+# DISPLAY=:99 wine "$MT5_TERMINAL" /portable & のような手動起動は廃止
 
 # ── 3. Bot 本体の起動（Wine Python から直接実行）──────────────
 # mt5linux ブリッジを使わず、Wine 内の Python で直接 MetaTrader5 API を呼ぶ。
