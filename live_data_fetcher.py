@@ -10,8 +10,14 @@ class MT5DataManager(BaseDataManager):
         self.path = path
         
     def connect(self) -> bool:
-        if not mt5.initialize(path=self.path, portable=True, login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER, timeout=120000):
+        # Step 1: Initialize IPC with local MT5 (without login)
+        if not mt5.initialize(path=self.path, portable=True, timeout=120000):
             print(f"MT5 initialize failed: {mt5.last_error()}")
+            return False
+            
+        # Step 2: Login to Broker
+        if not mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
+            print(f"MT5 login failed: {mt5.last_error()}")
             return False
         
         # Verify if actually logged in (sometimes initialize succeeds but not logged in)
