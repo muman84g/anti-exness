@@ -15,22 +15,30 @@
 1. **`ModuleNotFoundError: No module named 'metaapi_cloud_sdk'`**: `Dockerfile` に追記して解決済み。
 2. **`Could not resolve host: mt5.exness.com`**: コンテナ内のDNS未解決問題を `docker-compose.yml` に Google DNS (`8.8.8.8`) を追加して解決済み。MT5がブローカーに繋がるようになりました。
 
-**🚨 現在直面している課題と最新の対策 🚨**
-通信テストは成功・DNSも解決したにもかかわらず、MT5 API(Python側) の初期化で `(-10005, 'IPC timeout')` エラーが発生していました。原因は、Wine環境下での MT5ターミナル と Linux Python(`mt5linux`) 間の Windows Named Pipe (IPC) の接続不良です。
+**🚨 現在の最大の壁：Wine上の IPC Timeout (-10005) 🚨**
+Wine環境下で動作するMT5ターミナルに対し、Python側から `mt5.initialize()` を使って接続しようとすると `(-10005, 'IPC timeout')` が発生し続ける問題に直面しています。
 
-**抜本的なアーキテクチャ変更（実装済み）:**
-この問題を根本的に回避するため、ソースコード（`Dockerfile`, `entrypoint.sh`）に以下の「2段階の抜本的対策」を実装した状態で、システムがクラッシュ・中断しました。
-1. **MT5ターミナルの `/portable` 起動 (`entrypoint.sh`)**: Windowsレジストリ依存を排除し、Named Pipeを正常に作成させるための対策。
-2. **`mt5linux` ブリッジの廃止と Wine Python での直接実行**: Linux側Pythonとのプロセス間通信(IPC)を完全に排除しました。`live_main.py` などのBot本体を、直接 Wine 内の Python 環境で実行する構造に変更し、必要な全依存パッケージ（`pandas`, `lightgbm`, `MetaTrader5` など）を `Dockerfile` でWine側のPythonにインストールするよう構成しました。
+**これまでに行った対策と結果：**
+1. **Wine Pythonでの直接実行**: `mt5linux`を使用せず、Bot全体をWine内のPythonで実行してみたがエラー解消せず。
+2. **MetaTrader5ライブラリのダウングレード**: 新しいIPC仕様を避けるため、Wineで実績のある旧バージョン (`5.0.43`) に固定しつつ、NumPyの競合を修正（`numpy<2`）したが、エラー解消せず。
+3. **InitializeとLoginの分離**: 接続とログインを同時に行うことによる非同期処理の衝突を避ける定番のワークアラウンドを実装したが、エラー解消せず。
 
-## 次のステップ（次回チャット再開時）
+**【結論】**
+MetaTrader5のPython APIが用いるWindows固有の「非同期Named Pipe通信」は、Linux/Wineの現在のカーネル実装では完全にエミュレートしきれないという致命的な非互換性バグがあります。月額約30ドルかかるMetaApiのような有料クラウド通信を利用しないという前提に立つと、**ローカル環境（CentOS + Wine）でのPython直接IPC接続は技術的に極めて困難（実質不可能）**であるという見解に至りました。
+
+## 次のステップ（次回チャット再開時の選択肢）
+「完全無料でのローカル稼働」を達成するため、次回からは以下のいずれかのアプローチを選択して作業を再開します。
+
+*   **選択肢A：Windows VPSへの移行（激推し・確実な王道）**
+    CentOSとDocker(Wine)による無理な運用を完全に諦め、月額1,000円前後の純粋な Windows Server VPS (ConoHa, AWS EC2など) を契約する。これが現在のPythonコード (`live_data_fetcher.py` など) を1行も変えずに、確実かつ完全に無料で運用し続けられるベストプラクティスです。
+*   **選択肢B：ZeroMQ / REST を用いた MQL5 EA ブリッジへの完全再設計**
+    OSは現在のCentOS Dockerのままで、Pythonの `MetaTrader5` パッケージへの依存をきれいサッパリ捨てる。代わりにMT5側に「ローカルTCPサーバー（ソケット）として動くMQL5のEA（Expert Advisor）」を配置し、Pythonからはソケット通信でJSONや注文を送りつけるアーキテクチャに書き直す（実装難易度は高めですが、サーバー代以外は無料です）。
 
 ---
 **【次回プロンプト用テキスト（コピーして貼り付けてください）】**
 
-> お疲れ様！クラッシュから復帰しました。いま開いている `handover.md` を読んで現状の進捗を把握してほしい。
-> 前回の作業で、MT5の `(-10005, 'IPC timeout')` エラー対策として、「MT5の/portable起動」および「mt5linuxブリッジを廃止してBotを直接Wine Pythonで実行するアーキテクチャへの変更」がソースコード（Dockerfile, entrypoint.sh）に実装されたところまで進んでいるよ。
+> お疲れ様！`handover.md` を読んで現状を把握してほしい。
+> 前回の検証で、「Wine上でのPython MetaTrader5パッケージの直接通信は、IPCバグにより不可能である」という結論に達したところまで確認している。
 > 
-> これからその最新のソースコードをCentOSサーバーで再ビルド (`docker compose up -d --build`) してコンテナを起動するから、ログの確認サポートと、新しいアーキテクチャで正しくMT5に接続・トレードが開始できるかどうかの検証を一緒に進めてほしい！
-
+> 無料で毎月稼働させるため、次回ステップに書かれている「選択肢A（Windows VPS化）」か「選択肢B（MQL5 EAへのアーキテクチャ再設計）」のどちらで進めるか決めたので、その方針で作業を開始しよう！
 ---

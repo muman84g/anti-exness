@@ -73,6 +73,10 @@ WORKDIR /app
 COPY . /app/
 # Windows側から持ってきたMT5本体をWine構成内に配置
 COPY ["MetaTrader 5", "/root/.wine/drive_c/Program Files/MetaTrader 5/"]
+
+# ── MQL5 EAの自動コンパイル ──────────────────────────────────
+RUN xvfb-run -a wine "/root/.wine/drive_c/Program Files/MetaTrader 5/metaeditor64.exe" /compile:"/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge.mq5" /log || true
+
 RUN chmod +x /app/entrypoint.sh
 
 # ── 起動スクリプト ───────────────────────────────────────────

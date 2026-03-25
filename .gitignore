@@ -18,13 +18,23 @@ live_config.py
 .gemini/
 .agent/
 
-# MT5 バイナリ・インストーラ (GitHubには上げない)
+# MT5 バイナリ・インストーラ (GitHubには上げない, ただし自作EAソースコードは除く)
 mt5setup.exe
 mt5setup_cache/
 mt5_extracted/
-MetaTrader 5/
 
-# テキストメモ類
-conohaコマンド.txt
-git_memo.txt
-フォルダ内のファイル構成一覧.txt
+# MetaTrader 5 フォルダ全体は除外するが、自作EAの BotBridge.mq5 だけはGit管理に含める
+MetaTrader 5/*
+!MetaTrader 5/MQL5/
+MetaTrader 5/MQL5/*
+!MetaTrader 5/MQL5/Experts/
+MetaTrader 5/MQL5/Experts/*
+!MetaTrader 5/MQL5/Experts/BotBridge.mq5
+
+# 機密情報 (このファイル群は絶対に上げない)
+live_config.py
+live_trades.json
+
+# テキストメモ類や引き継ぎ資料
+*.txt
+handover.md

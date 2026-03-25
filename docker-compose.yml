@@ -26,6 +26,9 @@ services:
       # live_config.py はサーバーに手動コピーしてマウント
       - ./live_config.py:/app/live_config.py:ro
 
+    # ── ネットワーク ──────────────────────────────────────────
+    network_mode: "host"
+
     # ── 環境変数 ──────────────────────────────────────────────
     environment:
       - DISPLAY=:99

@@ -38,10 +38,6 @@ echo "      MT5 起動完了 (PID: $MT5_PID)"
 # MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
 sleep 120
 
-# ── 3. Bot 本体の起動（Wine Python から直接実行）──────────────
-# mt5linux ブリッジを使わず、Wine 内の Python で直接 MetaTrader5 API を呼ぶ。
-# Wine 内では platform.system() == "Windows" となるため、
-# mt5_compat.py は自動的にネイティブの MetaTrader5 を import する。
-echo "[3/3] live_main.py を Wine Python で起動中..."
-cd /app
-exec wine "C:\Python39\python.exe" "C:\Python39\launcher.py"
+# ── 3. コンテナの常駐化 ──────────────
+echo "[3/3] Dockerコンテナを常駐化し、CentOSホストからのTCP接続を待機します..."
+tail -f /dev/null
