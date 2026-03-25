@@ -31,8 +31,8 @@ if [ ! -f "$MT5_TERMINAL" ]; then
     exit 1
 fi
 
-echo "[2/3] MT5 ターミナルを Wine で起動中..."
-DISPLAY=:99 wine "$MT5_TERMINAL" /portable &
+echo "[2/3] MT5 ターミナルを Wine で起動中 (EA自動セット)..."
+DISPLAY=:99 wine "$MT5_TERMINAL" /portable /config:Z:\\app\\startup.ini &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"
 # MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
