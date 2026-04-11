@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  exness-bot:
+    # WindowsのDocker Desktopでは network_mode: "host" がLinuxと同等に機能しないため、
+    # ローカルテスト用にデフォルトのbridgeネットワークにし、ポートを明示的にマッピングします。
+    network_mode: "bridge"
+    ports:
+      - "5555:5555"
+      - "5900:5900"
+      - "6080:6080"

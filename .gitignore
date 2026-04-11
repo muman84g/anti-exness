@@ -1,3 +1,4 @@
+# Python / Environment
 __pycache__/
 *.py[cod]
 *$py.class
@@ -11,6 +12,8 @@ ENV/
 live_trades.json
 live_config.py
 *.log
+logs_dump/
+build_log*.txt
 
 # IDE / tool files
 .vscode/
@@ -18,23 +21,39 @@ live_config.py
 .gemini/
 .agent/
 
-# MT5 バイナリ・インストーラ (GitHubには上げない, ただし自作EAソースコードは除く)
+# MT5 Binaries & System Data
 mt5setup.exe
 mt5setup_cache/
 mt5_extracted/
+*.ex5
 
-# MetaTrader 5 フォルダ全体は除外するが、自作EAの BotBridge.mq5 だけはGit管理に含める
-MetaTrader 5/*
+# Exclude MQL5 standard library dumps
+MQL5_dump/
+
+# Exclude all debug screenshots
+*.png
+
+# MetaTrader 5 Folder Strategy
+# Ignore everything in MetaTrader 5 except our specific EA source
+MetaTrader 5/**
 !MetaTrader 5/MQL5/
-MetaTrader 5/MQL5/*
 !MetaTrader 5/MQL5/Experts/
-MetaTrader 5/MQL5/Experts/*
 !MetaTrader 5/MQL5/Experts/BotBridge.mq5
 
-# 機密情報 (このファイル群は絶対に上げない)
-live_config.py
-live_trades.json
+# Explicitly ignore system subfolders inside MT5 even if they are in whitelisted paths
+MetaTrader 5/Bases/
+MetaTrader 5/Logs/
+MetaTrader 5/MQL5/Logs/
+MetaTrader 5/MQL5/Files/
+MetaTrader 5/Tester/
+MetaTrader 5/Profiles/
+MetaTrader 5/Config/
 
-# テキストメモ類や引き継ぎ資料
-*.txt
-handover.md
+# Whitelist initialization files if they are in root
+!startup.ini
+!common.ini
+!terminal.ini
+
+# Whitelist documentation
+!handover_notes.md
+!metaapi_setup_guide.md

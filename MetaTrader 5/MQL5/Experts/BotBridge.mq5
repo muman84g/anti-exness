@@ -7,7 +7,7 @@
 #property version   "1.00"
 
 int server_socket = INVALID_HANDLE;
-string HOST = "127.0.0.1";
+string HOST = "172.17.0.2";
 int PORT = 5555;
 
 int OnInit() {
@@ -27,12 +27,17 @@ void ConnectToServer() {
     if(server_socket == INVALID_HANDLE) {
         server_socket = SocketCreate();
         if(server_socket != INVALID_HANDLE) {
-            if(!SocketConnect(server_socket, HOST, PORT, 1000)) {
+            Print("Attempting to connect to Python server at ", HOST, ":", PORT, "...");
+            if(!SocketConnect(server_socket, HOST, PORT, 3000)) {
+                int err = _LastError;
+                Print("SocketConnect failed with error code: ", err);
                 SocketClose(server_socket);
                 server_socket = INVALID_HANDLE;
             } else {
-                Print("Connected to Python TCP Server on ", HOST, ":", PORT);
+                Print("Successfully connected to Python TCP Server on ", HOST, ":", PORT);
             }
+        } else {
+            Print("SocketCreate failed with error code: ", _LastError);
         }
     }
 }
@@ -45,7 +50,7 @@ void OnTimer() {
     
     uint len = SocketIsReadable(server_socket);
     if(len > 0) {
-        char buf[];
+        uchar buf[];
         int read_len = SocketRead(server_socket, buf, len, 1000);
         if(read_len > 0) {
             string raw_req = CharArrayToString(buf);
@@ -114,8 +119,8 @@ void ProcessRequest(string raw_req) {
         int type = (int)StringToInteger(fields[2]); // 0=BUY, 1=SELL
         double vol = StringToDouble(fields[3]);
         
-        MqlTradeRequest req={0};
-        MqlTradeResult res={0};
+        MqlTradeRequest req; ZeroMemory(req);
+        MqlTradeResult res; ZeroMemory(res);
         
         req.action = TRADE_ACTION_DEAL;
         req.symbol = sym;
@@ -138,8 +143,8 @@ void ProcessRequest(string raw_req) {
     else if(cmd == "CLOSE" && k >= 2) {
         ulong ticket = StringToInteger(fields[1]);
         if(PositionSelectByTicket(ticket)) {
-            MqlTradeRequest req={0};
-            MqlTradeResult res={0};
+            MqlTradeRequest req; ZeroMemory(req);
+            MqlTradeResult res; ZeroMemory(res);
             
             string sym = PositionGetString(POSITION_SYMBOL);
             long type = PositionGetInteger(POSITION_TYPE);
@@ -172,7 +177,7 @@ void ProcessRequest(string raw_req) {
     
     response += "\n"; // End of response token
     
-    char out[];
+    uchar out[];
     StringToCharArray(response, out, 0, WHOLE_ARRAY, CP_UTF8);
     int total = ArraySize(out) - 1; // Exclude null terminator
     int sent = 0;

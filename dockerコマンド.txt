@@ -26,3 +26,9 @@ sudo docker compose logs --tail=200 2>&1 | grep -v "err:toolbar" | tail -50
 
 #docker内に入るとき
 sudo docker exec -it exness-bot bash
+
+#cmdでdockerを確認
+docker compose ps
+
+#cmdでdocker内のbot状況を確認
+docker compose exec exness-bot ps aux
