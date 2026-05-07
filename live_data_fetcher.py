@@ -47,11 +47,11 @@ class MT5DataManager(BaseDataManager):
             return None
             
         rates = []
-        for line in data_str.split(";"):
+        for line in data_str.split("|"):
             if not line.strip(): continue
             parts = line.split(",")
             rates.append({
-                "time": int(parts[0]),
+                "time": parts[0],
                 "Open": float(parts[1]),
                 "High": float(parts[2]),
                 "Low": float(parts[3]),
@@ -60,7 +60,10 @@ class MT5DataManager(BaseDataManager):
             })
             
         df = pd.DataFrame(rates)
-        df['time'] = pd.to_datetime(df['time'], unit='s')
+        try:
+            df['time'] = pd.to_datetime(df['time'], format='%Y.%m.%d %H:%M')
+        except ValueError:
+            df['time'] = pd.to_datetime(df['time'])
         df.set_index('time', inplace=True)
         return df[['Open', 'High', 'Low', 'Close', 'Volume']]
 

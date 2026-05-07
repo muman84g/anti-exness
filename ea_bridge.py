@@ -1,46 +1,67 @@
-import socket
+import os
+import time
 import logging
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 class EABridgeServer:
-    def __init__(self, host='0.0.0.0', port=5555):
-        self.host = host
-        self.port = port
-        self.server = None
-        self.client_socket = None
+    def __init__(self, files_dir=None):
+        if files_dir is None:
+            # Docker container default path for MT5 /portable
+            files_dir = "/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Files"
+        
+        self.bridge_dir = files_dir
+        self.cmd_file = os.path.join(self.bridge_dir, "cmd.txt")
+        self.res_file = os.path.join(self.bridge_dir, "res.txt")
+        self.heartbeat_file = os.path.join(self.bridge_dir, "heartbeat.txt")
+        
+        logger.info(f"File IPC Bridge initialized at {self.bridge_dir}")
+
+    def start(self):
+        """No background thread needed for file IPC, but maintaining API signature"""
+        logger.info("File IPC Bridge is ready.")
 
     def start_server(self):
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.bind((self.host, self.port))
-        self.server.listen(1)
-        logging.info(f"Waiting for MT5 EA to connect on {self.host}:{self.port}...")
-        self.client_socket, addr = self.server.accept()
-        logging.info(f"MT5 EA Connected from {addr}!")
+        """Alias for start() to match some modules' expectations"""
+        self.start()
 
-    def send_command(self, cmd_string):
-        if not self.client_socket:
-            logging.error("EA not connected!")
-            return None
+    def send_command(self, cmd_str, timeout=10):
+        # Clean up stale response
+        if os.path.exists(self.res_file):
+            try:
+                os.remove(self.res_file)
+            except:
+                pass
             
+        # Write command
         try:
-            # Send command
-            self.client_socket.sendall((cmd_string + "\n").encode('utf-8'))
-            
-            # Read response until newline
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = self.client_socket.recv(8192) # 8KB chunks
-                if not chunk:
-                    logging.error("EA disconnected during read.")
-                    self.client_socket = None
-                    return None
-                data += chunk
-                
-            return data.decode('utf-8').strip()
+            with open(self.cmd_file, "w") as f:
+                f.write(cmd_str)
         except Exception as e:
-            logging.error(f"EA Bridge communication error: {e}")
-            self.client_socket = None
-            return None
+            logger.error(f"Error writing command file: {e}")
+            return "ERR|WRITE_FAILED"
+        
+        # Wait for response
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if os.path.exists(self.res_file):
+                try:
+                    with open(self.res_file, "r") as f:
+                        res = f.read().strip()
+                    os.remove(self.res_file)
+                    return res
+                except Exception as e:
+                    # File might be locked while EA is writing
+                    time.sleep(0.05)
+                    continue
+            time.sleep(0.1)
+        
+        return "ERR|TIMEOUT"
 
-# Singleton instance to be used across the app
+    def stop(self):
+        """Cleanup if needed"""
+        pass
+
+# Singleton instance to be used across all modules
 ea_bridge = EABridgeServer()
