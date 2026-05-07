@@ -32,7 +32,7 @@ COPY . /app/
 
 # ── Python インストーラと埋め込みZIPの取得 ───────────────────
 RUN wget -q -O /tmp/python-3.9.13-embed.zip https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip && \
-    wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
+    wget -q -O /tmp/get-pip.py https://bootstrap.pypa.io/pip/3.9/get-pip.py
 
 # ── 【一括セットアップ】Wine環境・Python・依存関係・EAコンパイル ──
 # 複数の RUN 命令で Xvfb を抜き差しすると不安定になるため、1つのセッションで完結させる
