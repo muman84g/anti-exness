@@ -57,6 +57,16 @@ class LiveBot:
         self.active_pairs = [] # List of pairs currently deemed highly correlated
         self.models = {} # ML models for pairs
         
+    def log_trade_csv(self, action, p_name, zscore, spread_val, leg1, t1, type1, lot1, leg2, t2, type2, lot2):
+        import csv
+        csv_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades.csv")
+        file_exists = os.path.isfile(csv_file)
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Timestamp", "Action", "Pair", "ZScore", "Spread", "Leg1", "Ticket1", "Type1", "Lot1", "Leg2", "Ticket2", "Type2", "Lot2"])
+            writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), action, p_name, round(zscore, 4), round(spread_val, 5), leg1, t1, type1, lot1, leg2, t2, type2, lot2])
+
     def start(self):
         logging.info("Starting Exness MT5 Live Bot...")
         if not self.dm.connect():
@@ -206,6 +216,7 @@ class LiveBot:
                     # Close both legs
                     self.executor.close_position(pos_info['leg1_ticket'])
                     self.executor.close_position(pos_info['leg2_ticket'])
+                    self.log_trade_csv("CLOSE", p_name, current_z, current_spread, pos_info['leg1'], pos_info['leg1_ticket'], "CLOSE", 0, pos_info['leg2'], pos_info['leg2_ticket'], "CLOSE", 0)
                     self.state.remove_open_pair(p_name)
                 continue # If already open, skip entry logic
 
@@ -258,6 +269,7 @@ class LiveBot:
         
         if ticket1 and ticket2:
             self.state.add_open_pair(p_name, mt5_leg1, ticket1, leg1_type, mt5_leg2, ticket2, leg2_type, zscore, spread_val)
+            self.log_trade_csv("OPEN", p_name, zscore, spread_val, mt5_leg1, ticket1, "SELL" if leg1_type==mt5.ORDER_TYPE_SELL else "BUY", lot1, mt5_leg2, ticket2, "SELL" if leg2_type==mt5.ORDER_TYPE_SELL else "BUY", lot2)
         else:
             logging.error(f"Failed to open complete pair {p_name}.")
             # Note: in real production, if one leg fails, we should immediately close the other.
