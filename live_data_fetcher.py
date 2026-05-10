@@ -25,10 +25,8 @@ class MT5DataManager(BaseDataManager):
         return False
         
     def disconnect(self):
-        if ea_bridge.server:
-            ea_bridge.server.close()
-        if ea_bridge.client_socket:
-            ea_bridge.client_socket.close()
+        # File IPC has no persistent server/socket objects in this version
+        pass
         
     def get_historical_data(self, mt5_symbol, timeframe, num_bars):
         """

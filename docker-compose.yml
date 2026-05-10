@@ -1,40 +1,51 @@
 version: "3.8"
 
 services:
+  # ── Bot 1 (標準設定) ──────────────────────────────────────
   exness-bot:
     build:
       context: .
       dockerfile: Dockerfile
     image: exness-bot:latest
     container_name: exness-bot
-
-    # ── クラッシュ時の自動再起動 ─────────────────────────────
     restart: always
-
-    # ── ログ設定 ─────────────────────────────────────────────
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"   # ログファイルの最大サイズ
-        max-file: "5"     # 保持するログファイル数
-
-    # ── ボリューム ────────────────────────────────────────────
-    # live_trades.json をホスト側に永続化（コンテナ再起動後も保持）
+        max-size: "10m"
+        max-file: "5"
     volumes:
       - ./live_trades.json:/app/live_trades.json
       - ./bot.log:/app/bot.log
-      # live_config.py はサーバーに手動コピーしてマウント
       - ./live_config.py:/app/live_config.py:ro
-
-    # ── ネットワーク ──────────────────────────────────────────
     network_mode: "host"
-
-    # ── 環境変数 ──────────────────────────────────────────────
     environment:
       - DISPLAY=:99
+      - VNC_PORT=5900
+      - NOVNC_PORT=6080
       - WINEPREFIX=/root/.wine
 
-    # ── DNS設定（MT5がブローカーサーバーに接続するために必要）────
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
+  # ── Bot 2 (追加設定) ──────────────────────────────────────
+  # ※2つ目のBotを使う時は、以下の # を外してください
+  # exness-bot-2:
+  #   image: exness-bot:latest
+  #   container_name: exness-bot-2
+  #   restart: always
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "5"
+  #   volumes:
+  #     - ./bot2/live_trades.json:/app/live_trades.json
+  #     - ./bot2/bot.log:/app/bot.log
+  #     - ./bot2/live_config.py:/app/live_config.py:ro
+  #   network_mode: "host"
+  #   environment:
+  #     - DISPLAY=:100
+  #     - VNC_PORT=5901
+  #     - NOVNC_PORT=6081
+  #     - WINEPREFIX=/root/.wine
+  #   dns:
+  #     - 8.8.8.8
+  #     - 8.8.4.4

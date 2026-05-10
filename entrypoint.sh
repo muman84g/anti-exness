@@ -15,21 +15,24 @@ echo "  Exness MT5 Bot コンテナ起動"
 echo "======================================"
 
 # ── 1. Xvfb（仮想ディスプレイ）の起動 ──────────────────────
-echo "[1/3] Xvfb を起動中..."
+echo "[1/3] Xvfb を起動中 (Display: ${DISPLAY:-:99})..."
 export WINEDEBUG=-all
-rm -f /tmp/.X99-lock
-Xvfb :99 -screen 0 1024x768x16 &
+rm -f /tmp/.X${DISPLAY#:}*-lock
+Xvfb ${DISPLAY:-:99} -screen 0 1024x768x16 &
 XVFB_PID=$!
 sleep 3
 echo "      Xvfb 起動完了 (PID: $XVFB_PID)"
 
 # ── 1.1 VNC サーバーの起動 ──────────────────────────────
-echo "[1.1/3] VNC サーバーを起動中 (PW: trading)..."
-x11vnc -display :99 -passwd trading -rfbport 5900 -forever -shared &
+VNC_PORT=${VNC_PORT:-5900}
+NOVNC_PORT=${NOVNC_PORT:-6080}
+
+echo "[1.1/3] VNC サーバーを起動中 (Port: $VNC_PORT, PW: trading)..."
+x11vnc -display ${DISPLAY:-:99} -passwd trading -rfbport $VNC_PORT -forever -shared &
 sleep 2
 
-echo "[1.2/3] noVNC (Web GUI) サーバーを起動中..."
-websockify --web /usr/share/novnc/ 6080 localhost:5900 &
+echo "[1.2/3] noVNC (Web GUI) サーバーを起動中 (Port: $NOVNC_PORT)..."
+websockify --web /usr/share/novnc/ $NOVNC_PORT localhost:$VNC_PORT &
 echo "      VNC 起動完了"
 
 # ── 1.2 winedbg の物理的な無効化 ───────────────────────────
@@ -44,7 +47,7 @@ echo "      winedbg 無効化完了"
 
 # ── 1.5 Wine レジストリ調整（アンチデバッグ回避） ───────────
 echo "[1.5/3] Wine レジストリ調整を適用中..."
-export DISPLAY=:99
+export DISPLAY=${DISPLAY:-:99}
 # export WINEARCH=win64
 export WINEPREFIX=/root/.wine
 wine regedit /S /app/hide_wine.reg && wineserver -w
@@ -62,7 +65,7 @@ fi
 echo "[2/3] MT5 ターミナルを Wine で起動中 (EA自動セット)..."
 # アップデートダイアログを物理的に無効化
 rm -rf "${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/WebInstall"
-DISPLAY=:99 wine "$MT5_TERMINAL" /portable /experts /config:Z:\\app\\startup.ini &
+DISPLAY=${DISPLAY:-:99} wine "$MT5_TERMINAL" /portable /experts /config:Z:\\app\\startup.ini &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"
 # MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
