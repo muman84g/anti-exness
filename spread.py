@@ -74,24 +74,42 @@ def compute_half_life_15m(spread: pd.Series) -> float:
     hl_bars = -np.log(2) / np.log(phi)
     return hl_bars * 15  # convert to minutes
 
-def calculate_spread_history(df_prices, leg1, leg2):
+def calculate_spread_history(s1, s2, window=48):
     """
-    Wrapper for live_main.py.
-    Calculates spread using OLS beta and returns a DataFrame with 'Spread' and 'Z-Score'.
+    Calculate spread and Z-score history for a pair of price series.
+
+    Args:
+        s1: pd.Series of prices for leg 1
+        s2: pd.Series of prices for leg 2  (or pd.DataFrame + leg1_col, leg2_col)
+        window: lookback window for Z-score
+
+    Returns:
+        pd.DataFrame with 'spread' and 'zscore' columns
     """
-    price_a = df_prices[leg1]
-    price_b = df_prices[leg2]
-    
-    # Compute beta dynamically for the history provided
+    # Support both call styles:
+    #   calculate_spread_history(series_a, series_b)
+    #   calculate_spread_history(df, col_a, col_b)  (legacy)
+    if isinstance(s1, pd.DataFrame):
+        # Legacy call: (df, leg1_col, leg2_col)
+        df_prices = s1
+        leg1 = s2
+        leg2 = window  # 3rd positional arg
+        price_a = df_prices[leg1]
+        price_b = df_prices[leg2]
+        window = 48  # reset to default
+    else:
+        price_a = s1
+        price_b = s2
+
     from pairs import _compute_hedge_ratio
     beta = _compute_hedge_ratio(price_a, price_b)
-    
+
     spread_values = compute_spread(price_a, price_b, beta)
-    zscore_values = compute_zscore(spread_values)
-    
+    zscore_values = compute_zscore(spread_values, lookback=window)
+
     res = pd.DataFrame(index=spread_values.index)
-    res['Spread'] = spread_values
-    res['Z-Score'] = zscore_values
+    res['spread'] = spread_values
+    res['zscore'] = zscore_values
     return res
 
 def compute_rolling_zscore(spread_df, window=48):

@@ -22,29 +22,27 @@ logger = logging.getLogger(__name__)
 def create_ml_features(spread_df):
     """
     Generates features for ML model from spread data.
-    spread_df: DataFrame with 'Spread' and 'Z-Score' columns (from spread.py)
+    spread_df: DataFrame with 'spread' and 'zscore' columns (from spread.py)
     """
     df = spread_df.copy()
     
     # 1. Z-Score (already exists or compute it if missing)
-    if 'Z-Score' not in df.columns:
-        # Fallback if compute_rolling_zscore wasn't called yet
-        # (Using local import to avoid circular dependency if any)
+    if 'zscore' not in df.columns:
         from spread import compute_rolling_zscore
-        df['Z-Score'] = compute_rolling_zscore(df, window=48)
+        df['zscore'] = compute_rolling_zscore(df, window=48)
         
     # 2. Volatility (Standard Deviation of spread)
-    df['volatility'] = df['Spread'].rolling(window=20).std()
+    df['volatility'] = df['spread'].rolling(window=20).std()
     
     # 3. Z-Score Momentum (change in z-score)
-    df['z_mom'] = df['Z-Score'].diff(3)
+    df['z_mom'] = df['zscore'].diff(3)
     
     # 4. Hour of day (UTC)
     df['hour_utc'] = df.index.hour
     
     # Feature columns
     features = pd.DataFrame(index=df.index)
-    features['z_entry'] = df['Z-Score']
+    features['z_entry'] = df['zscore']
     features['volatility'] = df['volatility']
     features['z_mom'] = df['z_mom']
     features['hour_utc'] = df['hour_utc']
@@ -57,10 +55,10 @@ def create_labels(spread_df, entry_z_threshold, lookahead=24):
     lookahead: How many bars to look forward for reversion.
     """
     df = spread_df.copy()
-    if 'Z-Score' not in df.columns:
+    if 'zscore' not in df.columns:
         return pd.Series(dtype=float)
 
-    z = df['Z-Score']
+    z = df['zscore']
     targets = pd.Series(index=df.index, data=np.nan, name='Target')
     
     for i in range(len(df) - lookahead):

@@ -13,7 +13,6 @@ import logging
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.tsa.stattools import adfuller
 from config import (
     CATEGORIES,
     LT_CORR_THRESHOLD,

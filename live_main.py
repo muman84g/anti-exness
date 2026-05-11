@@ -32,7 +32,8 @@ from live_state import LiveState
 
 from ml_strategy import create_ml_features, create_labels, train_ml_model
 from pairs import find_cointegrated_pairs
-from spread import calculate_spread_history, compute_rolling_zscore
+from spread import calculate_spread_history
+from live_executor import ORDER_TYPE_BUY, ORDER_TYPE_SELL
 
 # --- Settings ---
 POLL_INTERVAL_SECONDS = 60 * 15 # Run every 15 minutes
@@ -150,11 +151,23 @@ class LiveBot:
                     s1 = df1.loc[common_idx, 'Close']
                     s2 = df2.loc[common_idx, 'Close']
                     spread_df = calculate_spread_history(s1, s2)
-                    spread_df = compute_rolling_zscore(spread_df)
-                    df_ml = create_ml_features(spread_df)
-                    df_ml = create_labels(df_ml)
-                    model = train_ml_model(df_ml)
-                    self.models[f"{p1}_{p2}"] = model
+                    
+                    # Create ML features and labels
+                    df_features = create_ml_features(spread_df)
+                    labels = create_labels(spread_df, entry_z_threshold=ZSCORE_ENTRY)
+                    
+                    # Align features and labels, drop NaN
+                    df_features['target'] = labels
+                    df_ml = df_features.dropna()
+                    
+                    if len(df_ml) > 50:
+                        X = df_ml.drop(columns=['target'])
+                        y = df_ml['target']
+                        model = train_ml_model(X, y)
+                        self.models[f"{p1}_{p2}"] = model
+                        logging.info(f"Trained ML model for {p1}_{p2} ({len(df_ml)} samples)")
+                    else:
+                        logging.info(f"Not enough ML samples for {p1}_{p2} ({len(df_ml)})")
 
     def check_entry_conditions(self):
         if not self.active_pairs:
@@ -172,7 +185,6 @@ class LiveBot:
             common_idx = df1.index.intersection(df2.index)
             s1 = df1.loc[common_idx, 'Close']; s2 = df2.loc[common_idx, 'Close']
             spread_df = calculate_spread_history(s1, s2)
-            spread_df = compute_rolling_zscore(spread_df)
             latest = spread_df.iloc[-1]
             zscore = latest['zscore']
             
@@ -185,13 +197,16 @@ class LiveBot:
                 if model:
                     ml_feat = create_ml_features(spread_df.tail(20)).iloc[-1:]
                     if 'target' in ml_feat.columns: ml_feat = ml_feat.drop(columns=['target'])
-                    pred_prob = model.predict_proba(ml_feat)[0][1]
-                    if pred_prob < 0.5:
-                        logging.info(f"ML vetoed entry for {p1}_{p2} (Prob: {pred_prob:.2f})")
-                        continue
+                    try:
+                        pred_prob = model.predict_proba(ml_feat)[0][1]
+                        if pred_prob < 0.5:
+                            logging.info(f"ML vetoed entry for {p1}_{p2} (Prob: {pred_prob:.2f})")
+                            continue
+                    except Exception as e:
+                        logging.warning(f"ML prediction failed for {p1}_{p2}: {e}")
 
                 logging.info(f"ENTRY SIGNAL: {action} for {p1}_{p2} (ZScore: {zscore:.2f})")
-                res = self.executor.execute_pair_trade(p1, p2, action, RISK_USD)
+                res = self._execute_pair_trade(p1, p2, action, RISK_USD)
                 if res:
                     self.log_trade_csv("ENTRY_" + action, f"{p1}_{p2}", zscore, latest['spread'], p1, res['ticket1'], res['type1'], res['lot1'], p2, res['ticket2'], res['type2'], res['lot2'])
                     self.state.open_position(p1, p2, res)
@@ -208,7 +223,6 @@ class LiveBot:
             common_idx = df1.index.intersection(df2.index)
             s1 = df1.loc[common_idx, 'Close']; s2 = df2.loc[common_idx, 'Close']
             spread_df = calculate_spread_history(s1, s2)
-            spread_df = compute_rolling_zscore(spread_df)
             zscore = spread_df.iloc[-1]['zscore']
             
             should_exit = False
@@ -217,10 +231,64 @@ class LiveBot:
                 
             if should_exit:
                 logging.info(f"EXIT SIGNAL: for {p1}_{p2} (ZScore: {zscore:.2f})")
-                res = self.executor.close_pair_trade(pos)
+                res = self._close_pair_trade(pos)
                 if res:
                     self.log_trade_csv("EXIT", f"{p1}_{p2}", zscore, spread_df.iloc[-1]['spread'], p1, res['ticket1'], "CLOSE", 0, p2, res['ticket2'], "CLOSE", 0)
                     self.state.close_position(p1, p2)
+
+    def _execute_pair_trade(self, p1, p2, action, risk_usd):
+        """
+        Execute a pair trade: open two opposing positions.
+        action: 'SELL_SPREAD' (short A, long B) or 'BUY_SPREAD' (long A, short B)
+        """
+        mt5_sym1 = YF_TO_MT5[p1]
+        mt5_sym2 = YF_TO_MT5[p2]
+        
+        lot1 = self.executor.calculate_lot_size(mt5_sym1, risk_usd, 100)
+        lot2 = self.executor.calculate_lot_size(mt5_sym2, risk_usd, 100)
+        
+        if action == "SELL_SPREAD":
+            # Short A, Long B
+            type1, type2 = ORDER_TYPE_SELL, ORDER_TYPE_BUY
+        else:
+            # Long A, Short B
+            type1, type2 = ORDER_TYPE_BUY, ORDER_TYPE_SELL
+        
+        ticket1 = self.executor.open_position(mt5_sym1, type1, lot1)
+        if ticket1 is None:
+            logging.error(f"Failed to open leg 1: {mt5_sym1}")
+            return None
+            
+        ticket2 = self.executor.open_position(mt5_sym2, type2, lot2)
+        if ticket2 is None:
+            logging.error(f"Failed to open leg 2: {mt5_sym2}. Closing leg 1.")
+            self.executor.close_position(ticket1)
+            return None
+        
+        type1_str = "SELL" if type1 == ORDER_TYPE_SELL else "BUY"
+        type2_str = "SELL" if type2 == ORDER_TYPE_SELL else "BUY"
+        
+        return {
+            'action': action,
+            'ticket1': ticket1, 'type1': type1_str, 'lot1': lot1,
+            'ticket2': ticket2, 'type2': type2_str, 'lot2': lot2,
+        }
+
+    def _close_pair_trade(self, pos):
+        """
+        Close both legs of a pair trade.
+        """
+        t1 = pos['ticket1']
+        t2 = pos['ticket2']
+        
+        ok1 = self.executor.close_position(t1)
+        ok2 = self.executor.close_position(t2)
+        
+        if ok1 and ok2:
+            return {'ticket1': t1, 'ticket2': t2}
+        else:
+            logging.error(f"Partial close failure: t1={ok1}, t2={ok2}")
+            return {'ticket1': t1, 'ticket2': t2}  # Still return for logging
 
 if __name__ == "__main__":
     try:

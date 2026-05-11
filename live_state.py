@@ -56,7 +56,10 @@ class LiveState:
         self.save()
 
     def close_position(self, p1, p2):
-        self.state["open_positions"] = [p for p in self.state["open_positions"] if not (p["p1"] == p1 and p["p2"] == p2)]
+        self.state["open_positions"] = [
+            p for p in self.state["open_positions"]
+            if not ((p["p1"] == p1 and p["p2"] == p2) or (p["p1"] == p2 and p["p2"] == p1))
+        ]
         self.save()
 
     def get_last_update_time(self):

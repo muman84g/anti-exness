@@ -21,7 +21,6 @@ TICKERS_INFO = {
     "CHF/JPY":  {"symbol": "CHFJPY=X",   "category": "Forex"},
     "NZD/JPY":  {"symbol": "NZDJPY=X",   "category": "Forex"},
     "CAD/JPY":  {"symbol": "CADJPY=X",   "category": "Forex"},
-    "CHF/JPY":  {"symbol": "CHFJPY=X",   "category": "Forex"},
     "HKD/JPY":  {"symbol": "HKDJPY=X",   "category": "Forex"},
     "GBP/USD":  {"symbol": "GBPUSD=X",   "category": "Forex"},
     "GBP/AUD":  {"symbol": "GBPAUD=X",   "category": "Forex"},
