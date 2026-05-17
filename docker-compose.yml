@@ -25,27 +25,50 @@ services:
       - NOVNC_PORT=6080
       - WINEPREFIX=/root/.wine
 
-  # ── Bot 2 (追加設定) ──────────────────────────────────────
-  # ※2つ目のBotを使う時は、以下の # を外してください
-  # exness-bot-2:
-  #   image: exness-bot:latest
-  #   container_name: exness-bot-2
-  #   restart: always
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "5"
-  #   volumes:
-  #     - ./bot2/live_trades.json:/app/live_trades.json
-  #     - ./bot2/bot.log:/app/bot.log
-  #     - ./bot2/live_config.py:/app/live_config.py:ro
-  #   network_mode: "host"
-  #   environment:
-  #     - DISPLAY=:100
-  #     - VNC_PORT=5901
-  #     - NOVNC_PORT=6081
-  #     - WINEPREFIX=/root/.wine
-  #   dns:
-  #     - 8.8.8.8
-  #     - 8.8.4.4
+  # ── Bot 2 (S5用設定) ──────────────────────────────────────
+  exness-bot-2:
+    image: exness-bot:latest
+    container_name: exness-bot-2
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot2/live_trades.json:/app/live_trades.json
+      - ./bot2/logs:/app/logs
+      - ./live_config.py:/app/live_config.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:100
+      - VNC_PORT=5901
+      - NOVNC_PORT=6081
+      - WINEPREFIX=/root/.wine
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+  # ── Bot 3 (S6用設定) ──────────────────────────────────────
+  exness-bot-3:
+    image: exness-bot:latest
+    container_name: exness-bot-3
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot3/live_trades.json:/app/live_trades.json
+      - ./bot3/logs:/app/logs
+      - ./live_config.py:/app/live_config.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:101
+      - VNC_PORT=5902
+      - NOVNC_PORT=6082
+      - WINEPREFIX=/root/.wine
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
