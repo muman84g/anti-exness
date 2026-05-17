@@ -16,7 +16,7 @@ services:
         max-file: "5"
     volumes:
       - ./live_trades.json:/app/live_trades.json
-      - ./bot.log:/app/bot.log
+      - ./logs:/app/logs
       - ./live_config.py:/app/live_config.py:ro
     network_mode: "host"
     environment:
