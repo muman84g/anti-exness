@@ -110,7 +110,13 @@ string ProcessRequest(string raw_req) {
         if(trade.PositionOpen(sym, type, lot, 0, 0, 0)) {
             ulong ticket = trade.ResultOrder();
             if(ticket == 0) ticket = trade.ResultDeal();
-            return "OK|" + IntegerToString(ticket);
+            double exec_price = trade.ResultPrice();
+            if(exec_price == 0) {
+                if(PositionSelectByTicket(ticket)) {
+                    exec_price = PositionGetDouble(POSITION_PRICE_OPEN);
+                }
+            }
+            return "OK|" + IntegerToString(ticket) + "|" + DoubleToString(exec_price, 5);
         } else {
             return "ERR|" + IntegerToString(trade.ResultRetcode());
         }
@@ -119,8 +125,22 @@ string ProcessRequest(string raw_req) {
     // Command: CLOSE|TICKET
     if(cmd == "CLOSE" && k >= 2) {
         ulong ticket = (ulong)StringToInteger(fields[1]);
+        double open_price = 0.0;
+        double lot = 0.0;
+        double profit = 0.0;
+        double close_price = 0.0;
+        string symbol = "";
+        
+        if(PositionSelectByTicket(ticket)) {
+            open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+            lot = PositionGetDouble(POSITION_VOLUME);
+            profit = PositionGetDouble(POSITION_PROFIT);
+            symbol = PositionGetString(POSITION_SYMBOL);
+            close_price = SymbolInfoDouble(symbol, (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SYMBOL_BID : SYMBOL_ASK);
+        }
+        
         if(trade.PositionClose(ticket)) {
-            return "OK|Closed";
+            return "OK|Closed|" + DoubleToString(lot, 2) + "|" + DoubleToString(open_price, 5) + "|" + DoubleToString(close_price, 5) + "|" + DoubleToString(profit, 2);
         } else {
             return "ERR|" + IntegerToString(trade.ResultRetcode());
         }

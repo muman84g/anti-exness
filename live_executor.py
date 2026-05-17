@@ -6,6 +6,31 @@ from ea_bridge import ea_bridge
 ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
 
+class Ticket(int):
+    """
+    Subclass of int that behaves exactly like a standard integer (ticket ID),
+    but holds the entry price attribute for logging purposes.
+    """
+    def __new__(cls, ticket_id, price=0.0):
+        obj = super(Ticket, cls).__new__(cls, ticket_id)
+        obj.price = price
+        return obj
+
+class CloseResult:
+    """
+    Result class that behaves like a boolean (for backward compatibility),
+    but holds detailed trade exit information (lot size, open/close price, and profit).
+    """
+    def __init__(self, success, lot=0.0, open_price=0.0, close_price=0.0, profit=0.0):
+        self.success = success
+        self.lot = lot
+        self.open_price = open_price
+        self.close_price = close_price
+        self.profit = profit
+
+    def __bool__(self):
+        return self.success
+
 class SymbolInfoDummy:
     pass
 
@@ -70,8 +95,12 @@ class MT5Executor(BaseExecutor):
             logging.error(f"EA Order failed for {symbol}: {res}")
             return None
             
-        ticket = int(res.split("|")[1])
-        logging.info(f"Order filled via EA / Ticket: {ticket}")
+        parts = res.split("|")
+        ticket_id = int(parts[1])
+        exec_price = float(parts[2]) if len(parts) > 2 else 0.0
+        
+        ticket = Ticket(ticket_id, exec_price)
+        logging.info(f"Order filled via EA / Ticket: {ticket} (Price: {ticket.price})")
         return ticket
 
     def close_position(self, ticket, deviation=20):
@@ -84,7 +113,15 @@ class MT5Executor(BaseExecutor):
         
         if res and res.startswith("OK|"):
             logging.info(f"Position {ticket} closed successfully via EA.")
-            return True
+            parts = res.split("|")
+            
+            # Expected from EA: OK|Closed|{lot}|{open_price}|{close_price}|{profit}
+            lot = float(parts[2]) if len(parts) > 2 else 0.0
+            open_price = float(parts[3]) if len(parts) > 3 else 0.0
+            close_price = float(parts[4]) if len(parts) > 4 else 0.0
+            profit = float(parts[5]) if len(parts) > 5 else 0.0
+            
+            return CloseResult(True, lot, open_price, close_price, profit)
             
         logging.error(f"EA Close failed for {ticket}: {res}")
-        return False
+        return CloseResult(False)
