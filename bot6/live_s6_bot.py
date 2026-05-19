@@ -36,10 +36,8 @@ import pandas as pd
 import numpy as np
 import pytz
 
-# ログ設定
-LOG_DIR = "/app/logs"
-if os.name == 'nt':
-    LOG_DIR = "Z:/app/logs"
+# ログ設定 (スクリプトと同階層にlogsフォルダを作成)
+LOG_DIR = os.path.join(script_dir, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, "s6_bot.log")
@@ -87,7 +85,7 @@ RISK_USD = 10.0                    # 1トレードの許容リスク (USD)
 MTF_SMA_1H_BARS = 240              # 1H足SMA20相当 (5分足240本)
 MTF_SMA_4H_BARS = 960              # 4H足SMA20相当 (5分足960本)
 
-STATE_FILE = "s6_bot_state.json"
+STATE_FILE = os.path.join(script_dir, "s6_bot_state.json")
 
 class S6LiveBot:
     def __init__(self):

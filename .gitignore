@@ -57,3 +57,13 @@ MetaTrader 5/Config/
 # Whitelist documentation
 !handover_notes.md
 !metaapi_setup_guide.md
+
+# Large files and temporary logs
+MetaTrader 5 copy.zip
+ea_log_*.txt
+compile_stdout.txt
+terminal_orig.ini
+terminal_utf8.ini
+common_check.ini
+common_orig.ini
+common_utf8.ini

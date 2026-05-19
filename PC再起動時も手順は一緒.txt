@@ -1,0 +1,23 @@
+ありがとう！PC再起動した場合ってどこまで実施することになる？手順は一緒？
+
+はい、手順はまったく一緒です！ 理由を簡単に説明すると：
+
+PC再起動後に何が起きるか
+コンポーネント	PC再起動後	自動復帰？
+Docker Desktop	停止する	⚠️ 設定次第（※）
+exness-bot コンテナ	停止する	✅ Docker起動時に自動で Up になる
+MT5 (terminal64.exe)	コンテナ起動と同時に起動	✅ entrypoint.sh が自動起動
+BotBridge EA	MT5起動と同時にアタッチ	✅ 前回の設定が保持される
+live_main.py（ボット）	停止したまま	❌ 手動起動が必要
+つまり
+唯一の手動作業は ステップ4のコマンド1行だけ：
+
+docker exec -d exness-bot bash -c "cd /app && python3 live_main.py > /app/bot.log 2>&1"
+Docker Desktop さえ立ち上がっていれば、MT5もEAも自動で復帰するので、ボットの起動コマンドだけ叩けばOKです。
+
+※ Docker Desktop の自動起動設定
+もしPC起動時に Docker Desktop も自動で立ち上げたいなら：
+
+Docker Desktop → ⚙️ Settings → General → 「Start Docker Desktop when you sign in to Windows」にチェック
+
+これを有効にしておけば、PC再起動後にやることは本当に コマンド1行だけ になります。

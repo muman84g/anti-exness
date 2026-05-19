@@ -1,0 +1,42 @@
+0.データをdockerに入れる
+sudo docker cp live_s4_bot.py exness-bot:/app/live_s4_bot.py
+
+
+1.コンテナを起動
+sudo docker compose down
+sudo docker compose up -d exness-bot
+
+2.noVNCで画面とBotBridgeのセットとAlgoの許可
+http://118.27.2.117:6080/vnc.html → s4_bot
+http://118.27.2.117:6081/vnc.html → s5_bot
+http://118.27.2.117:6082/vnc.html → s6_bot
+
+
+3.Botファイルの起動
+sudo docker exec -d exness-bot wine "C:/Python39/python.exe" "C:/Python39/launcher.py"
+sudo docker exec -d exness-bot wine "C:/Python39/python.exe" "Z:/app/live_s4_bot.py"
+※-d　はバックグランドの意味
+sudo docker exec -it exness-bot-2 wine "C:/Python39/python.exe" "Z:/app/live_s5_bot.py"
+sudo docker exec -it exness-bot-3 wine "C:/Python39/python.exe" "Z:/app/live_s6_bot.py"
+
+※log自体確認したかったら上記手動の方で実行
+
+4.dockerが何個動いているか確認
+sudo docker ps
+→止めたい場合は「sudo docker stop exness-bot」
+
+5.コンテナ内のタスク一覧を表示
+sudo docker exec exness-bot wine tasklist
+
+6.ログの確認
+sudo docker exec exness-bot cat "/app/bot.log"
+
+
+・logの中身を空にしたい
+sudo truncate -s 0 logs/bot.log
+
+
+・ファイルをコンテナ内の /app ディレクトリにコピー
+sudo docker cp live_s4_bot.py exness-bot:/app/live_s4_bot.py
+
+/home/muu/python_program/anti-exness/logs/s4_bot.log

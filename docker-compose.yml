@@ -1,13 +1,13 @@
 version: "3.8"
 
 services:
-  # ── Bot 1 (標準設定) ──────────────────────────────────────
-  exness-bot:
+  # ── Bot 4 (S7用設定) ──────────────────────────────────────
+  exness-bot-7:
     build:
       context: .
       dockerfile: Dockerfile
     image: exness-bot:latest
-    container_name: exness-bot
+    container_name: exness-bot-7
     restart: always
     logging:
       driver: "json-file"
@@ -15,9 +15,9 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./live_trades.json:/app/live_trades.json
-      - ./logs:/app/logs
-      - ./live_config.py:/app/live_config.py:ro
+      - ./bot7/s7_bot_state.json:/app/bot7/s7_bot_state.json
+      - ./bot7/logs:/app/bot7/logs
+      - ./bot7/live_config.py:/app/bot7/live_config.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:99
@@ -50,9 +50,9 @@ services:
       - 8.8.4.4
 
   # ── Bot 3 (S6用設定) ──────────────────────────────────────
-  exness-bot-3:
+  exness-bot-6:
     image: exness-bot:latest
-    container_name: exness-bot-3
+    container_name: exness-bot-6
     restart: always
     logging:
       driver: "json-file"
@@ -60,9 +60,9 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot3/live_trades.json:/app/live_trades.json
-      - ./bot3/logs:/app/logs
-      - ./live_config.py:/app/live_config.py:ro
+      - ./bot6/s6_bot_state.json:/app/bot6/s6_bot_state.json
+      - ./bot6/logs:/app/bot6/logs
+      - ./bot6/live_config.py:/app/bot6/live_config.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:101

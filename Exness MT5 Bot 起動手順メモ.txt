@@ -1,0 +1,19 @@
+Exness MT5 Bot 起動手順メモ
+
+
+PC起動後の手順
+1. Docker Desktop → 自動起動設定済みなので何もしなくてOK
+
+2. MT5の確認（コンテナは自動起動するが、MT5は起動しないことがある）
+
+docker exec exness-bot bash -c "ps aux | grep terminal64 | grep -v grep"
+表示あり → ステップ3へ
+表示なし → 以下で起動して 60秒待つ：
+docker exec -d exness-bot bash -c "export DISPLAY=:99 WINEDEBUG=-all WINEPREFIX=/root/.wine; wine '/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe' /portable /config:Z:\\app\\startup.ini &"
+3. ボット起動
+
+docker exec -d exness-bot bash -c "cd /app && python3 live_main.py > /app/bot.log 2>&1"
+4. 確認
+
+docker exec exness-bot bash -c "ps aux | grep live_main | grep -v grep && tail -n 5 /app/bot.log"
+基本は 2 → 3 → 4 の3コマンドだけです！
