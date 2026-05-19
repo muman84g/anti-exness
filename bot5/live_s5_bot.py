@@ -35,9 +35,7 @@ import pandas as pd
 import pytz
 
 # ログ設定
-LOG_DIR = "/app/logs"
-if os.name == 'nt':
-    LOG_DIR = "Z:/app/logs"
+LOG_DIR = os.path.join(script_dir, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, "s5_bot.log")
@@ -77,7 +75,7 @@ ENTRY_DELAY_MIN = 0          # エントリー遅延 (分)
 HOLD_PERIOD_MIN = 60         # 保有期間 (分)
 RISK_USD = 10.0              # 1トレードの許容リスク (USD)
 
-STATE_FILE = "s5_bot_state.json"
+STATE_FILE = os.path.join(script_dir, "s5_bot_state.json")
 
 class S5LiveBot:
     def __init__(self):

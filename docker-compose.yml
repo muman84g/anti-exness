@@ -25,10 +25,10 @@ services:
       - NOVNC_PORT=6080
       - WINEPREFIX=/root/.wine
 
-  # ── Bot 2 (S5用設定) ──────────────────────────────────────
-  exness-bot-2:
+  # ── Bot 5 (S5用設定) ──────────────────────────────────────
+  exness-bot-5:
     image: exness-bot:latest
-    container_name: exness-bot-2
+    container_name: exness-bot-5
     restart: always
     logging:
       driver: "json-file"
@@ -36,9 +36,9 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot2/live_trades.json:/app/live_trades.json
-      - ./bot2/logs:/app/logs
-      - ./live_config.py:/app/live_config.py:ro
+      - ./bot5/s5_bot_state.json:/app/bot5/s5_bot_state.json
+      - ./bot5/logs:/app/bot5/logs
+      - ./bot5/live_config.py:/app/bot5/live_config.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:100
@@ -49,7 +49,7 @@ services:
       - 8.8.8.8
       - 8.8.4.4
 
-  # ── Bot 3 (S6用設定) ──────────────────────────────────────
+  # ── Bot 6 (S6用設定) ──────────────────────────────────────
   exness-bot-6:
     image: exness-bot:latest
     container_name: exness-bot-6
@@ -68,6 +68,30 @@ services:
       - DISPLAY=:101
       - VNC_PORT=5902
       - NOVNC_PORT=6082
+      - WINEPREFIX=/root/.wine
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+  # ── Bot 4 (S4用設定) ──────────────────────────────────────
+  exness-bot-4:
+    image: exness-bot:latest
+    container_name: exness-bot-4
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot4/s4_bot_state.json:/app/bot4/s4_bot_state.json
+      - ./bot4/logs:/app/bot4/logs
+      - ./bot4/live_config.py:/app/bot4/live_config.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:102
+      - VNC_PORT=5903
+      - NOVNC_PORT=6083
       - WINEPREFIX=/root/.wine
     dns:
       - 8.8.8.8

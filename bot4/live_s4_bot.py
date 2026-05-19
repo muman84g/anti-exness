@@ -33,9 +33,7 @@ if script_dir not in sys.path:
 os.chdir(script_dir)
 
 # --- Logging Setup ---
-LOG_DIR = "/app/logs"
-if os.name == 'nt':
-    LOG_DIR = "Z:/app/logs"
+LOG_DIR = os.path.join(script_dir, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, "s4_bot.log")
@@ -67,7 +65,7 @@ ENTRY_DELAY_MIN = 30
 HOLD_PERIOD_MIN = 60
 RISK_USD = 10.0 # 1回のトレードのリスク許容額 (USD)
 
-STATE_FILE = "s4_bot_state.json"
+STATE_FILE = os.path.join(script_dir, "s4_bot_state.json")
 
 class S4LiveBot:
     def __init__(self):
