@@ -1,11 +1,67 @@
 version: "3.8"
 
 services:
-  # ── Bot 7 (S7用設定) ──────────────────────────────────────
-  exness-bot-7:
+  # ── Bot 8 (S8用設定) ──────────────────────────────────────
+  exness-bot-8:
     build:
       context: .
       dockerfile: Dockerfile
+    image: exness-bot:latest
+    container_name: exness-bot-8
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot8/s8_bot_state.json:/app/bot8/s8_bot_state.json
+      - ./bot8/logs:/app/bot8/logs
+      - ./bot8/live_config.py:/app/bot8/live_config.py:ro
+      - ./bot8/live_s8_bot.py:/app/bot8/live_s8_bot.py:ro
+      - ./bot8/live_data_fetcher.py:/app/bot8/live_data_fetcher.py:ro
+      - ./bot8/live_executor.py:/app/bot8/live_executor.py:ro
+      - ./bot8/base_interfaces.py:/app/bot8/base_interfaces.py:ro
+      - ./bot8/ea_bridge.py:/app/bot8/ea_bridge.py:ro
+      - ./bot8/s8_anomaly_windows.json:/app/bot8/s8_anomaly_windows.json:ro
+      - ./bot8/s8_lgbm_model_JP225m.txt:/app/bot8/s8_lgbm_model_JP225m.txt:ro
+      - ./bot8/s8_lgbm_model_XCUUSDm.txt:/app/bot8/s8_lgbm_model_XCUUSDm.txt:ro
+      - ./bot8/s8_pipeline_meta.json:/app/bot8/s8_pipeline_meta.json:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:103
+      - VNC_PORT=5904
+      - NOVNC_PORT=6084
+      - WINEPREFIX=/root/.wine
+
+  # ── Bot 9 (S9用設定) ──────────────────────────────────────
+  exness-bot-9:
+    image: exness-bot:latest
+    container_name: exness-bot-9
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot9/s9_bot_state.json:/app/bot9/s9_bot_state.json
+      - ./bot9/logs:/app/bot9/logs
+      - ./bot9/live_config.py:/app/bot9/live_config.py:ro
+      - ./bot9/live_s9_bot.py:/app/bot9/live_s9_bot.py:ro
+      - ./bot9/live_data_fetcher.py:/app/bot9/live_data_fetcher.py:ro
+      - ./bot9/live_executor.py:/app/bot9/live_executor.py:ro
+      - ./bot9/base_interfaces.py:/app/bot9/base_interfaces.py:ro
+      - ./bot9/ea_bridge.py:/app/bot9/ea_bridge.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:104
+      - VNC_PORT=5905
+      - NOVNC_PORT=6085
+      - WINEPREFIX=/root/.wine
+
+  # ── Bot 7 (S7用設定) ──────────────────────────────────────
+  exness-bot-7:
     image: exness-bot:latest
     container_name: exness-bot-7
     restart: always
