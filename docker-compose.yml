@@ -60,6 +60,32 @@ services:
       - NOVNC_PORT=6085
       - WINEPREFIX=/root/.wine
 
+  # ── Bot 10 (S10用設定) ─────────────────────────────────────
+  exness-bot-10:
+    image: exness-bot:latest
+    container_name: exness-bot-10
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot10/s10_bot_state.json:/app/bot10/s10_bot_state.json
+      - ./bot10/logs:/app/bot10/logs
+      - ./bot10/live_config.py:/app/bot10/live_config.py:ro
+      - ./bot10/live_s10_bot.py:/app/bot10/live_s10_bot.py:ro
+      - ./bot10/live_data_fetcher.py:/app/bot10/live_data_fetcher.py:ro
+      - ./bot10/live_executor.py:/app/bot10/live_executor.py:ro
+      - ./bot10/base_interfaces.py:/app/bot10/base_interfaces.py:ro
+      - ./bot10/ea_bridge.py:/app/bot10/ea_bridge.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:105
+      - VNC_PORT=5906
+      - NOVNC_PORT=6086
+      - WINEPREFIX=/root/.wine
+
   # ── Bot 7 (S7用設定) ──────────────────────────────────────
   exness-bot-7:
     image: exness-bot:latest
