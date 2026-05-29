@@ -13,30 +13,39 @@ http://118.27.2.117:6082/vnc.html → s6_bot
 
 
 3.Botファイルの起動
-sudo docker exec -d exness-bot wine "C:/Python39/python.exe" "C:/Python39/launcher.py"
-sudo docker exec -d exness-bot wine "C:/Python39/python.exe" "Z:/app/live_s4_bot.py"
+sudo docker exec -d exness-bot-9 python3 /app/bot9/live_s9_bot.py
 ※-d　はバックグランドの意味
-sudo docker exec -it exness-bot-2 wine "C:/Python39/python.exe" "Z:/app/live_s5_bot.py"
-sudo docker exec -it exness-bot-3 wine "C:/Python39/python.exe" "Z:/app/live_s6_bot.py"
-
+sudo docker exec -it exness-bot-9 python3 /app/bot9/live_s9_bot.py
 ※log自体確認したかったら上記手動の方で実行
+
 
 4.dockerが何個動いているか確認
 sudo docker ps
 →止めたい場合は「sudo docker stop exness-bot」
 
+
 5.コンテナ内のタスク一覧を表示
-sudo docker exec exness-bot wine tasklist
+sudo docker exec exness-bot-8 ps aux | grep python
+
+
 
 6.ログの確認
-sudo docker exec exness-bot cat "/app/bot.log"
+tail -n 20 bot9/logs/s9_bot.log
 
 
-・logの中身を空にしたい
-sudo truncate -s 0 logs/bot.log
+
+・python_botだけrestartしたい場合
+sudo docker exec exness-bot-9 pkill -f live_s9_bot.py
+
+
+・logとtradesの中身を空にしたい
+truncate -s 0 bot8/logs/s8_bot.log
+
+sudo sh -c 'echo "Timestamp_JST,Action,Ticket,Symbol,Direction,LotSize,Price,PnL" > /home/muu/python_program/anti-exness/bot8/logs/s8_trades.csv'
+
 
 
 ・ファイルをコンテナ内の /app ディレクトリにコピー
-sudo docker cp live_s4_bot.py exness-bot:/app/live_s4_bot.py
+sudo docker cp live_s8_bot.py exness-bot:/app/live_s8_bot.py
 
 /home/muu/python_program/anti-exness/logs/s4_bot.log

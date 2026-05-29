@@ -1,0 +1,14 @@
+{
+    "lead_symbol": "USTECm",
+    "lag_symbol": "US500m",
+    "window_z": 288,
+    "z_entry": 1.0,
+    "z_exit": 0.0,
+    "exit_type": "MEAN_REVERSION",
+    "max_hold_bars": 24,
+    "sl_mult": 1.0,
+    "tp_mult": 1.5,
+    "use_be": true,
+    "multiplier": 50.0,
+    "spread_pct": 5e-05
+}

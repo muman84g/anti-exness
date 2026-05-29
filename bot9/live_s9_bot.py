@@ -56,11 +56,13 @@ from live_executor import MT5Executor, ORDER_TYPE_BUY, ORDER_TYPE_SELL
 # ============================================================
 # s9 Configuration (US Indices ORB v5)
 # ============================================================
-POLL_INTERVAL_SECONDS = 5  # 常時価格監視（ブレイクアウト・TP/SL）のため5秒に設定
+POLL_INTERVAL_SECONDS = 15  # 常時価格監視（ブレイクアウト・TP/SL）のため5秒に設定
 STATE_FILE = os.path.join(script_dir, "s9_bot_state.json")
-RISK_USD = 10.0  # 1トレードあたりの許容リスク金額
+USE_DYNAMIC_RISK = True
+RISK_PERCENT = 0.02      # 1トレードあたりの残高に対する許容リスク割合（2%）
+FIXED_RISK_USD = 10.0    # 動的リスク無効時の固定リスク金額（10ドル）
 
-TRADED_SYMBOLS = ['USTECm', 'US500m']
+TRADED_SYMBOLS = ['US500m']
 
 # 各アセットの最適パラメータ (v5バックテスト結果に基づく)
 PARAMS = {
@@ -313,7 +315,15 @@ class s9TradingBot:
                             ppl_trig = entry_price - 0.75 * tp_dist
                             ppl_lock = entry_price - 0.50 * tp_dist
                             
-                        # リスクベース・ロットサイズ計算 ($10 固定リスク)
+                        # リスク金額の決定 (動的％リスク or 固定リスク)
+                        if USE_DYNAMIC_RISK and info:
+                            risk_usd = info.margin_free * RISK_PERCENT
+                            logging.info(f"[{col}] Dynamic Risk active. Free Margin: {info.margin_free:.2f} USD, Risk %: {RISK_PERCENT*100:.1f}%, Calculated Risk: {risk_usd:.2f} USD")
+                        else:
+                            risk_usd = FIXED_RISK_USD
+                            logging.info(f"[{col}] Fixed Risk active: {risk_usd:.2f} USD")
+
+                        # リスクベース・ロットサイズ計算
                         usdjpy_rate = 150.0
                         jpy_info = self.executor.get_symbol_info('USDJPYm')
                         if jpy_info:
@@ -323,7 +333,7 @@ class s9TradingBot:
                         sl_usd_per_lot = sl_dist * multiplier
                         
                         if sl_usd_per_lot > 0:
-                            target_lot = RISK_USD / sl_usd_per_lot
+                            target_lot = risk_usd / sl_usd_per_lot
                         else:
                             target_lot = 0.01
                             

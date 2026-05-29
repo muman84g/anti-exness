@@ -1,0 +1,84 @@
+{
+    "XCUUSDm": [
+        {
+            "local_hour": 6,
+            "direction": "LONG",
+            "win_rate": 55.83756345177665,
+            "count": 197.0
+        },
+        {
+            "local_hour": 7,
+            "direction": "LONG",
+            "win_rate": 55.83756345177665,
+            "count": 197.0
+        },
+        {
+            "local_hour": 8,
+            "direction": "LONG",
+            "win_rate": 55.83756345177665,
+            "count": 197.0
+        },
+        {
+            "local_hour": 20,
+            "direction": "LONG",
+            "win_rate": 58.24175824175825,
+            "count": 182.0
+        },
+        {
+            "local_hour": 23,
+            "direction": "LONG",
+            "win_rate": 56.56565656565656,
+            "count": 198.0
+        }
+    ],
+    "JP225m": [
+        {
+            "local_hour": 1,
+            "direction": "LONG",
+            "win_rate": 56.14035087719298,
+            "count": 114.0
+        },
+        {
+            "local_hour": 2,
+            "direction": "LONG",
+            "win_rate": 55.45454545454545,
+            "count": 110.0
+        },
+        {
+            "local_hour": 18,
+            "direction": "LONG",
+            "win_rate": 57.89473684210527,
+            "count": 114.0
+        },
+        {
+            "local_hour": 19,
+            "direction": "LONG",
+            "win_rate": 58.77192982456141,
+            "count": 114.0
+        },
+        {
+            "local_hour": 20,
+            "direction": "LONG",
+            "win_rate": 55.26315789473685,
+            "count": 114.0
+        },
+        {
+            "local_hour": 21,
+            "direction": "LONG",
+            "win_rate": 55.26315789473685,
+            "count": 114.0
+        },
+        {
+            "local_hour": 22,
+            "direction": "LONG",
+            "win_rate": 58.77192982456141,
+            "count": 114.0
+        },
+        {
+            "local_hour": 23,
+            "direction": "LONG",
+            "win_rate": 57.01754385964912,
+            "count": 114.0
+        }
+    ]
+}
