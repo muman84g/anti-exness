@@ -107,9 +107,6 @@ string ProcessRequest(string raw_req) {
         ENUM_ORDER_TYPE type = (fields[2] == "0") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
         double lot = StringToDouble(fields[3]);
         
-        trade.SetTypeFillingBySymbol(sym);
-        
-        ResetLastError();
         if(trade.PositionOpen(sym, type, lot, 0, 0, 0)) {
             ulong ticket = trade.ResultOrder();
             if(ticket == 0) ticket = trade.ResultDeal();
@@ -121,9 +118,7 @@ string ProcessRequest(string raw_req) {
             }
             return "OK|" + IntegerToString(ticket) + "|" + DoubleToString(exec_price, 5);
         } else {
-            uint retcode = trade.ResultRetcode();
-            if(retcode == 0) retcode = GetLastError();
-            return "ERR|" + IntegerToString(retcode);
+            return "ERR|" + IntegerToString(trade.ResultRetcode());
         }
     }
     
@@ -142,17 +137,12 @@ string ProcessRequest(string raw_req) {
             profit = PositionGetDouble(POSITION_PROFIT);
             symbol = PositionGetString(POSITION_SYMBOL);
             close_price = SymbolInfoDouble(symbol, (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SYMBOL_BID : SYMBOL_ASK);
-            
-            trade.SetTypeFillingBySymbol(symbol);
         }
         
-        ResetLastError();
         if(trade.PositionClose(ticket)) {
             return "OK|Closed|" + DoubleToString(lot, 2) + "|" + DoubleToString(open_price, 5) + "|" + DoubleToString(close_price, 5) + "|" + DoubleToString(profit, 2);
         } else {
-            uint retcode = trade.ResultRetcode();
-            if(retcode == 0) retcode = GetLastError();
-            return "ERR|" + IntegerToString(retcode);
+            return "ERR|" + IntegerToString(trade.ResultRetcode());
         }
     }
     
