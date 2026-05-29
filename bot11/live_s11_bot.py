@@ -269,7 +269,7 @@ class s11TradingBot:
         atr = pos["atr"]
         be_active = pos.get("be_active", False)
         entry_time_str = pos["entry_time"]
-        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
+        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
         # A. 週末強制決済
         if is_weekend_jst(now_jst):

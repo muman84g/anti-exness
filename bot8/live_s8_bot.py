@@ -446,7 +446,7 @@ class s8TradingBot:
                     ticket = pos_data["ticket"]
                     entry_time_str = pos_data["entry_time"]
                     try:
-                        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
+                        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                     except Exception:
                         entry_time = now_jst  # fallback
                 else:
