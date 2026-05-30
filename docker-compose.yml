@@ -113,6 +113,33 @@ services:
       - NOVNC_PORT=6087
       - WINEPREFIX=/root/.wine
 
+  # ── Bot 12 (S12用設定) ─────────────────────────────────────
+  exness-bot-12:
+    image: exness-bot:latest
+    container_name: exness-bot-12
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot12/s12_bot_state.json:/app/bot12/s12_bot_state.json
+      - ./bot12/logs:/app/bot12/logs
+      - ./bot12/live_config.py:/app/bot12/live_config.py:ro
+      - ./bot12/live_s12_bot.py:/app/bot12/live_s12_bot.py:ro
+      - ./bot12/live_data_fetcher.py:/app/bot12/live_data_fetcher.py:ro
+      - ./bot12/live_executor.py:/app/bot12/live_executor.py:ro
+      - ./bot12/base_interfaces.py:/app/bot12/base_interfaces.py:ro
+      - ./bot12/ea_bridge.py:/app/bot12/ea_bridge.py:ro
+      - ./bot12/s12_params.json:/app/bot12/s12_params.json:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:107
+      - VNC_PORT=5908
+      - NOVNC_PORT=6088
+      - WINEPREFIX=/root/.wine
+
   # ── Bot 7 (S7用設定) ──────────────────────────────────────
   exness-bot-7:
     image: exness-bot:latest
