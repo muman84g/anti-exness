@@ -1,7 +1,6 @@
 # ==============================================================================
-# STRATEGY s13 CONCEPT: GBPUSDm Robust Move-Catcher Grid Strategy Live Trading Bot (v1)
-# 【戦略s13コンセプト: GBPUSDm 逆張りグリッド＋二数列分解管理モンテカルロ法実運用ボット】
-# ------------------------------------------------------------------------------
+# STRATEGY s14 CONCEPT: GBPUSDm Robust Move-Catcher Grid Strategy Live Trading Bot (v1)
+# 【戦略s14コンセプト: GBPUSDm 送E��りグリチE���E�二数列�E解管琁E��ンチE��ルロ法実運用ボット、E# ------------------------------------------------------------------------------
 # - Instrument: GBPUSDm (GBP/USD Pro Account)
 # - Logic: Bot A (Always in market, reverses on TP, continues on SL)
 #          Bot B (Grid hedging bot, triggers at S ± W/2 with counter-trend entry)
@@ -31,7 +30,7 @@ if script_dir not in sys.path:
 # Logging Setup
 LOG_DIR = os.path.join(script_dir, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "s13_bot.log")
+LOG_FILE = os.path.join(LOG_DIR, "s14_bot.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,8 +49,8 @@ from live_executor import MT5Executor, ORDER_TYPE_BUY, ORDER_TYPE_SELL
 # Bot Configuration & Path Variables
 # ============================================================
 POLL_INTERVAL_SECONDS = 5  # Scan price intervals
-STATE_FILE = os.path.join(script_dir, "s13_bot_state.json")
-PARAMS_FILE = os.path.join(script_dir, "s13_params.json")
+STATE_FILE = os.path.join(script_dir, "s14_bot_state.json")
+PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
     'symbol': 'GBPUSDm',
@@ -386,7 +385,7 @@ def calculate_lot(bet_units, lot_multiplier, max_bet_units, symbol_info):
     lot = round(lot / step_vol) * step_vol
     return round(lot, 2)
 
-class s13TradingBot:
+class s14TradingBot:
     def __init__(self):
         self.dm = MT5DataManager()
         self.executor = MT5Executor(self.dm)
@@ -472,7 +471,7 @@ class s13TradingBot:
             logging.error(f"Failed to save state: {e}")
 
     def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0.0, price=0.0, pnl=0.0, reason=""):
-        csv_file = os.path.join(LOG_DIR, "s13_trades.csv")
+        csv_file = os.path.join(LOG_DIR, "s14_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
         now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
@@ -489,7 +488,7 @@ class s13TradingBot:
             logging.error(f"Failed to write trade log to CSV: {e}")
 
     def start(self):
-        logging.info("Starting s13 Move-Catcher Live Bot execution loop...")
+        logging.info("Starting s14 Move-Catcher Live Bot execution loop...")
         if not self.dm.connect():
             logging.error("Failed to connect via EA Bridge. Exit.")
             return
@@ -783,5 +782,5 @@ class s13TradingBot:
         return success
 
 if __name__ == "__main__":
-    bot = s13TradingBot()
+    bot = s14TradingBot()
     bot.start()
