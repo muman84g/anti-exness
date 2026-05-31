@@ -1,0 +1,17 @@
+{
+    "symbol": "EURUSDm",
+    "timeframe": "H4",
+    "entry_period": 20,
+    "exit_period": 15,
+    "adx_min": 20,
+    "chandelier_atr": 2.0,
+    "trend_slope_bars": 60,
+    "lot_size": 0.1,
+    "risk_pct": 0.01,
+    "use_chandelier": true,
+    "use_trend_filter": true,
+    "trend_mode": "slope",
+    "require_adx_rising": true,
+    "max_spread_atr": 0.08,
+    "poll_interval_seconds": 15
+}
