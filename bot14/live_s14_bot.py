@@ -505,6 +505,13 @@ class s14TradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
+        try:
+            self._run_cycle_core()
+        except Exception as e:
+            logging.error(f"Error in execution cycle: {e}")
+            logging.error(traceback.format_exc())
+
+    def _run_cycle_core(self):
         now_utc = datetime.now(timezone.utc)
         now_jst = pd.Timestamp(now_utc).tz_convert('Asia/Tokyo')
         
