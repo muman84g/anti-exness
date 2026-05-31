@@ -1,0 +1,14 @@
+{
+    "symbol": "GBPUSDm",
+    "W_pips": 40.0,
+    "lot_multiplier": 0.01,
+    "max_bet_units": 8,
+    "initial_sequence": [2, 2, 2],
+    "weekend_filter": true,
+    "weekend_stop_hour_jst": 20,
+    "monday_start_hour_jst": 7,
+    "news_filter": true,
+    "avoidance_hours": 2.0,
+    "news_file": "macro_events_2026.json",
+    "max_spread_pips": 0.8
+}
