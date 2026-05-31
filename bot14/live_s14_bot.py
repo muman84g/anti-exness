@@ -506,7 +506,7 @@ class s14TradingBot:
 
     def run_cycle(self):
         now_utc = datetime.now(timezone.utc)
-        now_jst = pd.Timestamp(now_utc).tz_localize('UTC').tz_convert('Asia/Tokyo')
+        now_jst = pd.Timestamp(now_utc).tz_convert('Asia/Tokyo')
         
         symbol = PARAMS['symbol']
         W_pips = PARAMS['W_pips']
