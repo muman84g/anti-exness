@@ -140,6 +140,34 @@ services:
       - NOVNC_PORT=6088
       - WINEPREFIX=/root/.wine
 
+  # ── Bot 14 (S14用設定) ─────────────────────────────────────
+  exness-bot-14:
+    image: exness-bot:latest
+    container_name: exness-bot-14
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot14/s14_bot_state.json:/app/bot14/s14_bot_state.json
+      - ./bot14/logs:/app/bot14/logs
+      - ./bot14/live_config.py:/app/bot14/live_config.py:ro
+      - ./bot14/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
+      - ./bot14/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
+      - ./bot14/live_executor.py:/app/bot14/live_executor.py:ro
+      - ./bot14/base_interfaces.py:/app/bot14/base_interfaces.py:ro
+      - ./bot14/ea_bridge.py:/app/bot14/ea_bridge.py:ro
+      - ./bot14/s14_params.json:/app/bot14/s14_params.json:ro
+      - ./bot14/macro_events_2026.json:/app/bot14/macro_events_2026.json:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:108
+      - VNC_PORT=5909
+      - NOVNC_PORT=6089
+      - WINEPREFIX=/root/.wine
+
   # ── Bot 7 (S7用設定) ──────────────────────────────────────
   exness-bot-7:
     image: exness-bot:latest
