@@ -159,16 +159,16 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot14_pro口座専用/s14_bot_state.json:/app/bot14/s14_bot_state.json
-      - ./bot14_pro口座専用/logs:/app/bot14/logs
-      - ./bot14_pro口座専用/live_config.py:/app/bot14/live_config.py:ro
-      - ./bot14_pro口座専用/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
-      - ./bot14_pro口座専用/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
-      - ./bot14_pro口座専用/live_executor.py:/app/bot14/live_executor.py:ro
-      - ./bot14_pro口座専用/base_interfaces.py:/app/bot14/base_interfaces.py:ro
-      - ./bot14_pro口座専用/ea_bridge.py:/app/bot14/ea_bridge.py:ro
-      - ./bot14_pro口座専用/s14_params.json:/app/bot14/s14_params.json:ro
-      - ./bot14_pro口座専用/macro_events_2026.json:/app/bot14/macro_events_2026.json:ro
+      - ./bot14/s14_bot_state.json:/app/bot14/s14_bot_state.json
+      - ./bot14/logs:/app/bot14/logs
+      - ./bot14/live_config.py:/app/bot14/live_config.py:ro
+      - ./bot14/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
+      - ./bot14/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
+      - ./bot14/live_executor.py:/app/bot14/live_executor.py:ro
+      - ./bot14/base_interfaces.py:/app/bot14/base_interfaces.py:ro
+      - ./bot14/ea_bridge.py:/app/bot14/ea_bridge.py:ro
+      - ./bot14/s14_params.json:/app/bot14/s14_params.json:ro
+      - ./bot14/macro_events_2026.json:/app/bot14/macro_events_2026.json:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
