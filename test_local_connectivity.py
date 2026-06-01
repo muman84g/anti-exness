@@ -5,8 +5,21 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Ensure /app is in path for imports
+# Ensure /app and the active bot module folders are in path for imports.
 sys.path.append('/app')
+for bot_dir in [
+    os.environ.get("BOT_MODULE_DIR"),
+    "/app/bot15",
+    "/app/bot14",
+    "/app/bot12",
+    "/app/bot11",
+    "/app/bot10",
+    "/app/bot9",
+    "/app/bot8",
+]:
+    if bot_dir and os.path.exists(os.path.join(bot_dir, "ea_bridge.py")):
+        sys.path.insert(0, bot_dir)
+        break
 from ea_bridge import EABridgeServer
 
 def main():

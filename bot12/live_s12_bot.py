@@ -22,6 +22,8 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+JST = timezone(timedelta(hours=9), "JST")
+
 # スクリプト自身の絶対パス
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -158,7 +160,7 @@ class s12TradingBot:
         csv_file = os.path.join(LOG_DIR, "s12_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -188,7 +190,7 @@ class s12TradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         # 1. アクティブな全ポジションの管理（週末決済、時間決済、SL/TP決済）
         active_symbols = list(self.state["active_tickets"].keys())
@@ -270,24 +272,33 @@ class s12TradingBot:
         direction = s_conf["direction"]
         order_type = ORDER_TYPE_SELL if direction == "SHORT" else ORDER_TYPE_BUY
         
-        logging.info(f"[{symbol}] Sending order to MT5. Direction: {direction}, Lot: {lot_size}")
-        ticket = self.executor.open_position(symbol, order_type, lot_size)
+        tp_mult = s_conf["tp_mult"]
+        sl_mult = s_conf["sl_mult"]
+        entry_estimate = info.bid if direction == "SHORT" else info.ask
+        tp_price = 0.0
+        sl_price = 0.0
+        if direction == "SHORT":
+            tp_price = entry_estimate - tp_mult * atr_val if tp_mult > 0 else 0.0
+            sl_price = entry_estimate + sl_mult * atr_val if sl_mult > 0 else 0.0
+        else:
+            tp_price = entry_estimate + tp_mult * atr_val if tp_mult > 0 else 0.0
+            sl_price = entry_estimate - sl_mult * atr_val if sl_mult > 0 else 0.0
+
+        logging.info(f"[{symbol}] Sending order to MT5. Direction: {direction}, Lot: {lot_size}, SL: {sl_price:.5f}, TP: {tp_price:.5f}")
+        ticket = self.executor.open_position(symbol, order_type, lot_size, sl=sl_price, tp=tp_price)
         
         if ticket:
             actual_entry_price = float(ticket.price)
-            tp_mult = s_conf["tp_mult"]
-            sl_mult = s_conf["sl_mult"]
             
             # SL と TP のレート算出
-            tp_price = 0.0
-            sl_price = 0.0
-            
             if direction == "SHORT":
                 tp_price = actual_entry_price - tp_mult * atr_val if tp_mult > 0 else 0.0
                 sl_price = actual_entry_price + sl_mult * atr_val if sl_mult > 0 else 0.0
             else: # LONG (将来用)
                 tp_price = actual_entry_price + tp_mult * atr_val if tp_mult > 0 else 0.0
                 sl_price = actual_entry_price - sl_mult * atr_val if sl_mult > 0 else 0.0
+            if sl_price > 0.0 or tp_price > 0.0:
+                self.executor.modify_position_sl_tp(ticket, sl_price, tp_price)
 
             # 状態の保存
             now_jst_str = now_jst.strftime("%Y-%m-%d %H:%M:%S")
@@ -330,7 +341,7 @@ class s12TradingBot:
         sl_price = pos["sl_price"]
         tp_price = pos["tp_price"]
         entry_time_str = pos["entry_time"]
-        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
         hold_bars = pos["hold_bars"]
 
         # A. 週末強制決済 (土曜 05:00 JST 以降)
@@ -382,8 +393,13 @@ class s12TradingBot:
             logging.info(f"[{symbol}] Closed position via EA (Reason: {reason}). Ticket: {ticket}, Profit: {success.profit}")
             self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
         else:
-            logging.warning(f"[{symbol}] EA close request failed for ticket {ticket}. Cleaning up local state anyway to prevent system lock.")
+            logging.warning(f"[{symbol}] EA close request failed for ticket {ticket}. Keeping state so the bot can retry.")
             self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)
+            if pos is not None:
+                pos["last_close_fail_reason"] = reason
+                pos["last_close_fail_time"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+                self.save_state()
+            return
             
         if symbol in self.state["active_tickets"]:
             del self.state["active_tickets"][symbol]

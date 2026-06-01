@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Antigravity"
 #property link      ""
-#property version   "2.20"
+#property version   "2.21"
 
 #include <Trade\Trade.mqh>
 
@@ -15,14 +15,15 @@ string RES_FILE = "res.txt";
 string HEARTBEAT_FILE = "heartbeat.txt";
 
 int OnInit() {
-    Print("BotBridge v2.20 (File IPC + Trading + History) starting...");
-    EventSetTimer(1); 
+    Print("BotBridge v2.21 (File IPC + Trading + History) starting...");
+    EventSetTimer(1);
     
     // Clean up
     FileDelete(CMD_FILE);
     FileDelete(RES_FILE);
     
     trade.SetExpertMagicNumber(123456);
+    PumpBridge();
     return(INIT_SUCCEEDED);
 }
 
@@ -32,14 +33,29 @@ void OnDeinit(const int reason) {
 }
 
 void OnTimer() {
-    // Heartbeat
+    PumpBridge();
+}
+
+void OnTick() {
+    PumpBridge();
+}
+
+void PumpBridge() {
+    WriteHeartbeat();
+    PollCommand();
+}
+
+void WriteHeartbeat() {
     int hb = FileOpen(HEARTBEAT_FILE, FILE_WRITE|FILE_TXT|FILE_ANSI);
     if(hb != INVALID_HANDLE) {
         FileWriteString(hb, "alive|" + TimeToString(TimeCurrent()) + "\n");
         FileClose(hb);
+    } else {
+        Print("BotBridge heartbeat write failed: ", GetLastError());
     }
+}
 
-    // Check for command
+void PollCommand() {
     if(FileIsExist(CMD_FILE)) {
         int h = FileOpen(CMD_FILE, FILE_READ|FILE_TXT|FILE_ANSI);
         if(h != INVALID_HANDLE) {
@@ -55,6 +71,8 @@ void OnTimer() {
                     FileClose(rh);
                 }
             }
+        } else {
+            Print("BotBridge command read failed: ", GetLastError());
         }
     }
 }
@@ -77,7 +95,14 @@ string ProcessRequest(string raw_req) {
         double margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
         double point = SymbolInfoDouble(sym, SYMBOL_POINT);
         double min_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-        return "OK|" + DoubleToString(ask, 5) + "|" + DoubleToString(bid, 5) + "|" + DoubleToString(margin, 2) + "|" + DoubleToString(point, 5) + "|" + DoubleToString(min_vol, 2);
+        double max_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+        double vol_step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+        double tick_value = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+        double tick_size = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+        double contract_size = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+        long digits = SymbolInfoInteger(sym, SYMBOL_DIGITS);
+        long stops_level = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+        return "OK|" + DoubleToString(ask, (int)digits) + "|" + DoubleToString(bid, (int)digits) + "|" + DoubleToString(margin, 2) + "|" + DoubleToString(point, 8) + "|" + DoubleToString(min_vol, 8) + "|" + DoubleToString(max_vol, 8) + "|" + DoubleToString(vol_step, 8) + "|" + DoubleToString(tick_value, 8) + "|" + DoubleToString(tick_size, 8) + "|" + DoubleToString(contract_size, 2) + "|" + IntegerToString((int)digits) + "|" + IntegerToString((int)stops_level);
     }
     
     // Command: HIST|SYMBOL|TIMEFRAME|COUNT
@@ -101,13 +126,18 @@ string ProcessRequest(string raw_req) {
         }
     }
     
-    // Command: OPEN|SYMBOL|TYPE|LOT
+    // Command: OPEN|SYMBOL|TYPE|LOT|SL|TP
     if(cmd == "OPEN" && k >= 4) {
         string sym = fields[1];
         ENUM_ORDER_TYPE type = (fields[2] == "0") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
         double lot = StringToDouble(fields[3]);
+        int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+        double sl = 0.0;
+        double tp = 0.0;
+        if(k >= 5) sl = NormalizeDouble(StringToDouble(fields[4]), digits);
+        if(k >= 6) tp = NormalizeDouble(StringToDouble(fields[5]), digits);
         
-        if(trade.PositionOpen(sym, type, lot, 0, 0, 0)) {
+        if(trade.PositionOpen(sym, type, lot, 0, sl, tp)) {
             ulong ticket = trade.ResultOrder();
             if(ticket == 0) ticket = trade.ResultDeal();
             double exec_price = trade.ResultPrice();
@@ -117,6 +147,26 @@ string ProcessRequest(string raw_req) {
                 }
             }
             return "OK|" + IntegerToString(ticket) + "|" + DoubleToString(exec_price, 5);
+        } else {
+            return "ERR|" + IntegerToString(trade.ResultRetcode());
+        }
+    }
+
+    // Command: MODIFY|TICKET|SL|TP
+    if(cmd == "MODIFY" && k >= 4) {
+        ulong ticket = (ulong)StringToInteger(fields[1]);
+        double sl = StringToDouble(fields[2]);
+        double tp = StringToDouble(fields[3]);
+
+        if(PositionSelectByTicket(ticket)) {
+            string sym = PositionGetString(POSITION_SYMBOL);
+            int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+            sl = NormalizeDouble(sl, digits);
+            tp = NormalizeDouble(tp, digits);
+        }
+
+        if(trade.PositionModify(ticket, sl, tp)) {
+            return "OK|Modified|" + DoubleToString(sl, 5) + "|" + DoubleToString(tp, 5);
         } else {
             return "ERR|" + IntegerToString(trade.ResultRetcode());
         }

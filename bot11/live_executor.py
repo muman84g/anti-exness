@@ -46,7 +46,9 @@ class MT5Executor(BaseExecutor):
             return None
             
         parts = res.split("|")
-        # Expected from EA: OK | ask | bid | margin_free | point | min_vol
+        # Expected from EA:
+        # OK | ask | bid | margin_free | point | min_vol
+        #    | max_vol | vol_step | tick_value | tick_size | contract_size | digits | stops_level
         info = SymbolInfoDummy()
         info.ask = float(parts[1])
         info.bid = float(parts[2])
@@ -55,6 +57,14 @@ class MT5Executor(BaseExecutor):
         
         # 最小ロットの取得と強制オーバーライド
         raw_min_vol = float(parts[5])
+        raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
+        raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
+        tick_value = float(parts[8]) if len(parts) > 8 else 0.0
+        tick_size = float(parts[9]) if len(parts) > 9 else 0.0
+        contract_size = float(parts[10]) if len(parts) > 10 else 0.0
+        info.digits = int(float(parts[11])) if len(parts) > 11 else 5
+        info.stops_level = int(float(parts[12])) if len(parts) > 12 else 0
+
         try:
             from live_config import MIN_LOT_OVERRIDES
             min_override = MIN_LOT_OVERRIDES.get(symbol, raw_min_vol)
@@ -62,8 +72,12 @@ class MT5Executor(BaseExecutor):
             min_override = raw_min_vol
             
         info.volume_min = max(raw_min_vol, min_override)
-        info.volume_max = 100.0  # safe default
-        info.volume_step = max(raw_min_vol, min_override)
+        info.volume_max = max(raw_max_vol, info.volume_min)
+        info.volume_step = raw_vol_step if raw_vol_step > 0 else info.volume_min
+        info.tick_value = tick_value
+        info.tick_size = tick_size
+        info.contract_size = contract_size
+        info.price_unit_value = abs(tick_value / tick_size) if tick_value > 0 and tick_size > 0 else 0.0
         return info
 
     def calculate_lot_size(self, symbol, risk_usd, sl_distance_points):
@@ -71,7 +85,11 @@ class MT5Executor(BaseExecutor):
         if info is None or sl_distance_points <= 0:
             return info.volume_min if info else 0.01
 
-        lot = info.volume_min  
+        price_unit_value = info.price_unit_value if info.price_unit_value > 0 else 0.0
+        if price_unit_value > 0:
+            lot = risk_usd / (sl_distance_points * price_unit_value)
+        else:
+            lot = info.volume_min
         lot = max(info.volume_min, min(lot, info.volume_max))
         lot = round(lot / info.volume_step) * info.volume_step
         return lot
@@ -85,8 +103,13 @@ class MT5Executor(BaseExecutor):
         if info is None:
             return None
             
-        logging.info(f"Sending OPEN command to EA: {symbol} Type:{order_type} Vol:{lot_size}")
-        res = ea_bridge.send_command(f"OPEN|{symbol}|{order_type}|{lot_size}")
+        digits = getattr(info, "digits", 5)
+        sl_text = f"{float(sl):.{digits}f}" if sl else "0"
+        tp_text = f"{float(tp):.{digits}f}" if tp else "0"
+        logging.info(
+            f"Sending OPEN command to EA: {symbol} Type:{order_type} Vol:{lot_size} SL:{sl_text} TP:{tp_text}"
+        )
+        res = ea_bridge.send_command(f"OPEN|{symbol}|{order_type}|{lot_size}|{sl_text}|{tp_text}")
         
         if not res or not res.startswith("OK|"):
             logging.error(f"EA Order failed for {symbol}: {res}")
@@ -99,6 +122,20 @@ class MT5Executor(BaseExecutor):
         ticket = Ticket(ticket_id, exec_price)
         logging.info(f"Order filled via EA / Ticket: {ticket} (Price: {ticket.price})")
         return ticket
+
+    def modify_position_sl_tp(self, ticket, sl=0.0, tp=0.0):
+        """Updates server-side SL/TP for an open position."""
+        sl_text = f"{float(sl):.5f}" if sl else "0"
+        tp_text = f"{float(tp):.5f}" if tp else "0"
+        logging.info(f"Sending MODIFY command to EA for ticket: {ticket} SL:{sl_text} TP:{tp_text}")
+        res = ea_bridge.send_command(f"MODIFY|{ticket}|{sl_text}|{tp_text}")
+
+        if res and res.startswith("OK|"):
+            logging.info(f"Position {ticket} SL/TP modified successfully via EA.")
+            return True
+
+        logging.error(f"EA Modify failed for {ticket}: {res}")
+        return False
 
     def close_position(self, ticket, deviation=20):
         """

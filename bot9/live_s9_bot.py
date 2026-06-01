@@ -30,6 +30,8 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+JST = timezone(timedelta(hours=9), "JST")
+
 # スクリプト自身の絶対パス
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -59,6 +61,7 @@ from live_executor import MT5Executor, ORDER_TYPE_BUY, ORDER_TYPE_SELL
 POLL_INTERVAL_SECONDS = 5  # 常時価格監視（ブレイクアウト・TP/SL）のため5秒に設定
 STATE_FILE = os.path.join(script_dir, "s9_bot_state.json")
 RISK_USD = 10.0  # 1トレードあたりの許容リスク金額
+MAX_LOT_LIMIT = 2.0
 
 TRADED_SYMBOLS = ['USTECm', 'US500m']
 
@@ -123,8 +126,7 @@ class s9TradingBot:
         csv_file = os.path.join(LOG_DIR, "s9_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
-        now_utc = datetime.now(timezone.utc)
-        now_jst = now_utc + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -153,32 +155,34 @@ class s9TradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
-        now_utc = datetime.now(timezone.utc)
-        now_jst = now_utc + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         today_str = now_jst.strftime("%Y-%m-%d")
         
         # 1. 新しい日の場合は状態を完全に初期化
         if self.state.get("date") != today_str:
-            logging.info(f"New day detected: {today_str}. Initializing daily state...")
-            self.state = {
-                "date": today_str,
-                "active_tickets": {},
-                "range_high": {},
-                "range_low": {},
-                "atr": {},
-                "be_trigger_dist": {},
-                "initial_sl": {},
-                "tp_target": {},
-                "be_active": {},
-                "ppl_active": {},
-                "ppl_trigger": {},
-                "ppl_lock": {},
-                "has_entered_today": {},
-                "position_direction": {},
-                "entry_price": {},
-                "lot_size": {},
-            }
-            self.save_state()
+            if self.state.get("active_tickets"):
+                logging.warning("New day detected, but active tickets remain. Preserving state until positions are closed.")
+            else:
+                logging.info(f"New day detected: {today_str}. Initializing daily state...")
+                self.state = {
+                    "date": today_str,
+                    "active_tickets": {},
+                    "range_high": {},
+                    "range_low": {},
+                    "atr": {},
+                    "be_trigger_dist": {},
+                    "initial_sl": {},
+                    "tp_target": {},
+                    "be_active": {},
+                    "ppl_active": {},
+                    "ppl_trigger": {},
+                    "ppl_lock": {},
+                    "has_entered_today": {},
+                    "position_direction": {},
+                    "entry_price": {},
+                    "lot_size": {},
+                }
+                self.save_state()
 
         # 各取引アセットの判定ループ
         for col in TRADED_SYMBOLS:
@@ -194,10 +198,12 @@ class s9TradingBot:
                     if success:
                         logging.info(f"Successfully closed position for {col} (Time Close). PnL: {success.profit}")
                         self.log_trade_csv("EXIT_TIME", ticket, col, price=success.close_price, pnl=success.profit)
+                        del self.state["active_tickets"][col]
+                        self.save_state()
                     else:
-                        logging.warning(f"Failed to close position {ticket} for {col}.")
-                    del self.state["active_tickets"][col]
-                    self.save_state()
+                        logging.warning(f"Failed to close position {ticket} for {col}. Keeping state so the bot can retry.")
+                        self.state.setdefault("last_close_fail", {})[col] = now_jst.strftime("%Y-%m-%d %H:%M:%S")
+                        self.save_state()
                 continue
 
             # ── B. 東京レンジ高値安値・過去5日平均ATRの計算 ──
@@ -319,7 +325,9 @@ class s9TradingBot:
                         if jpy_info:
                             usdjpy_rate = jpy_info.bid
                             
-                        multiplier = get_lot_multiplier_usd(col, entry_price, usdjpy_rate)
+                        multiplier = getattr(info, "price_unit_value", 0.0)
+                        if multiplier <= 0:
+                            multiplier = get_lot_multiplier_usd(col, entry_price, usdjpy_rate)
                         sl_usd_per_lot = sl_dist * multiplier
                         
                         if sl_usd_per_lot > 0:
@@ -327,13 +335,13 @@ class s9TradingBot:
                         else:
                             target_lot = 0.01
                             
-                        target_lot = max(info.volume_min, min(target_lot, info.volume_max))
+                        target_lot = max(info.volume_min, min(target_lot, info.volume_max, MAX_LOT_LIMIT))
                         target_lot = round(target_lot / info.volume_step) * info.volume_step
                         target_lot = round(target_lot, 2)
                         
                         # 成行発注の実行
                         order_type = ORDER_TYPE_BUY if direction == 'LONG' else ORDER_TYPE_SELL
-                        ticket = self.executor.open_position(col, order_type, target_lot)
+                        ticket = self.executor.open_position(col, order_type, target_lot, sl=init_sl, tp=tp_target)
                         
                         if ticket:
                             logging.info(f"[{col}] Breakout Order Filled. Ticket: {ticket} Lot: {target_lot} Price: {ticket.price}")
@@ -375,11 +383,13 @@ class s9TradingBot:
                         # ① 段階的トレール（PPL）判定
                         if not ppl_act and current_bid >= ppl_trig:
                             logging.info(f"[{col}] LONG Partial Profit Lock Triggered! Move SL to lock profit ({ppl_lock:.2f})")
+                            self.executor.modify_position_sl_tp(ticket, ppl_lock, tp_p)
                             self.state["ppl_active"][col] = True
                             self.save_state()
                         # ② 建値移動（BE）判定
                         elif not ppl_act and not be_act and (current_bid - entry_p) >= be_trig:
                             logging.info(f"[{col}] LONG Breakeven Triggered! Move SL to entry ({entry_p:.2f})")
+                            self.executor.modify_position_sl_tp(ticket, entry_p, tp_p)
                             self.state["be_active"][col] = True
                             self.save_state()
                             
@@ -406,11 +416,13 @@ class s9TradingBot:
                         # ① 段階的トレール（PPL）判定
                         if not ppl_act and current_ask <= ppl_trig:
                             logging.info(f"[{col}] SHORT Partial Profit Lock Triggered! Move SL to lock profit ({ppl_lock:.2f})")
+                            self.executor.modify_position_sl_tp(ticket, ppl_lock, tp_p)
                             self.state["ppl_active"][col] = True
                             self.save_state()
                         # ② 建値移動（BE）判定
                         elif not ppl_act and not be_act and (entry_p - current_ask) >= be_trig:
                             logging.info(f"[{col}] SHORT Breakeven Triggered! Move SL to entry Ask.")
+                            self.executor.modify_position_sl_tp(ticket, entry_p * (1 + COST_MAP.get(col, 0.00015)), tp_p)
                             self.state["be_active"][col] = True
                             self.save_state()
                             
@@ -442,10 +454,12 @@ class s9TradingBot:
                         if success:
                             logging.info(f"Successfully closed position for {col} ({reason}). PnL: {success.profit}")
                             self.log_trade_csv(f"EXIT_{reason}", ticket, col, price=success.close_price, pnl=success.profit)
+                            del self.state["active_tickets"][col]
+                            self.save_state()
                         else:
-                            logging.warning(f"Failed to close position {ticket} for {col}.")
-                        del self.state["active_tickets"][col]
-                        self.save_state()
+                            logging.warning(f"Failed to close position {ticket} for {col}. Keeping state so the bot can retry.")
+                            self.state.setdefault("last_close_fail", {})[col] = now_jst.strftime("%Y-%m-%d %H:%M:%S")
+                            self.save_state()
 
 if __name__ == "__main__":
     bot = s9TradingBot()

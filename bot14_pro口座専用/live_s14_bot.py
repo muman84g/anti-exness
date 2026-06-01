@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
+#プロ口座専用
 # ==============================================================================
-# STRATEGY s14 CONCEPT: GBPUSDm Robust Move-Catcher Grid Strategy Live Trading Bot (v1)
-# 【戦略s14コンセプト: GBPUSDm 逆張りグリッド＋二数列分解管理モンテカルロ法実運用ボット】
+# STRATEGY s14 CONCEPT: GBPUSD Robust Move-Catcher Grid Strategy Live Trading Bot (v1)
+# 【戦略s14コンセプト: GBPUSD 逆張りグリッド＋二数列分解管理モンテカルロ法実運用ボット】
 # ------------------------------------------------------------------------------
-# - Instrument: GBPUSDm (GBP/USD Pro Account)
+# - Instrument: GBPUSD (GBP/USD Pro Account)
 # - Logic: Bot A (Always in market, reverses on TP, continues on SL)
 #          Bot B (Grid hedging bot, triggers at S ± W/2 with counter-trend entry)
 # - Weekend Close: JST Friday 20:00 JST to Monday 07:00 JST (Suspends, closes all positions)
@@ -23,6 +24,8 @@ import numpy as np
 import warnings
 
 warnings.filterwarnings('ignore')
+
+JST = timezone(timedelta(hours=9), "JST")
 
 # Absolute path of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +58,7 @@ STATE_FILE = os.path.join(script_dir, "s14_bot_state.json")
 PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
-    'symbol': 'GBPUSDm',
+    'symbol': 'GBPUSD',
     'W_pips': 40.0,
     'lot_multiplier': 0.01,
     'max_bet_units': 8,
@@ -476,7 +479,7 @@ class s14TradingBot:
         csv_file = os.path.join(LOG_DIR, "s14_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -550,12 +553,16 @@ class s14TradingBot:
             closed_any = False
             if self.state["pos_A"]:
                 logging.info(f"[Bot A] Weekend forced close triggered. Closing ticket {self.state['pos_A']['ticket']}")
-                self.close_and_cleanup('A', self.state['pos_A']['ticket'], "WEEKEND")
-                closed_any = True
+                if self.close_and_cleanup('A', self.state['pos_A']['ticket'], "WEEKEND"):
+                    closed_any = True
+                else:
+                    return
             if self.state["pos_B"]:
                 logging.info(f"[Bot B] Weekend forced close triggered. Closing ticket {self.state['pos_B']['ticket']}")
-                self.close_and_cleanup('B', self.state['pos_B']['ticket'], "WEEKEND")
-                closed_any = True
+                if self.close_and_cleanup('B', self.state['pos_B']['ticket'], "WEEKEND"):
+                    closed_any = True
+                else:
+                    return
             
             if closed_any or self.state["S"] is not None or self.state["next_direction_A"] != "LONG":
                 # Reset states back to initial start variables for Monday
@@ -599,7 +606,9 @@ class s14TradingBot:
 
             if close_A:
                 logging.info(f"[Bot A] Exit Target Triggered ({outcome_A}). Ticket: {ticket_A}.")
-                self.close_and_cleanup('A', ticket_A, outcome_A)
+                close_res = self.close_and_cleanup('A', ticket_A, outcome_A)
+                if not close_res:
+                    return
                 
                 # Apply Monte Carlo Updates
                 self.mc_manager.update_mc(outcome_A, None, pos_A['bet_units'], 0)
@@ -644,6 +653,8 @@ class s14TradingBot:
             if close_B:
                 logging.info(f"[Bot B] Exit Target Triggered ({outcome_B}). Ticket: {ticket_B}.")
                 close_res = self.close_and_cleanup('B', ticket_B, outcome_B)
+                if not close_res:
+                    return
                 
                 # Apply Monte Carlo Updates
                 self.mc_manager.update_mc(None, outcome_B, 0, pos_B['bet_units'])
@@ -672,9 +683,16 @@ class s14TradingBot:
                 lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
                 
                 order_type = ORDER_TYPE_BUY if next_dir == "LONG" else ORDER_TYPE_SELL
+                expected_px = current_ask if next_dir == "LONG" else current_bid
+                if next_dir == "LONG":
+                    initial_tp = expected_px + W
+                    initial_sl = expected_px - W
+                else:
+                    initial_tp = expected_px - W
+                    initial_sl = expected_px + W
                 logging.info(f"[Bot A] Preparing to open {next_dir} | Bet Units: {bet_units} | Lot: {lot}")
                 
-                ticket = self.executor.open_position(symbol, order_type, lot)
+                ticket = self.executor.open_position(symbol, order_type, lot, sl=initial_sl, tp=initial_tp)
                 if ticket:
                     exec_px = float(ticket.price)
                     if next_dir == "LONG":
@@ -683,6 +701,7 @@ class s14TradingBot:
                     else:
                         tp = exec_px - W
                         sl = exec_px + W
+                    self.executor.modify_position_sl_tp(ticket, sl, tp)
                         
                     self.state["pos_A"] = {
                         "ticket": int(ticket),
@@ -735,9 +754,16 @@ class s14TradingBot:
                     lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
                     
                     order_type = ORDER_TYPE_BUY if trigger_direction == "LONG" else ORDER_TYPE_SELL
+                    expected_px = current_ask if trigger_direction == "LONG" else current_bid
+                    if trigger_direction == "LONG":
+                        initial_tp = expected_px + W
+                        initial_sl = expected_px - W
+                    else:
+                        initial_tp = expected_px - W
+                        initial_sl = expected_px + W
                     logging.info(f"[Bot B] Triggered activation {trigger_direction} (S: {S:.5f}, Current: {current_bid if trigger_direction == 'LONG' else current_ask:.5f}) | Bet Units: {bet_units} | Lot: {lot}")
                     
-                    ticket = self.executor.open_position(symbol, order_type, lot)
+                    ticket = self.executor.open_position(symbol, order_type, lot, sl=initial_sl, tp=initial_tp)
                     if ticket:
                         exec_px = float(ticket.price)
                         if trigger_direction == "LONG":
@@ -746,6 +772,7 @@ class s14TradingBot:
                         else:
                             tp = exec_px - W
                             sl = exec_px + W
+                        self.executor.modify_position_sl_tp(ticket, sl, tp)
                             
                         self.state["pos_B"] = {
                             "ticket": int(ticket),
@@ -783,8 +810,12 @@ class s14TradingBot:
             logging.info(f"[Bot {bot_type}] Successfully closed position. Ticket: {ticket}, Lot: {lot}, Exit Price: {success.close_price:.5f}, Profit: {success.profit}")
             self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
         else:
-            logging.warning(f"[Bot {bot_type}] Failed to close ticket {ticket} via EA. Cleared local state to avoid loop lock.")
+            logging.warning(f"[Bot {bot_type}] Failed to close ticket {ticket} via EA. Keeping state so the bot can retry.")
             self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)
+            pos["last_close_fail_reason"] = reason
+            pos["last_close_fail_time"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            self.save_state()
+            return success
             
         self.state[pos_key] = None
         self.save_state()

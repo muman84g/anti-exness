@@ -24,6 +24,8 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+JST = timezone(timedelta(hours=9), "JST")
+
 # スクリプト自身の絶対パス
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -67,6 +69,8 @@ DEFAULT_PARAMS = {
     'tp_mult': 1.5,                # 利確ATR乗数
     'use_be': True,                # 建値移動 (BE) の有無
     'multiplier': 50.0,            # US500m コントラクトサイズ
+    'use_symbol_trade_value': True, # Prefer broker tick value/tick size for risk sizing
+    'max_lot_limit': 2.0,           # Hard cap for live lot sizing
     'spread_pct': 0.00005,         # US500m 標準スプレッド (0.005%)
 }
 
@@ -145,7 +149,7 @@ class s11TradingBot:
         csv_file = os.path.join(LOG_DIR, "s11_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -185,7 +189,7 @@ class s11TradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         lag_sym = PARAMS['lag_symbol']
         lead_sym = PARAMS['lead_symbol']
         
@@ -269,7 +273,7 @@ class s11TradingBot:
         atr = pos["atr"]
         be_active = pos.get("be_active", False)
         entry_time_str = pos["entry_time"]
-        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
 
         # A. 週末強制決済
         if is_weekend_jst(now_jst):
@@ -295,8 +299,11 @@ class s11TradingBot:
             # 建値移動 (BE)
             if PARAMS['use_be'] and not be_active and pos["max_seen_p"] >= (entry_price + atr):
                 logging.info(f"[{symbol}] Breakeven triggered for LONG. Moving SL from {sl_price:.4f} to {entry_price:.4f}")
+                if self.executor.modify_position_sl_tp(ticket, entry_price, tp_price):
+                    pos["be_active"] = True
+                else:
+                    logging.warning(f"[{symbol}] Server-side BE modify failed. Local BE guard remains active and will retry.")
                 pos["sl_price"] = entry_price
-                pos["be_active"] = True
                 self.save_state()
                 sl_price = entry_price
 
@@ -313,8 +320,12 @@ class s11TradingBot:
             # 建値移動 (BE)
             if PARAMS['use_be'] and not be_active and pos["min_seen_p"] <= (entry_price - atr):
                 logging.info(f"[{symbol}] Breakeven triggered for SHORT. Moving SL from {sl_price:.4f} to {entry_price:.4f}")
-                pos["sl_price"] = entry_price * (1.0 + PARAMS['spread_pct'])
-                pos["be_active"] = True
+                new_sl = entry_price * (1.0 + PARAMS['spread_pct'])
+                if self.executor.modify_position_sl_tp(ticket, new_sl, tp_price):
+                    pos["be_active"] = True
+                else:
+                    logging.warning(f"[{symbol}] Server-side BE modify failed. Local BE guard remains active and will retry.")
+                pos["sl_price"] = new_sl
                 self.save_state()
                 sl_price = pos["sl_price"]
 
@@ -402,37 +413,45 @@ class s11TradingBot:
 
         # ロット計算用損切り幅 sl_d (標準 1.0 ATR)
         sl_d = max(PARAMS['sl_mult'] * atr, 0.0001)
+        min_stop_d = getattr(info, "stops_level", 0) * getattr(info, "point", 0.0)
+        if min_stop_d > 0:
+            sl_d = max(sl_d, min_stop_d)
 
         # ロット計算
-        sl_usd_per_lot = sl_d * PARAMS['multiplier']
+        price_unit_value = getattr(info, "price_unit_value", 0.0)
+        if not PARAMS.get('use_symbol_trade_value', True) or price_unit_value <= 0:
+            price_unit_value = PARAMS['multiplier']
+
+        sl_usd_per_lot = sl_d * price_unit_value
         if sl_usd_per_lot > 0:
             target_lot = FIXED_RISK_USD / sl_usd_per_lot
         else:
             target_lot = info.volume_min
 
-        max_lot_limit = 2.0  # 安全上限
+        max_lot_limit = PARAMS.get('max_lot_limit', 2.0)  # 安全上限
         target_lot = max(info.volume_min, min(target_lot, info.volume_max, max_lot_limit))
         target_lot = round(target_lot / info.volume_step) * info.volume_step
         target_lot = round(target_lot, 2)
 
         order_type = ORDER_TYPE_BUY if direction == "LONG" else ORDER_TYPE_SELL
-        ticket = self.executor.open_position(symbol, order_type, target_lot)
+
+        expected_entry_price = current_ask if direction == "LONG" else current_bid
+        if direction == "LONG":
+            sl_px = expected_entry_price - sl_d
+            tp_px = expected_entry_price + PARAMS['tp_mult'] * sl_d
+        else:
+            sl_px = (expected_entry_price + sl_d) * (1.0 + PARAMS['spread_pct'])
+            tp_px = expected_entry_price - PARAMS['tp_mult'] * sl_d
+
+        ticket = self.executor.open_position(symbol, order_type, target_lot, sl=sl_px, tp=tp_px)
 
         if ticket:
             actual_entry_price = float(ticket.price)
-            
-            # 実執行価格をベースに SL と TP を決定
-            if direction == "LONG":
-                sl_px = actual_entry_price - sl_d
-                tp_px = actual_entry_price + PARAMS['tp_mult'] * sl_d
-            else:
-                sl_px = actual_entry_price + sl_d
-                # SHORT決済買戻しは Ask価格のためスプレッド分を加算
-                sl_px_ask = sl_px * (1.0 + PARAMS['spread_pct'])
-                tp_px = actual_entry_price - PARAMS['tp_mult'] * sl_d
+            if actual_entry_price <= 0:
+                actual_entry_price = expected_entry_price
                 
             # 状態更新
-            now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+            now_jst = datetime.now(JST)
             now_jst_str = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
             self.state["active_tickets"][symbol] = ticket
@@ -441,9 +460,11 @@ class s11TradingBot:
                 "direction": direction,
                 "entry_time": now_jst_str,
                 "entry_price": actual_entry_price,
-                "sl_price": float(sl_px) if direction == "LONG" else float(sl_px_ask),
+                "sl_price": float(sl_px),
                 "tp_price": float(tp_px),
                 "atr": float(atr),
+                "risk_price_unit_value": float(price_unit_value),
+                "risk_usd_per_lot": float(sl_usd_per_lot),
                 "be_active": False,
                 "lot_size": float(target_lot),
                 "max_seen_p": actual_entry_price,
@@ -466,8 +487,13 @@ class s11TradingBot:
             logging.info(f"[{symbol}] Successfully closed position (Reason: {reason}). Ticket: {ticket}, PnL: {success.profit}")
             self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
         else:
-            logging.warning(f"[{symbol}] Failed to close ticket {ticket} via EA. Clean up state anyway to avoid loop lock.")
+            logging.warning(f"[{symbol}] Failed to close ticket {ticket} via EA. Keeping state so the bot can retry.")
             self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)
+            if pos is not None:
+                pos["last_close_fail_reason"] = reason
+                pos["last_close_fail_time"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+                self.save_state()
+            return
             
         if symbol in self.state["active_tickets"]:
             del self.state["active_tickets"][symbol]

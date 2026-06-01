@@ -65,6 +65,16 @@ fi
 echo "[2/3] MT5 ターミナルを Wine で起動中 (EA自動セット)..."
 # アップデートダイアログを物理的に無効化
 rm -rf "${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/WebInstall"
+echo "[2/3] Compiling BotBridge EA..."
+METAEDITOR="${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe"
+if [ -f "$METAEDITOR" ]; then
+    (
+        cd "${WINEPREFIX}/drive_c/Program Files/MetaTrader 5"
+        timeout 90s wine MetaEditor64.exe /portable /compile:MQL5\\Experts\\BotBridge.mq5 /log:MQL5\\Experts\\BotBridge_startup_compile.log || true
+    )
+fi
+echo "      BotBridge compile step finished"
+
 DISPLAY=${DISPLAY:-:99} wine "$MT5_TERMINAL" /portable /experts /config:Z:\\app\\startup.ini &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"

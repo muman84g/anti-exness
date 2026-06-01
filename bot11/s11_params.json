@@ -10,5 +10,7 @@
     "tp_mult": 1.5,
     "use_be": true,
     "multiplier": 50.0,
+    "use_symbol_trade_value": true,
+    "max_lot_limit": 2.0,
     "spread_pct": 5e-05
 }

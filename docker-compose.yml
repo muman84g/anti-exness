@@ -53,12 +53,14 @@ services:
       - ./bot9/live_executor.py:/app/bot9/live_executor.py:ro
       - ./bot9/base_interfaces.py:/app/bot9/base_interfaces.py:ro
       - ./bot9/ea_bridge.py:/app/bot9/ea_bridge.py:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:104
       - VNC_PORT=5905
       - NOVNC_PORT=6085
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot9
 
   # ── Bot 10 (S10用設定) ─────────────────────────────────────
   exness-bot-10:
@@ -79,12 +81,14 @@ services:
       - ./bot10/live_executor.py:/app/bot10/live_executor.py:ro
       - ./bot10/base_interfaces.py:/app/bot10/base_interfaces.py:ro
       - ./bot10/ea_bridge.py:/app/bot10/ea_bridge.py:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:105
       - VNC_PORT=5906
       - NOVNC_PORT=6086
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot10
 
   # ── Bot 11 (S11用設定) ─────────────────────────────────────
   exness-bot-11:
@@ -106,12 +110,14 @@ services:
       - ./bot11/base_interfaces.py:/app/bot11/base_interfaces.py:ro
       - ./bot11/ea_bridge.py:/app/bot11/ea_bridge.py:ro
       - ./bot11/s11_params.json:/app/bot11/s11_params.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:106
       - VNC_PORT=5907
       - NOVNC_PORT=6087
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot11
 
   # ── Bot 12 (S12用設定) ─────────────────────────────────────
   exness-bot-12:
@@ -133,12 +139,14 @@ services:
       - ./bot12/base_interfaces.py:/app/bot12/base_interfaces.py:ro
       - ./bot12/ea_bridge.py:/app/bot12/ea_bridge.py:ro
       - ./bot12/s12_params.json:/app/bot12/s12_params.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:107
       - VNC_PORT=5908
       - NOVNC_PORT=6088
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot12
 
   # ── Bot 14 (S14用設定) ─────────────────────────────────────
   exness-bot-14:
@@ -151,22 +159,24 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot14/s14_bot_state.json:/app/bot14/s14_bot_state.json
-      - ./bot14/logs:/app/bot14/logs
-      - ./bot14/live_config.py:/app/bot14/live_config.py:ro
-      - ./bot14/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
-      - ./bot14/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
-      - ./bot14/live_executor.py:/app/bot14/live_executor.py:ro
-      - ./bot14/base_interfaces.py:/app/bot14/base_interfaces.py:ro
-      - ./bot14/ea_bridge.py:/app/bot14/ea_bridge.py:ro
-      - ./bot14/s14_params.json:/app/bot14/s14_params.json:ro
-      - ./bot14/macro_events_2026.json:/app/bot14/macro_events_2026.json:ro
+      - ./bot14_pro口座専用/s14_bot_state.json:/app/bot14/s14_bot_state.json
+      - ./bot14_pro口座専用/logs:/app/bot14/logs
+      - ./bot14_pro口座専用/live_config.py:/app/bot14/live_config.py:ro
+      - ./bot14_pro口座専用/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
+      - ./bot14_pro口座専用/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
+      - ./bot14_pro口座専用/live_executor.py:/app/bot14/live_executor.py:ro
+      - ./bot14_pro口座専用/base_interfaces.py:/app/bot14/base_interfaces.py:ro
+      - ./bot14_pro口座専用/ea_bridge.py:/app/bot14/ea_bridge.py:ro
+      - ./bot14_pro口座専用/s14_params.json:/app/bot14/s14_params.json:ro
+      - ./bot14_pro口座専用/macro_events_2026.json:/app/bot14/macro_events_2026.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:108
       - VNC_PORT=5909
       - NOVNC_PORT=6089
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot14
 
   # ── Bot 15 (S15用設定) ─────────────────────────────────────
   exness-bot-15:
@@ -179,18 +189,20 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot15/s12_bot_state.json:/app/bot15/s12_bot_state.json
+      - ./bot15/s15_bot_state.json:/app/bot15/s15_bot_state.json
       - ./bot15/logs:/app/bot15/logs
       - ./bot15/live_config.py:/app/bot15/live_config.py:ro
-      - ./bot15/live_s12_bot.py:/app/bot15/live_s12_bot.py:ro
+      - ./bot15/live_s15_bot.py:/app/bot15/live_s15_bot.py:ro
       - ./bot15/live_data_fetcher.py:/app/bot15/live_data_fetcher.py:ro
       - ./bot15/live_executor.py:/app/bot15/live_executor.py:ro
       - ./bot15/base_interfaces.py:/app/bot15/base_interfaces.py:ro
       - ./bot15/ea_bridge.py:/app/bot15/ea_bridge.py:ro
-      - ./bot15/s12_params.json:/app/bot15/s12_params.json:ro
+      - ./bot15/s15_params.json:/app/bot15/s15_params.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
       - DISPLAY=:109
       - VNC_PORT=5910
       - NOVNC_PORT=6090
       - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot15

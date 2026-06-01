@@ -23,6 +23,8 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+JST = timezone(timedelta(hours=9), "JST")
+
 # Script directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -185,7 +187,7 @@ class TurtleTradingBot:
     def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0.0, price=0.0, pnl=0.0, reason=""):
         csv_file = os.path.join(LOG_DIR, "s15_trades.csv")
         file_exists = os.path.isfile(csv_file)
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -215,7 +217,7 @@ class TurtleTradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
-        now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+        now_jst = datetime.now(JST)
         symbol = PARAMS["symbol"]
         
         # 1. Manage Active Position
@@ -352,11 +354,21 @@ class TurtleTradingBot:
         lot_size = round(lot_size / info.volume_step) * info.volume_step
         lot_size = round(lot_size, 2)
         
-        ticket = self.executor.open_position(symbol, order_type, lot_size)
+        expected_price = info.ask if order_type == ORDER_TYPE_BUY else info.bid
+        stop_loss = expected_price - (2.0 * atr) if order_type == ORDER_TYPE_BUY else expected_price + (2.0 * atr)
+        min_stop_d = getattr(info, "stops_level", 0) * getattr(info, "point", 0.0)
+        if min_stop_d > 0:
+            if order_type == ORDER_TYPE_BUY:
+                stop_loss = min(stop_loss, expected_price - min_stop_d)
+            else:
+                stop_loss = max(stop_loss, expected_price + min_stop_d)
+
+        ticket = self.executor.open_position(symbol, order_type, lot_size, sl=stop_loss, tp=0.0)
         if ticket:
             actual_price = float(ticket.price)
             direction = "LONG" if order_type == ORDER_TYPE_BUY else "SHORT"
             stop_loss = actual_price - (2.0 * atr) if order_type == ORDER_TYPE_BUY else actual_price + (2.0 * atr)
+            self.executor.modify_position_sl_tp(ticket, stop_loss, 0.0)
             
             # Save State
             self.state["ticket"] = int(ticket)
@@ -429,6 +441,10 @@ class TurtleTradingBot:
                     self.state["highest_high"] = max(self.state["highest_high"], bid)
                     new_sl = self.state["highest_high"] - (PARAMS["chandelier_atr"] * atr)
                     if new_sl > stop_loss:
+                        if self.executor.modify_position_sl_tp(ticket, new_sl, 0.0):
+                            logging.info(f"[{symbol}] Server-side SL trailed to: {new_sl:.5f}")
+                        else:
+                            logging.warning(f"[{symbol}] Server-side SL trail failed. Local guard updated and will continue monitoring.")
                         self.state["stop_loss"] = float(new_sl)
                         self.save_state()
                         logging.info(f"[{symbol}] Long Chandelier SL trailed to: {new_sl:.5f}")
@@ -452,6 +468,10 @@ class TurtleTradingBot:
                     self.state["lowest_low"] = min(self.state["lowest_low"], ask)
                     new_sl = self.state["lowest_low"] + (PARAMS["chandelier_atr"] * atr)
                     if new_sl < stop_loss:
+                        if self.executor.modify_position_sl_tp(ticket, new_sl, 0.0):
+                            logging.info(f"[{symbol}] Server-side SL trailed to: {new_sl:.5f}")
+                        else:
+                            logging.warning(f"[{symbol}] Server-side SL trail failed. Local guard updated and will continue monitoring.")
                         self.state["stop_loss"] = float(new_sl)
                         self.save_state()
                         logging.info(f"[{symbol}] Short Chandelier SL trailed to: {new_sl:.5f}")
@@ -469,8 +489,12 @@ class TurtleTradingBot:
             logging.info(f"[{symbol}] Closed position via EA (Reason: {reason}). Ticket: {ticket}, Profit: {success.profit}")
             self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
         else:
-            logging.warning(f"[{symbol}] EA close request failed for ticket {ticket}. Cleaning up local state.")
+            logging.warning(f"[{symbol}] EA close request failed for ticket {ticket}. Keeping state so the bot can retry.")
             self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)
+            self.state["last_close_fail_reason"] = reason
+            self.state["last_close_fail_time"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            self.save_state()
+            return
             
         self.init_empty_state()
 
