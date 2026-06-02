@@ -155,11 +155,12 @@ class MT5Executor(BaseExecutor):
 
             return CloseResult(True, lot, open_price, close_price, profit)
 
-        if res == "ERR|10009":
+        already_closed_responses = {"ERR|0", "ERR|10009", "ERR|POSITION_NOT_FOUND", "ERR|Position Not Found"}
+        if res in already_closed_responses:
             logging.warning(
-                f"EA returned ERR|10009 for close ticket {ticket}; "
-                "MT5 retcode 10009 means close was completed. Treating as closed, "
-                "but close price/profit were not returned by the EA."
+                f"EA returned {res} for close ticket {ticket}; treating it as already closed "
+                "or missing on MT5 so local bot state can be cleaned up. "
+                "Close price/profit were not returned by the EA."
             )
             return CloseResult(True)
 
