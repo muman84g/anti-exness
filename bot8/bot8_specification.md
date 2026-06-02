@@ -50,7 +50,7 @@ flowchart TD
     EntryPhase --> HourCheck{現在のローカル市場時間は<br/>アノマリー時間帯窓に入っているか?}
     
     %% アノマリー窓判定
-    HourCheck -->|Yes (例: 銅 NY 6時)| FetchData[MT5から全21銘柄の過去1600足データをロード]
+    HourCheck -->|Yes (銅 NY 20時)| FetchData[MT5から全21銘柄の過去1600足データをロード]
     HourCheck -->|No| End
     
     %% データ前処理 & 特徴量
@@ -61,7 +61,7 @@ flowchart TD
     SelectFeats --> Predict[LightGBMモデルで予測確率を計算]
     
     %% 確率閾値判定
-    Predict --> ProbCheck{予測確率は閾値以上か?<br/>銅: 0.51}
+    Predict --> ProbCheck{予測確率は閾値以上か?<br/>銅: 0.54}
     ProbCheck -->|Yes| CalcLot[動的ロットサイズ計算<br/>$10 リスクベース]
     CalcLot --> OpenOrder[MT5へ成行新規注文を送信]
     OpenOrder --> SaveStateEntry[状態ファイルを保存 s8_bot_state.json]
@@ -79,7 +79,7 @@ flowchart TD
 アノマリー時間帯に進入した際、エントリー可否を判断する機械学習（LightGBM）モデルへの入力データを構築するための前処理フローです。
 
 検証期間（Validation）を無事通過した「本質的に頑健な1アセット（銅）」のみを取引します。
-- **Traded Assets**: XCUUSDm (工業用銅) - 確率閾値 0.51
+- **Traded Assets**: XCUUSDm (工業用銅) - 確率閾値 0.54
 
 ### ① 特徴量生成式 (Feature Engineering)
 入力される5分足データをもとに、以下の特徴量（スケールフリー特徴量）をリアルタイムに計算します。

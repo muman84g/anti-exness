@@ -64,7 +64,7 @@ HOLD_BARS = 48   # 4時間保有（5分足×48本）
 # トレード対象アセットと各閾値
 TRADED_SYMBOLS = ['XCUUSDm']
 THRESHOLDS = {
-    'XCUUSDm': 0.48
+    'XCUUSDm': 0.54
 }
 
 # タイムゾーン定義
