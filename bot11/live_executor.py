@@ -154,6 +154,15 @@ class MT5Executor(BaseExecutor):
             profit = float(parts[5]) if len(parts) > 5 else 0.0
             
             return CloseResult(True, lot, open_price, close_price, profit)
-            
+
+        already_closed_responses = {"ERR|0", "ERR|10009", "ERR|POSITION_NOT_FOUND", "ERR|Position Not Found"}
+        if res in already_closed_responses:
+            logging.warning(
+                f"EA returned {res} for close ticket {ticket}; treating it as already closed "
+                "or missing on MT5 so local bot state can be cleaned up. "
+                "Close price/profit were not returned by the EA."
+            )
+            return CloseResult(True)
+
         logging.error(f"EA Close failed for {ticket}: {res}")
         return CloseResult(False)
