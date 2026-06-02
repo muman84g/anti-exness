@@ -18,6 +18,7 @@ import json
 import logging
 import traceback
 import csv
+import sqlite3
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
@@ -66,6 +67,25 @@ TRADED_SYMBOLS = ['XCUUSDm']
 THRESHOLDS = {
     'XCUUSDm': 0.54
 }
+
+# Final bot8 live profile: baseline NY20 entry + XCU high-zone lot throttling.
+# Backtest-equivalent lot plan: normal 0.2 lot, high-zone 0.1 lot.
+USE_ML = False
+USE_DYNAMIC_RISK = False
+FIXED_RISK_USD = 10.0
+HOLD_BARS = 48
+BASE_LOT_SIZE = {'XCUUSDm': 0.20}
+HIGH_ZONE_LOT_SIZE = {'XCUUSDm': 0.10}
+HIGH_ZONE_LOOKBACK_BARS = 17280
+HIGH_ZONE_MIN_BARS = 12000
+HIGH_ZONE_QUANTILE = 0.80
+XCU_CACHE_INIT_BARS = 30000
+XCU_CACHE_UPDATE_BARS = 5000
+XCU_CACHE_TIMEOUT_SECONDS = 60
+XCU_CACHE_UPDATE_MINUTE = 55
+XCU_CACHE_MAX_STALE_DAYS = 10
+CACHE_DIR = os.path.join(script_dir, "cache")
+MARKET_CACHE_DB = os.path.join(CACHE_DIR, "s8_market_cache.sqlite")
 
 # タイムゾーン定義
 TZ_MAP = {
@@ -339,10 +359,12 @@ class s8TradingBot:
         self.models = {}
         self.anomaly_windows = {}
         self.pipeline_meta = {}
+        self.last_cache_update_hour = None
         
         self.state = {"active_tickets": {}}
         self.load_state()
         self.load_robust_models_and_meta()
+        self.init_market_cache()
         
     def load_robust_models_and_meta(self):
         """事前学習済みのモデルと選別メタデータをロードします。"""
@@ -374,6 +396,165 @@ class s8TradingBot:
                 logging.info(f"Successfully loaded LightGBM model for {col}.")
             else:
                 logging.error(f"Model file not found for {col}: {model_path}")
+
+    def init_market_cache(self):
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with sqlite3.connect(MARKET_CACHE_DB) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS m5_bars (
+                    symbol TEXT NOT NULL,
+                    time_utc TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL,
+                    PRIMARY KEY (symbol, time_utc)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_m5_bars_symbol_time ON m5_bars(symbol, time_utc)"
+            )
+        logging.info(f"Market cache ready: {MARKET_CACHE_DB}")
+
+    def update_market_cache(self, symbol, bars, reason="scheduled"):
+        logging.info(f"[{symbol}] Updating M5 market cache ({reason}, bars={bars})...")
+        df_hist = self.dm.get_historical_data(symbol, 5, bars, timeout=XCU_CACHE_TIMEOUT_SECONDS)
+        if df_hist is None or df_hist.empty:
+            logging.warning(f"[{symbol}] Market cache update failed: no history returned.")
+            return False
+
+        df_hist = df_hist.copy()
+        if df_hist.index.tz is None:
+            df_hist.index = df_hist.index.tz_localize("UTC")
+        else:
+            df_hist.index = df_hist.index.tz_convert("UTC")
+        df_hist = df_hist.sort_index()
+        df_hist = df_hist.loc[~df_hist.index.duplicated(keep="last")]
+
+        rows = []
+        for ts, row in df_hist.iterrows():
+            rows.append(
+                (
+                    symbol,
+                    ts.isoformat(),
+                    float(row["Open"]),
+                    float(row["High"]),
+                    float(row["Low"]),
+                    float(row["Close"]),
+                    float(row["Volume"]),
+                )
+            )
+
+        with sqlite3.connect(MARKET_CACHE_DB) as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO m5_bars
+                (symbol, time_utc, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            count = conn.execute(
+                "SELECT COUNT(*) FROM m5_bars WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()[0]
+            latest = conn.execute(
+                "SELECT MAX(time_utc) FROM m5_bars WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()[0]
+        logging.info(f"[{symbol}] Market cache updated. rows_added={len(rows)} total_rows={count} latest={latest}")
+        return True
+
+    def maybe_update_market_cache(self, now_utc):
+        if now_utc.minute < XCU_CACHE_UPDATE_MINUTE:
+            return
+        hour_key = now_utc.strftime("%Y-%m-%d %H")
+        if self.last_cache_update_hour == hour_key:
+            return
+        self.last_cache_update_hour = hour_key
+        for symbol in TRADED_SYMBOLS:
+            try:
+                self.update_market_cache(symbol, XCU_CACHE_UPDATE_BARS, reason="hourly")
+            except Exception as e:
+                logging.warning(f"[{symbol}] Scheduled market cache update failed: {e}")
+                logging.warning(traceback.format_exc())
+
+    def get_cached_closes(self, symbol, limit):
+        with sqlite3.connect(MARKET_CACHE_DB) as conn:
+            rows = conn.execute(
+                """
+                SELECT time_utc, close
+                FROM m5_bars
+                WHERE symbol = ?
+                ORDER BY time_utc DESC
+                LIMIT ?
+                """,
+                (symbol, limit),
+            ).fetchall()
+        rows = list(reversed(rows))
+        if not rows:
+            return pd.Series(dtype="float64")
+        index = pd.to_datetime([row[0] for row in rows], utc=True)
+        return pd.Series([float(row[1]) for row in rows], index=index, dtype="float64")
+
+    def get_cache_status(self, symbol):
+        with sqlite3.connect(MARKET_CACHE_DB) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), MAX(time_utc) FROM m5_bars WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        count = int(row[0] or 0)
+        latest = pd.to_datetime(row[1], utc=True) if row and row[1] else None
+        return count, latest
+
+    def determine_lot_size(self, symbol, current_price, sym_info, now_utc):
+        base_lot = BASE_LOT_SIZE.get(symbol, 0.20)
+        high_lot = HIGH_ZONE_LOT_SIZE.get(symbol, max(0.01, base_lot * 0.5))
+
+        count, latest = self.get_cache_status(symbol)
+        if count < HIGH_ZONE_MIN_BARS:
+            logging.warning(f"[{symbol}] Cache has only {count} rows. Seeding cache before high-zone check...")
+            try:
+                self.update_market_cache(symbol, XCU_CACHE_INIT_BARS, reason="seed")
+            except Exception as e:
+                logging.warning(f"[{symbol}] Seed market cache update failed: {e}")
+                logging.warning(traceback.format_exc())
+            count, latest = self.get_cache_status(symbol)
+
+        if count < HIGH_ZONE_MIN_BARS:
+            logging.warning(f"[{symbol}] Cache still insufficient ({count} rows). Using safe high-zone lot: {high_lot}")
+            target_lot = high_lot
+            high_zone = True
+            threshold = None
+        elif latest is not None and (
+            now_utc - latest.to_pydatetime()
+        ).total_seconds() > XCU_CACHE_MAX_STALE_DAYS * 24 * 60 * 60:
+            logging.warning(f"[{symbol}] Cache stale. latest={latest}. Using safe high-zone lot: {high_lot}")
+            target_lot = high_lot
+            high_zone = True
+            threshold = None
+        else:
+            closes = self.get_cached_closes(symbol, HIGH_ZONE_LOOKBACK_BARS)
+            threshold = float(closes.quantile(HIGH_ZONE_QUANTILE))
+            high_zone = bool(current_price > threshold)
+            target_lot = high_lot if high_zone else base_lot
+            logging.info(
+                f"[{symbol}] High-zone check: price={current_price:.5f}, "
+                f"q{HIGH_ZONE_QUANTILE:.2f}={threshold:.5f}, rows={len(closes)}, "
+                f"high_zone={high_zone}, target_lot={target_lot}"
+            )
+
+        if sym_info:
+            target_lot = max(sym_info.volume_min, min(target_lot, sym_info.volume_max))
+            target_lot = round(target_lot / sym_info.volume_step) * sym_info.volume_step
+            target_lot = round(target_lot, 2)
+        else:
+            target_lot = max(0.01, round(target_lot, 2))
+
+        return target_lot, high_zone, threshold
 
     def load_state(self):
         if os.path.exists(STATE_FILE):
@@ -437,6 +618,7 @@ class s8TradingBot:
         if minute >= 55:
             if not self.state["active_tickets"]:
                 logging.info("No active positions to close at H:55.")
+                self.maybe_update_market_cache(now_utc)
                 return
                 
             logging.info("H:55 reached. Checking positions for hold time exit...")
@@ -467,6 +649,7 @@ class s8TradingBot:
                     del self.state["active_tickets"][col]
                     
             self.save_state()
+            self.maybe_update_market_cache(now_utc)
             return
 
         # ── 2. エントリー判定フェーズ (毎時最初の約5分以内) ──────────
@@ -477,9 +660,10 @@ class s8TradingBot:
             # (vol std計算に1440期間必要)
             logging.info("Fetching required symbols' data from MT5...")
             df_open_raw, df_high_raw, df_low_raw, df_close_raw, df_volume_raw = {}, {}, {}, {}, {}
+            fetch_symbols = REQUIRED_SYMBOLS if USE_ML else TRADED_SYMBOLS
             
             success_count = 0
-            for sym in REQUIRED_SYMBOLS:
+            for sym in fetch_symbols:
                 df_hist = self.dm.get_historical_data(sym, 5, 1600)
                 if df_hist is not None and len(df_hist) >= 1500:
                     df_open_raw[sym] = df_hist['Open']
@@ -491,8 +675,8 @@ class s8TradingBot:
                 else:
                     logging.warning(f"Failed to fetch data for {sym}")
                     
-            if success_count < len(REQUIRED_SYMBOLS):
-                logging.warning(f"Only successfully fetched {success_count}/{len(REQUIRED_SYMBOLS)} symbols. Proceeding with caution.")
+            if success_count < len(fetch_symbols):
+                logging.warning(f"Only successfully fetched {success_count}/{len(fetch_symbols)} symbols. Proceeding with caution.")
                 
             # 各DataFrameの生成と同期 (バックテスト load_data 相当)
             df_close_df = pd.DataFrame(df_close_raw).ffill().bfill()
@@ -510,6 +694,9 @@ class s8TradingBot:
             for col in TRADED_SYMBOLS:
                 if col in self.state["active_tickets"]:
                     logging.info(f"Already have open position in {col}. Skip.")
+                    continue
+                if col not in df_close_df.columns or df_close_df[col].dropna().empty:
+                    logging.warning(f"[{col}] No usable latest history. Skip.")
                     continue
                     
                 # 2.1. ローカル時間におけるアノマリー時間帯の判定
@@ -601,6 +788,17 @@ class s8TradingBot:
                             target_lot = round(target_lot, 2)
                         else:
                             target_lot = max(0.01, round(target_lot, 2))
+
+                        target_lot, high_zone, high_threshold = self.determine_lot_size(
+                            col, current_price, sym_info, now_utc
+                        )
+                        if high_threshold is None:
+                            logging.info(f"[{col}] Lot plan: lot={target_lot}, high_zone={high_zone}, threshold=unknown")
+                        else:
+                            logging.info(
+                                f"[{col}] Lot plan: lot={target_lot}, high_zone={high_zone}, "
+                                f"threshold={high_threshold:.5f}"
+                            )
                             
                         # エントリー発注
                         order_type = ORDER_TYPE_BUY if direction == 'LONG' else ORDER_TYPE_SELL

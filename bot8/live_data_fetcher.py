@@ -35,13 +35,13 @@ class MT5DataManager(BaseDataManager):
         # File IPC has no persistent server/socket objects in this version
         pass
         
-    def get_historical_data(self, mt5_symbol, timeframe, num_bars):
+    def get_historical_data(self, mt5_symbol, timeframe, num_bars, timeout=10):
         """
         Fetch historical bars from MT5 via EA Bridge.
         `timeframe`: standard mt5 integer like 16385 for H1
         """
         # Send HIST request
-        res = ea_bridge.send_command(f"HIST|{mt5_symbol}|{timeframe}|{num_bars}")
+        res = ea_bridge.send_command(f"HIST|{mt5_symbol}|{timeframe}|{num_bars}", timeout=timeout)
         
         if not res or not res.startswith("OK|"):
             print(f"EA failed to get historical data for {mt5_symbol}: {res}")

@@ -127,3 +127,12 @@ flowchart TD
 5. **ブローカー制限による丸め処理**:
    ブローカー（Exness）が規定するシンボルの契約最小ロット、最大ロット、およびロット刻み幅（`volume_step`、通常 0.01）に基づいて最終調整します。
    $$\text{Final Lot} = \text{Round}\left(\max(\text{MinVolume}, \min(\text{Target Lot}, \text{MaxVolume})), \text{Step}\right)$$
+## Final Live Profile - 2026-06-02
+
+- Strategy: baseline anomaly window entry for XCUUSDm.
+- ML filter: disabled for live execution.
+- Entry window: XCUUSDm NY local hour 20, LONG.
+- Lot plan: normal 0.20 lot, high-zone 0.10 lot.
+- High-zone rule: XCUUSDm current close > cached M5 rolling 60-day/17280-bar 80% percentile.
+- Market cache: bot8/cache/s8_market_cache.sqlite, seeded with 30000 XCU M5 bars and refreshed hourly with 5000 bars.
+- Failsafe: if cache is missing, stale, or insufficient, use safe high-zone lot 0.10.

@@ -11,6 +11,8 @@ ENV/
 # Trading data & sensitive configs
 live_trades.json
 live_config.py
+bot8/cache/*.sqlite
+bot8/cache/*.sqlite-*
 *.log
 logs_dump/
 build_log*.txt
