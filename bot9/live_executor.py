@@ -152,8 +152,16 @@ class MT5Executor(BaseExecutor):
             open_price = float(parts[3]) if len(parts) > 3 else 0.0
             close_price = float(parts[4]) if len(parts) > 4 else 0.0
             profit = float(parts[5]) if len(parts) > 5 else 0.0
-            
+
             return CloseResult(True, lot, open_price, close_price, profit)
-            
+
+        if res == "ERR|10009":
+            logging.warning(
+                f"EA returned ERR|10009 for close ticket {ticket}; "
+                "MT5 retcode 10009 means close was completed. Treating as closed, "
+                "but close price/profit were not returned by the EA."
+            )
+            return CloseResult(True)
+
         logging.error(f"EA Close failed for {ticket}: {res}")
         return CloseResult(False)

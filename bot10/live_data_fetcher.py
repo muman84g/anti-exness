@@ -48,6 +48,8 @@ class MT5DataManager(BaseDataManager):
         for line in data_str.split("|"):
             if not line.strip(): continue
             parts = line.split(",")
+            if len(parts) < 6 or any(part == "" for part in parts[:6]):
+                continue
             rates.append({
                 "time": parts[0],
                 "Open": float(parts[1]),
@@ -56,13 +58,18 @@ class MT5DataManager(BaseDataManager):
                 "Close": float(parts[4]),
                 "Volume": int(parts[5])
             })
-            
+
+        if not rates:
+            return None
+
         df = pd.DataFrame(rates)
         try:
             df['time'] = pd.to_datetime(df['time'], format='%Y.%m.%d %H:%M')
         except ValueError:
             df['time'] = pd.to_datetime(df['time'])
         df.set_index('time', inplace=True)
+        # BotBridge returns rates newest-first; strategy code expects chronological order.
+        df.sort_index(inplace=True)
         return df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
 if __name__ == "__main__":

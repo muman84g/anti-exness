@@ -180,19 +180,23 @@ string ProcessRequest(string raw_req) {
         double profit = 0.0;
         double close_price = 0.0;
         string symbol = "";
-        
-        if(PositionSelectByTicket(ticket)) {
-            open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-            lot = PositionGetDouble(POSITION_VOLUME);
-            profit = PositionGetDouble(POSITION_PROFIT);
-            symbol = PositionGetString(POSITION_SYMBOL);
-            close_price = SymbolInfoDouble(symbol, (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SYMBOL_BID : SYMBOL_ASK);
+
+        if(!PositionSelectByTicket(ticket)) {
+            return "ERR|POSITION_NOT_FOUND";
         }
-        
-        if(trade.PositionClose(ticket)) {
+
+        open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+        lot = PositionGetDouble(POSITION_VOLUME);
+        profit = PositionGetDouble(POSITION_PROFIT);
+        symbol = PositionGetString(POSITION_SYMBOL);
+        close_price = SymbolInfoDouble(symbol, (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? SYMBOL_BID : SYMBOL_ASK);
+
+        bool close_sent = trade.PositionClose(ticket);
+        uint retcode = trade.ResultRetcode();
+        if(close_sent || retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_DONE_PARTIAL) {
             return "OK|Closed|" + DoubleToString(lot, 2) + "|" + DoubleToString(open_price, 5) + "|" + DoubleToString(close_price, 5) + "|" + DoubleToString(profit, 2);
         } else {
-            return "ERR|" + IntegerToString(trade.ResultRetcode());
+            return "ERR|" + IntegerToString((int)retcode);
         }
     }
     
