@@ -97,6 +97,11 @@ def load_params():
 
 PARAMS = load_params()
 
+S14_MAGIC_A = 140014
+S14_MAGIC_B = 140015
+S14_COMMENT_A = "s14_A"
+S14_COMMENT_B = "s14_B"
+
 # ============================================================
 # Decomposed Monte Carlo Logic Classes (from Backtest)
 # ============================================================
@@ -492,6 +497,227 @@ class s14TradingBot:
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
 
+    def classify_live_position(self, live_pos):
+        comment = live_pos.comment or ""
+        if live_pos.magic == S14_MAGIC_A or comment.startswith(S14_COMMENT_A):
+            return "A"
+        if live_pos.magic == S14_MAGIC_B or comment.startswith(S14_COMMENT_B):
+            return "B"
+        return None
+
+    def get_bet_units_from_live_position(self, live_pos):
+        comment = live_pos.comment or ""
+        if ":" in comment:
+            raw = comment.split(":", 1)[1]
+            digits = []
+            for ch in raw:
+                if ch.isdigit():
+                    digits.append(ch)
+                else:
+                    break
+            if digits:
+                return max(1, int("".join(digits)))
+
+        lot_multiplier = PARAMS.get("lot_multiplier", 0.01)
+        if lot_multiplier > 0:
+            return max(1, int(round(float(live_pos.volume) / lot_multiplier)))
+        return 1
+
+    def live_position_to_state(self, live_pos, W, now_jst):
+        direction = live_pos.direction
+        entry_price = float(live_pos.open_price)
+        if direction == "LONG":
+            fallback_tp = entry_price + W
+            fallback_sl = entry_price - W
+        else:
+            fallback_tp = entry_price - W
+            fallback_sl = entry_price + W
+
+        tp = float(live_pos.tp) if live_pos.tp > 0 else fallback_tp
+        sl = float(live_pos.sl) if live_pos.sl > 0 else fallback_sl
+
+        return {
+            "ticket": int(live_pos.ticket),
+            "direction": direction,
+            "entry_time": now_jst.strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_price": entry_price,
+            "tp": float(tp),
+            "sl": float(sl),
+            "bet_units": int(self.get_bet_units_from_live_position(live_pos)),
+            "lot_size": float(live_pos.volume),
+            "mt5_magic": int(live_pos.magic),
+            "mt5_comment": live_pos.comment,
+            "restored_from_mt5": True,
+        }
+
+    def refresh_state_position_from_live(self, pos_key, live_pos):
+        pos = self.state.get(pos_key)
+        if not pos:
+            return False
+
+        changed = False
+        updates = {
+            "entry_price": float(live_pos.open_price),
+            "lot_size": float(live_pos.volume),
+            "mt5_magic": int(live_pos.magic),
+            "mt5_comment": live_pos.comment,
+        }
+        if live_pos.sl > 0:
+            updates["sl"] = float(live_pos.sl)
+        if live_pos.tp > 0:
+            updates["tp"] = float(live_pos.tp)
+
+        for key, value in updates.items():
+            old_value = pos.get(key)
+            if isinstance(value, float):
+                if old_value is None or abs(float(old_value) - value) > 0.000001:
+                    pos[key] = value
+                    changed = True
+            elif old_value != value:
+                pos[key] = value
+                changed = True
+
+        return changed
+
+    def infer_missing_position_outcome(self, pos, current_bid, current_ask, pip_val):
+        direction = pos.get("direction")
+        tp = float(pos.get("tp", 0.0))
+        sl = float(pos.get("sl", 0.0))
+        tol = pip_val * 0.5
+
+        if direction == "LONG":
+            if tp > 0 and current_bid >= tp - tol:
+                return "WIN"
+            if sl > 0 and current_bid <= sl + tol:
+                return "LOSE"
+        elif direction == "SHORT":
+            if tp > 0 and current_ask <= tp + tol:
+                return "WIN"
+            if sl > 0 and current_ask >= sl - tol:
+                return "LOSE"
+        return "MANUAL"
+
+    def handle_missing_state_position(self, bot_type, pos, current_bid, current_ask, pip_val):
+        pos_key = "pos_A" if bot_type == "A" else "pos_B"
+        ticket = pos.get("ticket")
+        direction = pos.get("direction", "")
+        lot = pos.get("lot_size", 0.0)
+        outcome = self.infer_missing_position_outcome(pos, current_bid, current_ask, pip_val)
+
+        logging.warning(
+            f"[Bot {bot_type}] State ticket {ticket} is not present in MT5 positions. "
+            f"Classified as {outcome}; cleaning local state."
+        )
+
+        if outcome in {"WIN", "LOSE"}:
+            if bot_type == "A":
+                self.mc_manager.update_mc(outcome, None, pos.get("bet_units", 0), 0)
+                self.state["next_direction_A"] = "SHORT" if outcome == "WIN" and direction == "LONG" else (
+                    "LONG" if outcome == "WIN" and direction == "SHORT" else direction
+                )
+            else:
+                self.mc_manager.update_mc(None, outcome, 0, pos.get("bet_units", 0))
+                self.state["waiting_B"] = True
+                self.state["S"] = current_bid if direction == "LONG" else current_ask
+            self.log_trade_csv(f"EXIT_SYNC_{outcome}", ticket, PARAMS["symbol"], direction, lot, 0.0, 0.0, outcome)
+            block_entries_this_cycle = False
+        else:
+            # Manual/external closes cannot be scored safely, so do not mutate MC state.
+            if bot_type == "A":
+                self.state["next_direction_A"] = direction or "LONG"
+            else:
+                self.state["waiting_B"] = True
+                self.state["S"] = current_bid if direction == "LONG" else current_ask
+            self.log_trade_csv("EXIT_SYNC_MANUAL", ticket, PARAMS["symbol"], direction, lot, 0.0, 0.0, "MANUAL_OR_EXTERNAL")
+            block_entries_this_cycle = True
+
+        self.state[pos_key] = None
+        return True, block_entries_this_cycle
+
+    def sync_positions_with_mt5(self, symbol, W, current_bid, current_ask, pip_val, now_jst):
+        live_positions = self.executor.get_positions(symbol)
+        if live_positions is None:
+            reason = "MT5 position list unavailable"
+            if self.state.get("sync_block_reason") != reason:
+                self.state["sync_block_new_entries"] = True
+                self.state["sync_block_reason"] = reason
+                self.save_state()
+                logging.warning("MT5 position sync failed. Blocking new entries for this cycle.")
+            return False
+
+        live_by_ticket = {int(pos.ticket): pos for pos in live_positions}
+        managed_tickets = set()
+        changed = False
+        block_entries_this_cycle = False
+
+        for bot_type, pos_key in (("A", "pos_A"), ("B", "pos_B")):
+            pos = self.state.get(pos_key)
+            if not pos:
+                continue
+
+            ticket = int(pos.get("ticket", 0))
+            live_pos = live_by_ticket.get(ticket)
+            if live_pos:
+                managed_tickets.add(ticket)
+                if self.refresh_state_position_from_live(pos_key, live_pos):
+                    logging.info(f"[Bot {bot_type}] Refreshed state from MT5 position ticket {ticket}.")
+                    changed = True
+            else:
+                did_change, should_block = self.handle_missing_state_position(
+                    bot_type, pos, current_bid, current_ask, pip_val
+                )
+                changed = changed or did_change
+                block_entries_this_cycle = block_entries_this_cycle or should_block
+
+        for live_pos in live_positions:
+            ticket = int(live_pos.ticket)
+            if ticket in managed_tickets:
+                continue
+
+            bot_type = self.classify_live_position(live_pos)
+            if not bot_type:
+                continue
+
+            pos_key = "pos_A" if bot_type == "A" else "pos_B"
+            if self.state.get(pos_key) is not None:
+                continue
+
+            self.state[pos_key] = self.live_position_to_state(live_pos, W, now_jst)
+            managed_tickets.add(ticket)
+            changed = True
+            logging.warning(f"[Bot {bot_type}] Adopted live MT5 position ticket {ticket} into local state.")
+
+            if bot_type == "A":
+                self.state["next_direction_A"] = None
+                if self.state.get("S") is None:
+                    self.state["S"] = float(live_pos.open_price)
+            else:
+                self.state["waiting_B"] = False
+
+        unmanaged = [pos for pos in live_positions if int(pos.ticket) not in managed_tickets]
+        if unmanaged:
+            tickets = ",".join(str(pos.ticket) for pos in unmanaged)
+            reason = f"Unmanaged live positions: {tickets}"
+            if self.state.get("sync_block_reason") != reason:
+                self.state["sync_block_new_entries"] = True
+                self.state["sync_block_reason"] = reason
+                logging.warning(
+                    f"Found unmanaged {symbol} positions ({tickets}). "
+                    "Blocking new entries until they are closed or adopted by state."
+                )
+                changed = True
+            block_entries_this_cycle = True
+        else:
+            if self.state.pop("sync_block_new_entries", None) is not None:
+                changed = True
+            if self.state.pop("sync_block_reason", None) is not None:
+                changed = True
+
+        if changed:
+            self.save_state()
+
+        return not block_entries_this_cycle
+
     def start(self):
         logging.info("Starting s14 Move-Catcher Live Bot execution loop...")
         if not self.dm.connect():
@@ -538,6 +764,9 @@ class s14TradingBot:
         current_bid = info.bid
         current_spread = current_ask - current_bid
         max_spread = PARAMS.get("max_spread_pips", 0.8) * pip_val
+        position_sync_ok = self.sync_positions_with_mt5(
+            symbol, W, current_bid, current_ask, pip_val, now_jst
+        )
 
         # A. Weekend Filter Check
         is_weekend = False
@@ -677,7 +906,7 @@ class s14TradingBot:
 
         # --- Bot A Entry Trigger ---
         if self.state["pos_A"] is None and self.state["next_direction_A"] is not None:
-            if not in_news and spread_ok:
+            if position_sync_ok and not in_news and spread_ok:
                 next_dir = self.state["next_direction_A"]
                 bet_units = self.mc_manager.mc_A.get_bet_units()
                 lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
@@ -692,7 +921,15 @@ class s14TradingBot:
                     initial_sl = expected_px + W
                 logging.info(f"[Bot A] Preparing to open {next_dir} | Bet Units: {bet_units} | Lot: {lot}")
                 
-                ticket = self.executor.open_position(symbol, order_type, lot, sl=initial_sl, tp=initial_tp)
+                ticket = self.executor.open_position(
+                    symbol,
+                    order_type,
+                    lot,
+                    sl=initial_sl,
+                    tp=initial_tp,
+                    magic=S14_MAGIC_A,
+                    comment=f"{S14_COMMENT_A}:{bet_units}",
+                )
                 if ticket:
                     exec_px = float(ticket.price)
                     if next_dir == "LONG":
@@ -723,7 +960,9 @@ class s14TradingBot:
                 else:
                     logging.error("[Bot A] Order failed to execute.")
             else:
-                if in_news:
+                if not position_sync_ok:
+                    logging.info("[Bot A] Entry postponed: MT5 position sync is not clean.")
+                elif in_news:
                     logging.info("[Bot A] Entry postponed: currently in NEWS window.")
                 elif not spread_ok:
                     logging.info(f"[Bot A] Entry postponed: Spread too wide ({current_spread/pip_val:.1f} pips > {max_spread/pip_val:.1f} pips limit).")
@@ -749,7 +988,7 @@ class s14TradingBot:
                 trigger_direction = "LONG"
                 
             if trigger_direction:
-                if not in_news and spread_ok:
+                if position_sync_ok and not in_news and spread_ok:
                     bet_units = self.mc_manager.mc_B.get_bet_units()
                     lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
                     
@@ -763,7 +1002,15 @@ class s14TradingBot:
                         initial_sl = expected_px + W
                     logging.info(f"[Bot B] Triggered activation {trigger_direction} (S: {S:.5f}, Current: {current_bid if trigger_direction == 'LONG' else current_ask:.5f}) | Bet Units: {bet_units} | Lot: {lot}")
                     
-                    ticket = self.executor.open_position(symbol, order_type, lot, sl=initial_sl, tp=initial_tp)
+                    ticket = self.executor.open_position(
+                        symbol,
+                        order_type,
+                        lot,
+                        sl=initial_sl,
+                        tp=initial_tp,
+                        magic=S14_MAGIC_B,
+                        comment=f"{S14_COMMENT_B}:{bet_units}",
+                    )
                     if ticket:
                         exec_px = float(ticket.price)
                         if trigger_direction == "LONG":
@@ -790,7 +1037,9 @@ class s14TradingBot:
                     else:
                         logging.error("[Bot B] Activation order failed.")
                 else:
-                    if in_news:
+                    if not position_sync_ok:
+                        logging.info("[Bot B] Activation postponed: MT5 position sync is not clean.")
+                    elif in_news:
                         logging.info("[Bot B] Activation postponed: currently in NEWS window.")
                     elif not spread_ok:
                         logging.info(f"[Bot B] Activation postponed: Spread too wide ({current_spread/pip_val:.1f} pips > {max_spread/pip_val:.1f} pips limit).")

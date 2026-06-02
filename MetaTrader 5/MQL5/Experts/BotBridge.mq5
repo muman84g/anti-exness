@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Antigravity"
 #property link      ""
-#property version   "2.21"
+#property version   "2.22"
 
 #include <Trade\Trade.mqh>
 
@@ -15,7 +15,7 @@ string RES_FILE = "res.txt";
 string HEARTBEAT_FILE = "heartbeat.txt";
 
 int OnInit() {
-    Print("BotBridge v2.21 (File IPC + Trading + History) starting...");
+    Print("BotBridge v2.22 (File IPC + Trading + History + Positions) starting...");
     EventSetTimer(1);
     
     // Clean up
@@ -77,6 +77,38 @@ void PollCommand() {
     }
 }
 
+string FormatPositionRecord(ulong ticket) {
+    if(!PositionSelectByTicket(ticket)) {
+        return "";
+    }
+
+    string sym = PositionGetString(POSITION_SYMBOL);
+    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+    long type = PositionGetInteger(POSITION_TYPE);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+    double sl = PositionGetDouble(POSITION_SL);
+    double tp = PositionGetDouble(POSITION_TP);
+    double profit = PositionGetDouble(POSITION_PROFIT);
+    long magic = PositionGetInteger(POSITION_MAGIC);
+    datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+    string comment = PositionGetString(POSITION_COMMENT);
+    StringReplace(comment, "|", "_");
+    StringReplace(comment, ",", "_");
+
+    return IntegerToString((long)ticket) + "," +
+           sym + "," +
+           IntegerToString((int)type) + "," +
+           DoubleToString(volume, 2) + "," +
+           DoubleToString(open_price, digits) + "," +
+           DoubleToString(sl, digits) + "," +
+           DoubleToString(tp, digits) + "," +
+           DoubleToString(profit, 2) + "," +
+           IntegerToString(magic) + "," +
+           TimeToString(open_time, TIME_DATE|TIME_SECONDS) + "," +
+           comment;
+}
+
 string ProcessRequest(string raw_req) {
     StringReplace(raw_req, "\r", "");
     StringReplace(raw_req, "\n", "");
@@ -125,6 +157,53 @@ string ProcessRequest(string raw_req) {
             return "ERR|CopyRates Failed";
         }
     }
+
+    // Command: POSITION|TICKET
+    if(cmd == "POSITION" && k >= 2) {
+        ulong ticket = (ulong)StringToInteger(fields[1]);
+        string rec = FormatPositionRecord(ticket);
+        if(rec == "") {
+            return "ERR|POSITION_NOT_FOUND";
+        }
+        return "OK|" + rec;
+    }
+
+    // Command: POSITIONS|SYMBOL|MAGIC_FILTER
+    // MAGIC_FILTER is optional. Use -1 to return all positions for the symbol.
+    if(cmd == "POSITIONS" && k >= 2) {
+        string sym_filter = fields[1];
+        long magic_filter = -1;
+        if(k >= 3) {
+            magic_filter = StringToInteger(fields[2]);
+        }
+
+        string out = "OK";
+        int total = PositionsTotal();
+        for(int i = 0; i < total; i++) {
+            ulong ticket = PositionGetTicket(i);
+            if(ticket == 0) {
+                continue;
+            }
+            if(!PositionSelectByTicket(ticket)) {
+                continue;
+            }
+
+            string sym = PositionGetString(POSITION_SYMBOL);
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            if(sym_filter != "" && sym != sym_filter) {
+                continue;
+            }
+            if(magic_filter >= 0 && magic != magic_filter) {
+                continue;
+            }
+
+            string rec = FormatPositionRecord(ticket);
+            if(rec != "") {
+                out += "|" + rec;
+            }
+        }
+        return out;
+    }
     
     // Command: OPEN|SYMBOL|TYPE|LOT|SL|TP
     if(cmd == "OPEN" && k >= 4) {
@@ -136,8 +215,18 @@ string ProcessRequest(string raw_req) {
         double tp = 0.0;
         if(k >= 5) sl = NormalizeDouble(StringToDouble(fields[4]), digits);
         if(k >= 6) tp = NormalizeDouble(StringToDouble(fields[5]), digits);
+        long magic = 123456;
+        string comment = "";
+        if(k >= 7) magic = StringToInteger(fields[6]);
+        if(k >= 8) {
+            comment = fields[7];
+            StringReplace(comment, "|", "_");
+            StringReplace(comment, ",", "_");
+        }
+
+        trade.SetExpertMagicNumber(magic);
         
-        if(trade.PositionOpen(sym, type, lot, 0, sl, tp)) {
+        if(trade.PositionOpen(sym, type, lot, 0, sl, tp, comment)) {
             ulong ticket = trade.ResultOrder();
             if(ticket == 0) ticket = trade.ResultDeal();
             double exec_price = trade.ResultPrice();

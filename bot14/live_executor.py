@@ -34,6 +34,41 @@ class CloseResult:
 class SymbolInfoDummy:
     pass
 
+class PositionInfo:
+    def __init__(
+        self,
+        ticket,
+        symbol,
+        type_int,
+        volume,
+        open_price,
+        sl,
+        tp,
+        profit,
+        magic,
+        open_time,
+        comment,
+    ):
+        self.ticket = int(ticket)
+        self.symbol = symbol
+        self.type = int(type_int)
+        self.direction = "LONG" if self.type == ORDER_TYPE_BUY else "SHORT"
+        self.volume = float(volume)
+        self.open_price = float(open_price)
+        self.sl = float(sl)
+        self.tp = float(tp)
+        self.profit = float(profit)
+        self.magic = int(magic)
+        self.open_time = open_time
+        self.comment = comment
+
+    @classmethod
+    def from_record(cls, record):
+        parts = record.split(",", 10)
+        if len(parts) < 11:
+            raise ValueError(f"Invalid position record: {record}")
+        return cls(*parts[:11])
+
 class MT5Executor(BaseExecutor):
     def __init__(self, data_manager):
         self.dm = data_manager
@@ -94,7 +129,40 @@ class MT5Executor(BaseExecutor):
         lot = round(lot / info.volume_step) * info.volume_step
         return lot
 
-    def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456):
+    def get_position(self, ticket):
+        """Returns one live MT5 position by ticket, or None if it is absent."""
+        res = ea_bridge.send_command(f"POSITION|{ticket}")
+        if res in {"ERR|POSITION_NOT_FOUND", "ERR|0", "ERR|10009"}:
+            return None
+        if not res or not res.startswith("OK|"):
+            logging.error(f"EA failed to get position for ticket {ticket}: {res}")
+            return None
+        try:
+            return PositionInfo.from_record(res.split("|", 1)[1])
+        except Exception as e:
+            logging.error(f"Failed to parse position response for ticket {ticket}: {e}")
+            return None
+
+    def get_positions(self, symbol, magic=None):
+        """Returns all live MT5 positions for symbol. None means bridge failure."""
+        magic_filter = -1 if magic is None else int(magic)
+        res = ea_bridge.send_command(f"POSITIONS|{symbol}|{magic_filter}")
+        if not res or not res.startswith("OK"):
+            logging.error(f"EA failed to get positions for symbol {symbol}: {res}")
+            return None
+
+        positions = []
+        parts = res.split("|")
+        for record in parts[1:]:
+            if not record:
+                continue
+            try:
+                positions.append(PositionInfo.from_record(record))
+            except Exception as e:
+                logging.error(f"Failed to parse position record '{record}': {e}")
+        return positions
+
+    def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456, comment=""):
         """
         Opens a market order via EA Bridge.
         order_type: 0 (BUY) or 1 (SELL)
@@ -109,7 +177,10 @@ class MT5Executor(BaseExecutor):
         logging.info(
             f"Sending OPEN command to EA: {symbol} Type:{order_type} Vol:{lot_size} SL:{sl_text} TP:{tp_text}"
         )
-        res = ea_bridge.send_command(f"OPEN|{symbol}|{order_type}|{lot_size}|{sl_text}|{tp_text}")
+        safe_comment = str(comment).replace("|", "_").replace(",", "_")[:31]
+        res = ea_bridge.send_command(
+            f"OPEN|{symbol}|{order_type}|{lot_size}|{sl_text}|{tp_text}|{int(magic)}|{safe_comment}"
+        )
         
         if not res or not res.startswith("OK|"):
             logging.error(f"EA Order failed for {symbol}: {res}")
@@ -132,6 +203,10 @@ class MT5Executor(BaseExecutor):
 
         if res and res.startswith("OK|"):
             logging.info(f"Position {ticket} SL/TP modified successfully via EA.")
+            return True
+
+        if res == "ERR|10025":
+            logging.info(f"Position {ticket} SL/TP already matches requested levels.")
             return True
 
         logging.error(f"EA Modify failed for {ticket}: {res}")
