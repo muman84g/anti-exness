@@ -3,11 +3,11 @@
         "USDJPYm": {
             "day": "Thursday",
             "time": "05:00",
-            "direction": "SHORT",
+            "direction": "LONG",
             "hold_bars": 48,
             "tp_mult": 3.0,
             "sl_mult": 0.0,
-            "lot_size": 0.1
+            "lot_size": 0.0
         },
         "GBPNZDm": {
             "day": "Wednesday",
@@ -29,6 +29,11 @@
         }
     },
     "general": {
-        "poll_interval_seconds": 15
+        "poll_interval_seconds": 15,
+        "max_spread_pips": {
+            "USDJPYm": 3.0,
+            "GBPNZDm": 15.0,
+            "NZDCHFm": 5.0
+        }
     }
 }

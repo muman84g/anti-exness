@@ -2,7 +2,7 @@
 # STRATEGY s12 CONCEPT: A-Rank Multi-Anomaly Pinpoint Live Trading Bot (v1)
 # 【戦略s12コンセプト: Aランクアノマリー実運用並行稼働ボット】
 # ------------------------------------------------------------------------------
-# - USDJPYm: Thursday 05:00 JST -> SELL (Hold 48 bars, TP 3.0 ATR, SL None)
+# - USDJPYm: Thursday 05:00 JST -> BUY (Hold 48 bars, TP 3.0 ATR, SL None)
 # - GBPNZDm: Wednesday 02:50 JST -> SELL (Hold 48 bars, TP None, SL None)
 # - NZDCHFm: Friday 02:55 JST -> SELL (Hold 48 bars, TP None, SL None)
 # - Weekend Close: Saturday 05:00 JST以降は強制クローズ
@@ -23,6 +23,55 @@ import warnings
 warnings.filterwarnings('ignore')
 
 JST = timezone(timedelta(hours=9), "JST")
+
+# ============================================================
+# 米国夏時間 (DST) およびスプレッド危険時間帯判定ヘルパー
+# ============================================================
+def is_dst_us(dt):
+    """
+    JST時間 dt が米国夏時間 (DST) の期間内かどうかを判定する。
+    米国DST：3月第2日曜日 16:00 JST 〜 11月第1日曜日 15:00 JST
+    """
+    year = dt.year
+    first_march = datetime(year, 3, 1, tzinfo=JST)
+    first_sunday_offset = (6 - first_march.weekday()) % 7
+    second_sunday = datetime(year, 3, 1 + first_sunday_offset + 7, 16, 0, tzinfo=JST)
+    
+    first_nov = datetime(year, 11, 1, tzinfo=JST)
+    first_sunday_offset_nov = (6 - first_nov.weekday()) % 7
+    first_sunday_nov = datetime(year, 11, 1 + first_sunday_offset_nov, 15, 0, tzinfo=JST)
+    
+    return second_sunday <= dt < first_sunday_nov
+
+def get_sltp_window_status(dt_jst):
+    """
+    JST時間 dt_jst に基づいて、SL/TPの退避・復旧・通常のウィンドウ状態を判定する。
+    戻り値: 'evacuate' (退避), 'restore' (復旧), 'normal' (通常)
+    夏時間 (DST) のロールオーバーは JST 06:00 のため、07:15前後にスプレッドが落ち着いたら復旧・決済を行う。
+    冬時間 (通常) のロールオーバーは JST 07:00 のため、08:15前後にスプレッドが落ち着いたら復旧・決済を行う。
+    """
+    is_dst = is_dst_us(dt_jst)
+    time_float = dt_jst.hour + dt_jst.minute / 60.0 + dt_jst.second / 3600.0
+    
+    if is_dst:
+        # 夏時間 (DST)
+        # 退避: JST 05:50 〜 07:15
+        if 5.833 <= time_float < 7.25:
+            return 'evacuate'
+        # 復旧: JST 07:15 〜 07:45
+        elif 7.25 <= time_float < 7.75:
+            return 'restore'
+    else:
+        # 冬時間 (通常)
+        # 退避: JST 06:50 〜 08:15
+        if 6.833 <= time_float < 8.25:
+            return 'evacuate'
+        # 復旧: JST 08:15 〜 08:45
+        elif 8.25 <= time_float < 8.75:
+            return 'restore'
+            
+    return 'normal'
+
 
 # スクリプト自身の絶対パス
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -56,11 +105,11 @@ DEFAULT_PARAMS = {
         "USDJPYm": {
             "day": "Thursday",
             "time": "05:00",
-            "direction": "SHORT",
+            "direction": "LONG",
             "hold_bars": 48,
             "tp_mult": 3.0,
             "sl_mult": 0.0,
-            "lot_size": 0.1
+            "lot_size": 0.0
         },
         "GBPNZDm": {
             "day": "Wednesday",
@@ -82,7 +131,12 @@ DEFAULT_PARAMS = {
         }
     },
     "general": {
-        "poll_interval_seconds": 15
+        "poll_interval_seconds": 15,
+        "max_spread_pips": {
+            "USDJPYm": 3.0,
+            "GBPNZDm": 15.0,
+            "NZDCHFm": 5.0
+        }
     }
 }
 
@@ -222,6 +276,15 @@ class s12TradingBot:
                     
                     # 本日まだエントリーしていない場合のみ実行
                     if last_ent_date != today_str:
+                        # ロットサイズが0.0以下の場合はエントリーをスキップし、日付ロックのみかける
+                        if s_conf.get("lot_size", 0.0) <= 0.0:
+                            logging.info(f"[{sym}] Anomaly Time Triggered but lot size is <= 0.0 ({s_conf.get('lot_size')}). Skipping entry.")
+                            if "last_entry_date" not in self.state:
+                                self.state["last_entry_date"] = {}
+                            self.state["last_entry_date"][sym] = today_str
+                            self.save_state()
+                            continue
+                            
                         logging.info(f"[{sym}] Anomaly Time Triggered: {current_day} {current_time} ({direction})")
                         success = self.execute_anomaly_entry(sym, s_conf, now_jst)
                         
@@ -344,26 +407,113 @@ class s12TradingBot:
         entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
         hold_bars = pos["hold_bars"]
 
+        # スプレッド(pips)の計算
+        point = getattr(info, "point", 0.00001)
+        if point <= 0:
+            point = 0.00001
+        pips_multiplier = point * 10.0
+        current_spread_pips = (current_ask - current_bid) / pips_multiplier
+        
+        # パラメータから最大スプレッドを取得 (デフォルト値は安全側に設定)
+        max_spread_pips = PARAMS["general"].get("max_spread_pips", {}).get(symbol, 5.0)
+        
+        # ウィンドウ状態の取得
+        window_status = get_sltp_window_status(now_jst)
+
+        # --------------------------------------------------------
+        # SL/TP退避・復旧ロジック
+        # --------------------------------------------------------
+        # A. 退避処理
+        if window_status == 'evacuate':
+            if not pos.get("sltp_evacuated", False):
+                # 設定されていたSL/TPの値をローカルへ退避
+                if sl_price > 0.0 or tp_price > 0.0:
+                    pos["saved_sl_price"] = sl_price
+                    pos["saved_tp_price"] = tp_price
+                    pos["sltp_evacuated"] = True
+                    
+                    logging.info(f"[{symbol}] Rollover window entered. Evacuating SL/TP. Saved SL: {sl_price:.5f}, TP: {tp_price:.5f}")
+                    
+                    # MT5サーバー側のSL/TPをクリア(0.0)
+                    success = self.executor.modify_position_sl_tp(ticket, 0.0, 0.0)
+                    if success:
+                        pos["sl_price"] = 0.0
+                        pos["tp_price"] = 0.0
+                    else:
+                        logging.error(f"[{symbol}] Failed to clear SL/TP on server. Will retry next cycle.")
+                    self.save_state()
+
+        # B. 復旧・成行決済判定処理
+        elif window_status == 'restore' and pos.get("sltp_evacuated", False):
+            # スプレッドが平常値に戻っているか確認
+            if current_spread_pips <= max_spread_pips:
+                saved_sl = pos.get("saved_sl_price", 0.0)
+                saved_tp = pos.get("saved_tp_price", 0.0)
+                
+                # 退避期間中に価格が到達していたか判定
+                should_market_close = False
+                close_reason = ""
+                
+                if direction == "LONG":
+                    if saved_sl > 0.0 and current_bid <= saved_sl:
+                        should_market_close = True
+                        close_reason = "SL_LATENT"
+                    elif saved_tp > 0.0 and current_bid >= saved_tp:
+                        should_market_close = True
+                        close_reason = "TP_LATENT"
+                else: # SHORT
+                    if saved_sl > 0.0 and current_ask >= saved_sl:
+                        should_market_close = True
+                        close_reason = "SL_LATENT"
+                    elif saved_tp > 0.0 and current_ask <= saved_tp:
+                        should_market_close = True
+                        close_reason = "TP_LATENT"
+                        
+                if should_market_close:
+                    logging.info(f"[{symbol}] Price breached SL/TP during rollover. Triggering immediate Market Close ({close_reason}). Bid: {current_bid:.5f}, Ask: {current_ask:.5f}, Saved SL: {saved_sl:.5f}, TP: {saved_tp:.5f}")
+                    self.close_and_cleanup(symbol, ticket, close_reason)
+                    return
+                else:
+                    # 通常通りSL/TPを再設定
+                    logging.info(f"[{symbol}] Spread normalized ({current_spread_pips:.1f} <= {max_spread_pips:.1f} pips). Restoring SL/TP. SL: {saved_sl:.5f}, TP: {saved_tp:.5f}")
+                    success = self.executor.modify_position_sl_tp(ticket, saved_sl, saved_tp)
+                    if success:
+                        pos["sl_price"] = saved_sl
+                        pos["tp_price"] = saved_tp
+                        pos["sltp_evacuated"] = False
+                        self.save_state()
+                    else:
+                        logging.error(f"[{symbol}] Failed to restore SL/TP on server. Will retry.")
+            else:
+                logging.info(f"[{symbol}] In restore window but spread is still high: {current_spread_pips:.1f} pips (threshold: {max_spread_pips:.1f}). Deferring restoration.")
+
+        # --------------------------------------------------------
+        # ポジション決済判定（週末・時間決済）
+        # --------------------------------------------------------
         # A. 週末強制決済 (土曜 05:00 JST 以降)
         if is_weekend_jst(now_jst):
-            logging.info(f"[{symbol}] Weekend close triggered JST={now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Closing ticket {ticket}.")
-            self.close_and_cleanup(symbol, ticket, "WEEKEND")
-            return
+            if window_status == 'evacuate' or current_spread_pips > max_spread_pips:
+                logging.info(f"[{symbol}] Weekend close deferred due to high spread or rollover window. Spread: {current_spread_pips:.1f} pips.")
+            else:
+                logging.info(f"[{symbol}] Weekend close triggered JST={now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Closing ticket {ticket}.")
+                self.close_and_cleanup(symbol, ticket, "WEEKEND")
+                return
 
         # B. 時間強制決済 (hold_bars 分相当経過したか)
-        # M5足で hold_bars 本分 ＝ hold_bars * 5分
         elapsed_seconds = (now_jst - entry_time).total_seconds()
         if elapsed_seconds >= hold_bars * 5 * 60:
-            logging.info(f"[{symbol}] Time close triggered. Elapsed: {elapsed_seconds}s (Hold constraint: {hold_bars*5*60}s). Closing ticket {ticket}.")
-            self.close_and_cleanup(symbol, ticket, "TIME")
-            return
+            if window_status == 'evacuate' or current_spread_pips > max_spread_pips:
+                logging.info(f"[{symbol}] Time close deferred due to high spread or rollover window. Spread: {current_spread_pips:.1f} pips (Threshold: {max_spread_pips:.1f}), Window: {window_status}. Deferring...")
+            else:
+                logging.info(f"[{symbol}] Time close triggered. Elapsed: {elapsed_seconds}s (Hold constraint: {hold_bars*5*60}s). Closing ticket {ticket}.")
+                self.close_and_cleanup(symbol, ticket, "TIME")
+                return
 
-        # C. リアルタイム TP / SL 監視
+        # C. リアルタイム TP / SL 監視 (退避中は sl_price/tp_price が 0 になるため誤作動しない)
         close_position = False
         exit_reason = ""
 
         if direction == "LONG":
-            # LONG決済(売り)はBidで行う
             if sl_price > 0.0 and current_bid <= sl_price:
                 close_position = True
                 exit_reason = "SL"
@@ -371,7 +521,6 @@ class s12TradingBot:
                 close_position = True
                 exit_reason = "TP"
         else: # SHORT
-            # SHORT決済(買戻し)はAskで行う
             if sl_price > 0.0 and current_ask >= sl_price:
                 close_position = True
                 exit_reason = "SL"

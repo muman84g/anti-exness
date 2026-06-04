@@ -9,8 +9,16 @@ class EABridgeServer:
         if files_dir is None:
             import platform
             if platform.system() == "Windows":
-                # Windows Portable mode or standard path
-                files_dir = r"C:\Program Files\MetaTrader 5\MQL5\Files"
+                # Windows standard AppData path auto-detection
+                import glob
+                user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+                search_pattern = os.path.join(user_profile, r"AppData\Roaming\MetaQuotes\Terminal\*\MQL5\Files")
+                found_paths = glob.glob(search_pattern)
+                if found_paths:
+                    files_dir = found_paths[0]
+                else:
+                    # Fallback to portable mode path
+                    files_dir = r"C:\Program Files\MetaTrader 5\MQL5\Files"
             else:
                 # Docker container default path for MT5 /portable
                 files_dir = "/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Files"
