@@ -25,6 +25,31 @@ warnings.filterwarnings('ignore')
 JST = timezone(timedelta(hours=9), "JST")
 
 # ============================================================
+# テクニカル指標計算ヘルパー
+# ============================================================
+def calculate_rsi(prices, period=14):
+    deltas = np.diff(prices)
+    if len(deltas) < period:
+        return np.ones_like(prices) * 50.0
+    seed = deltas[:period]
+    up = seed[seed >= 0].sum() / period
+    down = -seed[seed < 0].sum() / period
+    if down == 0: rs = 999.0
+    else: rs = up / down
+    rsi = np.zeros_like(prices)
+    rsi[:period] = 100. - 100. / (1. + rs)
+    for i in range(period, len(prices)):
+        delta = deltas[i-1]
+        upval = delta if delta > 0 else 0.
+        downval = -delta if delta < 0 else 0.
+        up = (up * (period - 1) + upval) / period
+        down = (down * (period - 1) + downval) / period
+        if down == 0: rs = 999.0
+        else: rs = up / down
+        rsi[i] = 100. - 100. / (1. + rs)
+    return rsi
+
+# ============================================================
 # 米国夏時間 (DST) およびスプレッド危険時間帯判定ヘルパー
 # ============================================================
 def is_dst_us(dt):
@@ -109,7 +134,9 @@ DEFAULT_PARAMS = {
             "hold_bars": 48,
             "tp_mult": 3.0,
             "sl_mult": 0.0,
-            "lot_size": 0.0
+            "lot_size": 0.0,
+            "filter_type": "None",
+            "filter_param": 0.0
         },
         "GBPNZDm": {
             "day": "Wednesday",
@@ -118,7 +145,9 @@ DEFAULT_PARAMS = {
             "hold_bars": 48,
             "tp_mult": 0.0,
             "sl_mult": 0.0,
-            "lot_size": 0.05
+            "lot_size": 0.05,
+            "filter_type": "None",
+            "filter_param": 0.0
         },
         "NZDCHFm": {
             "day": "Friday",
@@ -127,7 +156,9 @@ DEFAULT_PARAMS = {
             "hold_bars": 48,
             "tp_mult": 0.0,
             "sl_mult": 0.0,
-            "lot_size": 0.05
+            "lot_size": 0.05,
+            "filter_type": "None",
+            "filter_param": 0.0
         }
     },
     "general": {
@@ -151,6 +182,12 @@ def load_params():
                 params["strategies"] = DEFAULT_PARAMS["strategies"].copy()
             if "general" not in params:
                 params["general"] = DEFAULT_PARAMS["general"].copy()
+            
+            # 各通貨ペアの個別フィルタキー補完
+            for sym, strat in params["strategies"].items():
+                strat.setdefault("filter_type", "None")
+                strat.setdefault("filter_param", 0.0)
+                
             return params
         except Exception as e:
             logging.error(f"Error loading {PARAMS_FILE}, using default parameters: {e}")
@@ -320,18 +357,65 @@ class s12TradingBot:
         atr_val = float(df["ATR"].iloc[-2])
         logging.info(f"[{symbol}] Calculated ATR_288: {atr_val:.5f} (using completed bar).")
 
-        # ── 【他案の導入】24時間トレンドフィルター ───────────────────
-        # GBPNZDm にのみ適用 (直近24時間=288本の終値が上昇している時のみショート)
-        if symbol == "GBPNZDm":
-            current_close = float(df["Close"].iloc[-2])
-            prev_close = float(df["Close"].iloc[-290]) # 288本前 (直近24時間)
-            trend_val = current_close - prev_close
+        # ── 【動的フィルター適用】 ───────────────────
+        filter_type = s_conf.get("filter_type", "None")
+        filter_param = s_conf.get("filter_param", 0.0)
+        direction = s_conf["direction"]
+        
+        if filter_type != "None":
+            logging.info(f"[{symbol}] Applying dynamic entry filter: {filter_type} (param={filter_param})")
             
-            logging.info(f"[{symbol}] 24h Trend Check: Current_Close({current_close:.5f}) vs 24h_Ago_Close({prev_close:.5f}) | Diff: {trend_val:+.5f}")
-            if trend_val <= 0.0:
-                logging.info(f"[{symbol}] 24h Trend is negative/flat ({trend_val:+.5f}). Filter triggered: Skipping SHORT entry to preserve edge.")
-                return False # エントリーをスキップ
-        # ─────────────────────────────────────────────────────────────
+            if filter_type == "Trend":
+                current_close = float(df["Close"].iloc[-2])
+                prev_close = float(df["Close"].iloc[-290]) # 288本前 (直近24時間)
+                trend_val = current_close - prev_close
+                logging.info(f"[{symbol}] Trend Filter Check: trend={trend_val:+.5f}, threshold={filter_param:+.5f}")
+                if direction == "SHORT" and trend_val <= filter_param:
+                    logging.info(f"[{symbol}] Trend Filter triggered: Skipping SHORT entry (trend={trend_val:+.5f} <= threshold={filter_param:+.5f}).")
+                    return False
+                elif direction == "LONG" and trend_val >= -filter_param:
+                    logging.info(f"[{symbol}] Trend Filter triggered: Skipping LONG entry (trend={trend_val:+.5f} >= threshold={-filter_param:+.5f}).")
+                    return False
+                    
+            elif filter_type == "RSI":
+                prices = df["Close"].values
+                rsi_arr = calculate_rsi(prices, 14)
+                rsi_val = float(rsi_arr[-2]) # 直近の確定足
+                logging.info(f"[{symbol}] RSI Filter Check: rsi_val={rsi_val:.2f}, threshold={filter_param:.2f}")
+                if direction == "SHORT" and rsi_val < filter_param:
+                    logging.info(f"[{symbol}] RSI Filter triggered: Skipping SHORT entry (rsi_val={rsi_val:.2f} < threshold={filter_param:.2f}).")
+                    return False
+                elif direction == "LONG" and rsi_val > filter_param:
+                    logging.info(f"[{symbol}] RSI Filter triggered: Skipping LONG entry (rsi_val={rsi_val:.2f} > threshold={filter_param:.2f}).")
+                    return False
+                    
+            elif filter_type == "SMA":
+                close_prices = df["Close"].values
+                sma_val = float(np.mean(close_prices[-51:-1]))
+                entry_close = float(df["Close"].iloc[-2])
+                logging.info(f"[{symbol}] SMA Filter Check: close={entry_close:.5f}, SMA_50={sma_val:.5f}")
+                if direction == "SHORT" and entry_close <= sma_val:
+                    logging.info(f"[{symbol}] SMA Filter triggered: Skipping SHORT entry (close={entry_close:.5f} <= SMA={sma_val:.5f}).")
+                    return False
+                elif direction == "LONG" and entry_close >= sma_val:
+                    logging.info(f"[{symbol}] SMA Filter triggered: Skipping LONG entry (close={entry_close:.5f} >= SMA={sma_val:.5f}).")
+                    return False
+                    
+            elif filter_type == "BB":
+                close_prices = df["Close"].values
+                last_20 = close_prices[-21:-1]
+                bb_mean = float(np.mean(last_20))
+                bb_std = float(np.std(last_20))
+                bb_u_val = bb_mean + 2.0 * bb_std
+                bb_l_val = bb_mean - 2.0 * bb_std
+                entry_close = float(df["Close"].iloc[-2])
+                logging.info(f"[{symbol}] BB Filter Check: close={entry_close:.5f}, BB_Upper={bb_u_val:.5f}, BB_Lower={bb_l_val:.5f}")
+                if direction == "SHORT" and entry_close < bb_u_val - atr_val * filter_param:
+                    logging.info(f"[{symbol}] BB Filter triggered: Skipping SHORT entry (close={entry_close:.5f} < UpperBB={bb_u_val - atr_val * filter_param:.5f}).")
+                    return False
+                elif direction == "LONG" and entry_close > bb_l_val + atr_val * filter_param:
+                    logging.info(f"[{symbol}] BB Filter triggered: Skipping LONG entry (close={entry_close:.5f} > LowerBB={bb_l_val + atr_val * filter_param:.5f}).")
+                    return False
 
         info = self.executor.get_symbol_info(symbol)
         if not info:

@@ -1,0 +1,32 @@
+[
+    {
+        "symbol": "GBPNZDm",
+        "direction": "SHORT",
+        "entry_time": "02:50",
+        "hold_bars": 60,
+        "tp_mult": 0.0,
+        "sl_mult": 0.0,
+        "filter_type": "None",
+        "filter_param": 0.0,
+        "expected_pnl": 2.952906210600866,
+        "win_rate": 49.645390070921984,
+        "profit_factor": 1.209096462723274,
+        "trades": 282,
+        "timestamp": "2026-06-05 12:24:08 JST"
+    },
+    {
+        "symbol": "GBPNZDm",
+        "direction": "SHORT",
+        "entry_time": "02:50",
+        "hold_bars": 60,
+        "tp_mult": 0.0,
+        "sl_mult": 0.0,
+        "filter_type": "None",
+        "filter_param": 0.0,
+        "expected_pnl": 2.952906210600866,
+        "win_rate": 49.645390070921984,
+        "profit_factor": 1.209096462723274,
+        "trades": 282,
+        "timestamp": "2026-06-05 12:25:46 JST"
+    }
+]
