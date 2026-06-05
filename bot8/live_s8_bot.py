@@ -712,6 +712,18 @@ class s8TradingBot:
                     logging.info(f"[{col}] Local Hour {local_hour} ({tz_name}) is NOT an anomaly window. Skip.")
                     continue
                     
+                # 2.1.5. 曜日・時間フィルターによる市場閉鎖時のスキップ (ERR|10018対策)
+                local_weekday = local_time.weekday()  # 0=月, 4=金, 5=土, 6=日
+                if local_weekday == 4 and local_hour >= 17:
+                    logging.info(f"[{col}] Friday evening ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
+                    continue
+                elif local_weekday == 5:
+                    logging.info(f"[{col}] Saturday ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
+                    continue
+                elif local_weekday == 6 and local_hour < 18:
+                    logging.info(f"[{col}] Sunday morning/afternoon ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
+                    continue
+                    
                 model = self.models.get(col)
                 meta = self.pipeline_meta.get(col)
                 if USE_ML and (not model or not meta):

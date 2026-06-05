@@ -100,25 +100,42 @@ class MT5Executor(BaseExecutor):
         """
         Opens a market order via EA Bridge.
         order_type: 0 (BUY) or 1 (SELL)
+        Includes a retry mechanism for temporary errors (e.g. daily breaks or spread spikes).
         """
-        info = self.get_symbol_info(symbol)
-        if info is None:
-            return None
-            
-        logging.info(f"Sending OPEN command to EA: {symbol} Type:{order_type} Vol:{lot_size}")
-        res = ea_bridge.send_command(f"OPEN|{symbol}|{order_type}|{lot_size}")
+        import time
+        max_retries = 3
+        retry_delay_seconds = 120  # 2 minutes delay between retries
         
-        if not res or not res.startswith("OK|"):
-            logging.error(f"EA Order failed for {symbol}: {res}")
-            return None
+        for attempt in range(1, max_retries + 1):
+            info = self.get_symbol_info(symbol)
+            if info is None:
+                if attempt < max_retries:
+                    logging.warning(f"[{symbol}] Failed to get symbol info. Retrying in {retry_delay_seconds}s... (Attempt {attempt}/{max_retries})")
+                    time.sleep(retry_delay_seconds)
+                    continue
+                return None
+                
+            logging.info(f"Sending OPEN command to EA: {symbol} Type:{order_type} Vol:{lot_size} (Attempt {attempt}/{max_retries})")
+            res = ea_bridge.send_command(f"OPEN|{symbol}|{order_type}|{lot_size}")
             
-        parts = res.split("|")
-        ticket_id = int(parts[1])
-        exec_price = float(parts[2]) if len(parts) > 2 else 0.0
-        
-        ticket = Ticket(ticket_id, exec_price)
-        logging.info(f"Order filled via EA / Ticket: {ticket} (Price: {ticket.price})")
-        return ticket
+            if res and res.startswith("OK|"):
+                parts = res.split("|")
+                ticket_id = int(parts[1])
+                exec_price = float(parts[2]) if len(parts) > 2 else 0.0
+                
+                ticket = Ticket(ticket_id, exec_price)
+                logging.info(f"Order filled via EA / Ticket: {ticket} (Price: {ticket.price})")
+                return ticket
+                
+            logging.warning(f"EA Order failed for {symbol} on attempt {attempt}/{max_retries}: {res}")
+            
+            if attempt < max_retries:
+                logging.info(f"Retrying order in {retry_delay_seconds} seconds...")
+                time.sleep(retry_delay_seconds)
+            else:
+                logging.error(f"All order attempts failed for {symbol}. Final result: {res}")
+                
+        return None
 
     def close_position(self, ticket, deviation=20):
         """
