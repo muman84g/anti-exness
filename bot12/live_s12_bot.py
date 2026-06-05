@@ -320,6 +320,19 @@ class s12TradingBot:
         atr_val = float(df["ATR"].iloc[-2])
         logging.info(f"[{symbol}] Calculated ATR_288: {atr_val:.5f} (using completed bar).")
 
+        # ── 【他案の導入】12時間トレンドフィルター ───────────────────
+        # GBPNZDm にのみ適用 (直近12時間=144本の終値が上昇している時のみショート)
+        if symbol == "GBPNZDm":
+            current_close = float(df["Close"].iloc[-2])
+            prev_close = float(df["Close"].iloc[-146]) # 144本前 (直近12時間)
+            trend_val = current_close - prev_close
+            
+            logging.info(f"[{symbol}] 12h Trend Check: Current_Close({current_close:.5f}) vs 12h_Ago_Close({prev_close:.5f}) | Diff: {trend_val:+.5f}")
+            if trend_val <= 0.0:
+                logging.info(f"[{symbol}] 12h Trend is negative/flat ({trend_val:+.5f}). Filter triggered: Skipping SHORT entry to preserve edge.")
+                return False # エントリーをスキップ
+        # ─────────────────────────────────────────────────────────────
+
         info = self.executor.get_symbol_info(symbol)
         if not info:
             logging.error(f"[{symbol}] Failed to get symbol info from MT5. Entry aborted.")

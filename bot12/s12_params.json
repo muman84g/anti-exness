@@ -13,8 +13,8 @@
             "day": "Wednesday",
             "time": "02:50",
             "direction": "SHORT",
-            "hold_bars": 48,
-            "tp_mult": 0.0,
+            "hold_bars": 36,
+            "tp_mult": 2.5,
             "sl_mult": 0.0,
             "lot_size": 0.05
         },
