@@ -28,5 +28,35 @@
         "profit_factor": 1.209096462723274,
         "trades": 282,
         "timestamp": "2026-06-05 12:25:46 JST"
+    },
+    {
+        "symbol": "GBPNZDm",
+        "direction": "SHORT",
+        "entry_time": "01:55",
+        "hold_bars": 72,
+        "tp_mult": 0.0,
+        "sl_mult": 0.0,
+        "filter_type": "None",
+        "filter_param": 0.0,
+        "expected_pnl": 4.306305170863041,
+        "win_rate": 52.4822695035461,
+        "profit_factor": 1.2913999207553055,
+        "trades": 282,
+        "timestamp": "2026-06-05 12:36:49 JST"
+    },
+    {
+        "symbol": "NZDCHFm",
+        "direction": "SHORT",
+        "entry_time": "03:55",
+        "hold_bars": 72,
+        "tp_mult": 0.0,
+        "sl_mult": 0.0,
+        "filter_type": "None",
+        "filter_param": 0.0,
+        "expected_pnl": 2.299192933896095,
+        "win_rate": 49.642857142857146,
+        "profit_factor": 1.1217728912932723,
+        "trades": 280,
+        "timestamp": "2026-06-05 12:43:03 JST"
     }
 ]

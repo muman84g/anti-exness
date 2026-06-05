@@ -43,6 +43,7 @@ def main():
             strategy = params['strategies'][sym]
             
             # パラメータの更新
+            strategy['time'] = sit.get('entry_time', strategy['time'])
             strategy['hold_bars'] = int(sit.get('hold_bars', 48))
             strategy['tp_mult'] = float(sit.get('tp_mult', 0.0))
             strategy['sl_mult'] = float(sit.get('sl_mult', 0.0))
