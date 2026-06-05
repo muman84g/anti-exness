@@ -16,7 +16,7 @@
     "weekend_close_weekday_jst": 5,
     "weekend_close_hour_jst": 4,
     "weekend_close_minute_jst": 30,
-    "monday_start_hour_jst": 7,
+    "monday_start_hour_jst": 8,
     "monday_start_minute_jst": 0,
     "news_filter": true,
     "avoidance_hours": 2.0,

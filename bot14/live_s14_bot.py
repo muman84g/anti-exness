@@ -7,7 +7,7 @@
 # - Instrument: GBPUSD (GBP/USD Pro Account)
 # - Logic: Bot A (Always in market, reverses on TP, continues on SL)
 #          Bot B (Grid hedging bot, triggers at S ± W/2 with counter-trend entry)
-# - Weekend Close: JST Friday 20:00 JST to Monday 07:00 JST (Suspends, closes all positions)
+# - Weekend: block new entries from Saturday 04:00 JST, close positions at 04:30, restart Monday 08:00
 # - News Filter: Avoids major high-impact news window (e.g., ±2 hours)
 # - Money Management: Decomposed Monte Carlo with Goodman backup, lot cap at 8
 # ==============================================================================
@@ -71,7 +71,7 @@ DEFAULT_PARAMS = {
     'weekend_close_weekday_jst': 5,
     'weekend_close_hour_jst': 4,
     'weekend_close_minute_jst': 30,
-    'monday_start_hour_jst': 7,
+    'monday_start_hour_jst': 8,
     'monday_start_minute_jst': 0,
     'news_filter': True,
     'avoidance_hours': 2.0,
@@ -394,7 +394,7 @@ def is_weekend_entry_blocked_jst(
     entry_stop_weekday=5,
     entry_stop_hour=4,
     entry_stop_minute=0,
-    monday_start_hour=7,
+    monday_start_hour=8,
     monday_start_minute=0,
 ):
     return is_in_weekly_window_jst(
@@ -412,7 +412,7 @@ def is_weekend_close_window_jst(
     close_weekday=5,
     close_hour=4,
     close_minute=30,
-    monday_start_hour=7,
+    monday_start_hour=8,
     monday_start_minute=0,
 ):
     return is_in_weekly_window_jst(
@@ -799,7 +799,7 @@ class s14TradingBot:
         weekend_entry_blocked = False
         weekend_close_window = False
         if PARAMS.get("weekend_filter", True):
-            monday_start_hour = PARAMS.get("monday_start_hour_jst", 7)
+            monday_start_hour = PARAMS.get("monday_start_hour_jst", 8)
             monday_start_minute = PARAMS.get("monday_start_minute_jst", 0)
             weekend_entry_blocked = is_weekend_entry_blocked_jst(
                 now_jst,
