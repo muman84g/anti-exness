@@ -14,7 +14,7 @@
             "time": "02:50",
             "direction": "SHORT",
             "hold_bars": 60,
-            "tp_mult": 0.0,
+            "tp_mult": 3.0,
             "sl_mult": 0.0,
             "lot_size": 0.05
         },
