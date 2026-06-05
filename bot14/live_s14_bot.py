@@ -65,7 +65,14 @@ DEFAULT_PARAMS = {
     'initial_sequence': [2, 2, 2],
     'weekend_filter': True,
     'weekend_stop_hour_jst': 20,
+    'weekend_entry_stop_weekday_jst': 5,
+    'weekend_entry_stop_hour_jst': 4,
+    'weekend_entry_stop_minute_jst': 0,
+    'weekend_close_weekday_jst': 5,
+    'weekend_close_hour_jst': 4,
+    'weekend_close_minute_jst': 30,
     'monday_start_hour_jst': 7,
+    'monday_start_minute_jst': 0,
     'news_filter': True,
     'avoidance_hours': 2.0,
     'news_file': 'macro_events_2026.json',
@@ -371,17 +378,52 @@ class MonteCarloManager:
 # ============================================================
 # Helpers
 # ============================================================
-def is_weekend_jst(t_jst, stop_hour=20, start_hour=7):
-    # Friday stop_hour onwards
-    if t_jst.weekday() == 4 and t_jst.hour >= stop_hour:
-        return True
-    # Saturday and Sunday
-    if t_jst.weekday() in [5, 6]:
-        return True
-    # Monday before start_hour
-    if t_jst.weekday() == 0 and t_jst.hour < start_hour:
-        return True
-    return False
+def weekly_minute_jst(t_jst):
+    return int(t_jst.weekday()) * 24 * 60 + int(t_jst.hour) * 60 + int(t_jst.minute)
+
+def is_in_weekly_window_jst(t_jst, start_weekday, start_hour, start_minute, end_weekday, end_hour, end_minute):
+    current = weekly_minute_jst(t_jst)
+    start = int(start_weekday) * 24 * 60 + int(start_hour) * 60 + int(start_minute)
+    end = int(end_weekday) * 24 * 60 + int(end_hour) * 60 + int(end_minute)
+    if start <= end:
+        return start <= current < end
+    return current >= start or current < end
+
+def is_weekend_entry_blocked_jst(
+    t_jst,
+    entry_stop_weekday=5,
+    entry_stop_hour=4,
+    entry_stop_minute=0,
+    monday_start_hour=7,
+    monday_start_minute=0,
+):
+    return is_in_weekly_window_jst(
+        t_jst,
+        entry_stop_weekday,
+        entry_stop_hour,
+        entry_stop_minute,
+        0,
+        monday_start_hour,
+        monday_start_minute,
+    )
+
+def is_weekend_close_window_jst(
+    t_jst,
+    close_weekday=5,
+    close_hour=4,
+    close_minute=30,
+    monday_start_hour=7,
+    monday_start_minute=0,
+):
+    return is_in_weekly_window_jst(
+        t_jst,
+        close_weekday,
+        close_hour,
+        close_minute,
+        0,
+        monday_start_hour,
+        monday_start_minute,
+    )
 
 def calculate_lot(bet_units, lot_multiplier, max_bet_units, symbol_info):
     capped_bet = min(bet_units, max_bet_units) if max_bet_units else bet_units
@@ -754,31 +796,29 @@ class s14TradingBot:
             
         W = W_pips * pip_val
 
-        # Get latest market info (Bid / Ask / min_vol etc.)
-        info = self.executor.get_symbol_info(symbol)
-        if not info:
-            logging.warning(f"Failed to fetch symbol info for {symbol}. Skipping cycle.")
-            return
-
-        current_ask = info.ask
-        current_bid = info.bid
-        current_spread = current_ask - current_bid
-        max_spread = PARAMS.get("max_spread_pips", 0.8) * pip_val
-        position_sync_ok = self.sync_positions_with_mt5(
-            symbol, W, current_bid, current_ask, pip_val, now_jst
-        )
-
-        # A. Weekend Filter Check
-        is_weekend = False
+        weekend_entry_blocked = False
+        weekend_close_window = False
         if PARAMS.get("weekend_filter", True):
-            is_weekend = is_weekend_jst(
-                now_jst, 
-                stop_hour=PARAMS.get("weekend_stop_hour_jst", 20),
-                start_hour=PARAMS.get("monday_start_hour_jst", 7)
+            monday_start_hour = PARAMS.get("monday_start_hour_jst", 7)
+            monday_start_minute = PARAMS.get("monday_start_minute_jst", 0)
+            weekend_entry_blocked = is_weekend_entry_blocked_jst(
+                now_jst,
+                entry_stop_weekday=PARAMS.get("weekend_entry_stop_weekday_jst", 5),
+                entry_stop_hour=PARAMS.get("weekend_entry_stop_hour_jst", PARAMS.get("weekend_stop_hour_jst", 20)),
+                entry_stop_minute=PARAMS.get("weekend_entry_stop_minute_jst", 0),
+                monday_start_hour=monday_start_hour,
+                monday_start_minute=monday_start_minute,
+            )
+            weekend_close_window = is_weekend_close_window_jst(
+                now_jst,
+                close_weekday=PARAMS.get("weekend_close_weekday_jst", 5),
+                close_hour=PARAMS.get("weekend_close_hour_jst", PARAMS.get("weekend_stop_hour_jst", 20)),
+                close_minute=PARAMS.get("weekend_close_minute_jst", 0),
+                monday_start_hour=monday_start_hour,
+                monday_start_minute=monday_start_minute,
             )
 
-        if is_weekend:
-            # Force close everything at weekend JST stop
+        if weekend_close_window:
             closed_any = False
             if self.state["pos_A"]:
                 logging.info(f"[Bot A] Weekend forced close triggered. Closing ticket {self.state['pos_A']['ticket']}")
@@ -792,9 +832,8 @@ class s14TradingBot:
                     closed_any = True
                 else:
                     return
-            
+
             if closed_any or self.state["S"] is not None or self.state["next_direction_A"] != "LONG":
-                # Reset states back to initial start variables for Monday
                 self.state["pos_A"] = None
                 self.state["pos_B"] = None
                 self.state["next_direction_A"] = "LONG"
@@ -802,6 +841,20 @@ class s14TradingBot:
                 self.state["S"] = None
                 self.save_state()
             return
+
+        # Get latest market info (Bid / Ask / min_vol etc.)
+        info = self.executor.get_symbol_info(symbol)
+        if not info:
+            logging.warning(f"Failed to fetch symbol info for {symbol}. Skipping cycle.")
+            return
+
+        current_ask = info.ask
+        current_bid = info.bid
+        current_spread = current_ask - current_bid
+        max_spread = PARAMS.get("max_spread_pips", 0.8) * pip_val
+        position_sync_ok = self.sync_positions_with_mt5(
+            symbol, W, current_bid, current_ask, pip_val, now_jst
+        )
 
         # B. News Filter Check
         in_news = self.is_in_news_window(now_jst)
@@ -906,7 +959,7 @@ class s14TradingBot:
 
         # --- Bot A Entry Trigger ---
         if self.state["pos_A"] is None and self.state["next_direction_A"] is not None:
-            if position_sync_ok and not in_news and spread_ok:
+            if position_sync_ok and not in_news and spread_ok and not weekend_entry_blocked:
                 next_dir = self.state["next_direction_A"]
                 bet_units = self.mc_manager.mc_A.get_bet_units()
                 lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
@@ -962,6 +1015,8 @@ class s14TradingBot:
             else:
                 if not position_sync_ok:
                     logging.info("[Bot A] Entry postponed: MT5 position sync is not clean.")
+                elif weekend_entry_blocked:
+                    logging.info("[Bot A] Entry postponed: weekend entry stop window.")
                 elif in_news:
                     logging.info("[Bot A] Entry postponed: currently in NEWS window.")
                 elif not spread_ok:
@@ -988,7 +1043,7 @@ class s14TradingBot:
                 trigger_direction = "LONG"
                 
             if trigger_direction:
-                if position_sync_ok and not in_news and spread_ok:
+                if position_sync_ok and not in_news and spread_ok and not weekend_entry_blocked:
                     bet_units = self.mc_manager.mc_B.get_bet_units()
                     lot = calculate_lot(bet_units, PARAMS['lot_multiplier'], PARAMS['max_bet_units'], info)
                     
@@ -1039,6 +1094,8 @@ class s14TradingBot:
                 else:
                     if not position_sync_ok:
                         logging.info("[Bot B] Activation postponed: MT5 position sync is not clean.")
+                    elif weekend_entry_blocked:
+                        logging.info("[Bot B] Activation postponed: weekend entry stop window.")
                     elif in_news:
                         logging.info("[Bot B] Activation postponed: currently in NEWS window.")
                     elif not spread_ok:
