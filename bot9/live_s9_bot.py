@@ -25,7 +25,6 @@ import csv
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
-import pytz
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -56,35 +55,81 @@ from live_data_fetcher import MT5DataManager
 from live_executor import MT5Executor, ORDER_TYPE_BUY, ORDER_TYPE_SELL
 
 # ============================================================
-# s9 Configuration (US Indices ORB v5)
+# s9 Configuration (adopted primary_with_combo_us500_only)
 # ============================================================
 POLL_INTERVAL_SECONDS = 5  # 常時価格監視（ブレイクアウト・TP/SL）のため5秒に設定
 STATE_FILE = os.path.join(script_dir, "s9_bot_state.json")
 RISK_USD = 10.0  # 1トレードあたりの許容リスク金額
 MAX_LOT_LIMIT = 2.0
 
-TRADED_SYMBOLS = ['USTECm', 'US500m']
+TRADED_SYMBOLS = ['USTECm', 'US30m', 'JP225m', 'USOILm', 'US500m', 'NZDCADm']
 
-# 各アセットの最適パラメータ (v5バックテスト結果に基づく)
+# Adopted live params from the validated bot9 primary candidate.
 PARAMS = {
     'USTECm': {
-        'close_hour': 16, # JST 16時強制クローズ
-        'tp_mult': 0.6,   # v5 最適化値
+        'close_hour': 18,
+        'tp_mult': 1.0,
         'sl_mult': 0.4,
         'be_ratio': 0.5,
+        'exit_mode': 'current_sl_tp_be_ppl',
+        'min_range_ratio': 0.20,
+        'max_range_ratio': 0.55,
     },
-    'US500m': {
-        'close_hour': 16, # JST 16時強制クローズ
-        'tp_mult': 1.0,   # v5 最適化値
+    'US30m': {
+        'close_hour': 16,
+        'tp_mult': 0.8,
+        'sl_mult': 0.4,
+        'be_ratio': 0.5,
+        'exit_mode': 'no_ppl',
+        'min_range_ratio': 0.20,
+        'max_range_ratio': 0.55,
+    },
+    'JP225m': {
+        'close_hour': 21,
+        'tp_mult': 1.2,
+        'sl_mult': 0.4,
+        'be_ratio': 0.5,
+        'exit_mode': 'current_sl_tp_be_ppl',
+        'min_range_ratio': 0.20,
+        'max_range_ratio': 0.55,
+    },
+    'USOILm': {
+        'close_hour': 21,
+        'tp_mult': 1.0,
         'sl_mult': 0.5,
         'be_ratio': 0.5,
-    }
+        'exit_mode': 'current_sl_tp_be_ppl',
+        'min_range_ratio': 0.20,
+        'max_range_ratio': 0.55,
+    },
+    'US500m': {
+        'close_hour': 21,
+        'tp_mult': 1.2,
+        'sl_mult': 0.4,
+        'be_ratio': 0.5,
+        'exit_mode': 'time_only',
+        'min_range_ratio': 0.15,
+        'max_range_ratio': 0.70,
+    },
+    'NZDCADm': {
+        'close_hour': 21,
+        'tp_mult': 0.8,
+        'sl_mult': 0.4,
+        'be_ratio': 0.5,
+        'exit_mode': 'plain_sl_tp',
+        'min_range_ratio': 0.20,
+        'max_range_ratio': 0.60,
+    },
 }
 
 # スプレッドコストマッピング (スリッページ等考慮用の仮定値)
 COST_MAP = {
     'USTECm': 0.00015,
+    'US30m': 0.00015,
+    'JP225m': 0.00015,
+    'USOILm': 0.00015,
     'US500m': 0.00015,
+    'NZDCADm': 0.00015,
 }
 
 # ============================================================
@@ -93,7 +138,41 @@ COST_MAP = {
 def get_lot_multiplier_usd(symbol, price, usdjpy_rate):
     if symbol == 'JP225m': return 1.0 / usdjpy_rate
     elif symbol in ['USTECm', 'US500m', 'US30m']: return 1.0
+    elif symbol == 'USOILm': return 100.0
     return 100000.0
+
+def saturday_entry_forbidden(now_jst):
+    return now_jst.weekday() == 5 and (now_jst.hour > 2 or (now_jst.hour == 2 and now_jst.minute >= 0))
+
+def saturday_force_close_due(now_jst):
+    return now_jst.weekday() == 5 and (now_jst.hour > 2 or (now_jst.hour == 2 and now_jst.minute >= 30))
+
+def exit_flags(exit_mode):
+    return {
+        'use_sl': exit_mode in ('current_sl_tp_be_ppl', 'no_ppl', 'plain_sl_tp'),
+        'use_tp': exit_mode in ('current_sl_tp_be_ppl', 'no_ppl', 'plain_sl_tp'),
+        'use_be': exit_mode in ('current_sl_tp_be_ppl', 'no_ppl'),
+        'use_ppl': exit_mode == 'current_sl_tp_be_ppl',
+    }
+
+def entry_guard_reason(symbol, now_jst, range_ratio=None, direction=None):
+    if saturday_entry_forbidden(now_jst):
+        return "Saturday entry is forbidden at/after 02:00 JST"
+
+    if symbol == 'NZDCADm' and now_jst.weekday() in (0, 1):
+        return "NZDCADm Monday/Tuesday JST entry is forbidden"
+    if symbol == 'USOILm' and now_jst.weekday() in (3, 4):
+        return "USOILm Thursday/Friday JST entry is forbidden"
+    if symbol == 'JP225m' and now_jst.month in (2, 7):
+        return "JP225m February/July entry is forbidden"
+
+    if symbol == 'US500m':
+        if direction == 'LONG':
+            return "US500m LONG entry is forbidden"
+        if range_ratio is not None and not (range_ratio <= 0.18 or range_ratio >= 0.34):
+            return "US500m Tokyo_Range_Ratio must be <= 0.18 or >= 0.34"
+
+    return None
 
 class s9TradingBot:
     def __init__(self):
@@ -122,11 +201,36 @@ class s9TradingBot:
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
 
+    def ensure_state_shape(self):
+        defaults = {
+            "active_tickets": {},
+            "range_high": {},
+            "range_low": {},
+            "range_ratio": {},
+            "atr": {},
+            "be_trigger_dist": {},
+            "initial_sl": {},
+            "tp_target": {},
+            "be_active": {},
+            "ppl_active": {},
+            "ppl_trigger": {},
+            "ppl_lock": {},
+            "has_entered_today": {},
+            "position_direction": {},
+            "entry_price": {},
+            "lot_size": {},
+            "exit_mode": {},
+        }
+        for key, value in defaults.items():
+            self.state.setdefault(key, value.copy())
+
     def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0, price=0.0, pnl=0.0):
         csv_file = os.path.join(LOG_DIR, "s9_trades.csv")
         file_exists = os.path.isfile(csv_file)
         
         now_jst = datetime.now(JST)
+        price_value = "" if price is None else price
+        pnl_value = "" if pnl is None else pnl
         
         try:
             with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
@@ -134,7 +238,7 @@ class s9TradingBot:
                 if not file_exists:
                     writer.writerow(["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL"])
                 writer.writerow([
-                    now_jst.strftime("%Y-%m-%d %H:%M:%S"), action, ticket, symbol, direction, lot_size, price, pnl
+                    now_jst.strftime("%Y-%m-%d %H:%M:%S"), action, ticket, symbol, direction, lot_size, price_value, pnl_value
                 ])
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
@@ -157,10 +261,11 @@ class s9TradingBot:
     def run_cycle(self):
         now_jst = datetime.now(JST)
         today_str = now_jst.strftime("%Y-%m-%d")
+        date_rollover_with_active = self.state.get("date") != today_str and bool(self.state.get("active_tickets"))
         
         # 1. 新しい日の場合は状態を完全に初期化
         if self.state.get("date") != today_str:
-            if self.state.get("active_tickets"):
+            if date_rollover_with_active:
                 logging.warning("New day detected, but active tickets remain. Preserving state until positions are closed.")
             else:
                 logging.info(f"New day detected: {today_str}. Initializing daily state...")
@@ -169,6 +274,7 @@ class s9TradingBot:
                     "active_tickets": {},
                     "range_high": {},
                     "range_low": {},
+                    "range_ratio": {},
                     "atr": {},
                     "be_trigger_dist": {},
                     "initial_sl": {},
@@ -181,29 +287,52 @@ class s9TradingBot:
                     "position_direction": {},
                     "entry_price": {},
                     "lot_size": {},
+                    "exit_mode": {},
                 }
                 self.save_state()
+        self.ensure_state_shape()
 
         # 各取引アセットの判定ループ
         for col in TRADED_SYMBOLS:
+            if date_rollover_with_active and col not in self.state["active_tickets"]:
+                continue
+
             param = PARAMS[col]
             close_hour = param['close_hour']
             
             # ── A. 強制タイムクローズ判定 (指定時間以降は取引不可 ＆ ポジション強制クローズ) ──
-            if now_jst.hour >= close_hour:
+            time_close_due = now_jst.hour >= close_hour
+            weekend_close_due = saturday_force_close_due(now_jst)
+            if time_close_due or weekend_close_due:
                 if col in self.state["active_tickets"]:
                     ticket = self.state["active_tickets"][col]
-                    logging.info(f"[{col}] JST {close_hour}:00 reached (Time Close). Closing position (Ticket: {ticket}).")
+                    close_label = "WEEKEND" if weekend_close_due else "TIME"
+                    close_text = "Saturday 02:30 JST" if weekend_close_due else f"JST {close_hour}:00"
+                    logging.info(f"[{col}] {close_text} reached ({close_label} Close). Closing position (Ticket: {ticket}).")
                     success = self.executor.close_position(ticket)
                     if success:
-                        logging.info(f"Successfully closed position for {col} (Time Close). PnL: {success.profit}")
-                        self.log_trade_csv("EXIT_TIME", ticket, col, price=success.close_price, pnl=success.profit)
+                        if getattr(success, "already_closed", False):
+                            logging.warning(
+                                f"Position {ticket} for {col} was already closed on MT5. "
+                                "Logging UNKNOWN exit instead of zero price/profit."
+                            )
+                            self.log_trade_csv(f"EXIT_{close_label}_UNKNOWN", ticket, col, price=None, pnl=None)
+                        else:
+                            logging.info(f"Successfully closed position for {col} ({close_label} Close). PnL: {success.profit}")
+                            self.log_trade_csv(f"EXIT_{close_label}", ticket, col, price=success.close_price, pnl=success.profit)
                         del self.state["active_tickets"][col]
                         self.save_state()
                     else:
                         logging.warning(f"Failed to close position {ticket} for {col}. Keeping state so the bot can retry.")
                         self.state.setdefault("last_close_fail", {})[col] = now_jst.strftime("%Y-%m-%d %H:%M:%S")
                         self.save_state()
+                continue
+
+            if saturday_entry_forbidden(now_jst) and col not in self.state["active_tickets"]:
+                if not self.state["has_entered_today"].get(col, False):
+                    logging.info(f"[{col}] Saturday entry lock is active from 02:00 JST. Skipping new entries.")
+                    self.state["has_entered_today"][col] = True
+                    self.save_state()
                 continue
 
             # ── B. 東京レンジ高値安値・過去5日平均ATRの計算 ──
@@ -246,17 +375,22 @@ class s9TradingBot:
                     # Tokyo Range Width Filter (ボラティリティ比率制限)
                     tokyo_range_width = r_high - r_low
                     range_ratio = tokyo_range_width / atr_val
-                    min_range_ratio = 0.15
-                    max_range_ratio = 0.70
+                    min_range_ratio = param['min_range_ratio']
+                    max_range_ratio = param['max_range_ratio']
                     
                     self.state["range_high"][col] = float(r_high)
                     self.state["range_low"][col] = float(r_low)
+                    self.state["range_ratio"][col] = float(range_ratio)
                     self.state["atr"][col] = float(atr_val)
                     self.state["be_active"][col] = False
                     self.state["ppl_active"][col] = False
                     
                     if range_ratio < min_range_ratio or range_ratio > max_range_ratio:
                         logging.info(f"[{col}] Tokyo range width ({tokyo_range_width:.2f}) is outside limits. Ratio: {range_ratio:.2f} (Limits: {min_range_ratio}-{max_range_ratio}). Skipping trading today.")
+                        self.state["has_entered_today"][col] = True
+                    elif entry_guard_reason(col, now_jst, range_ratio=range_ratio):
+                        reason = entry_guard_reason(col, now_jst, range_ratio=range_ratio)
+                        logging.info(f"[{col}] Entry guard blocked trading today: {reason}. Ratio: {range_ratio:.2f}")
                         self.state["has_entered_today"][col] = True
                     else:
                         logging.info(f"[{col}] Tokyo Range confirmed. Width: {tokyo_range_width:.2f}, ATR: {atr_val:.2f}, Ratio: {range_ratio:.2f} (Limits: {min_range_ratio}-{max_range_ratio})")
@@ -303,9 +437,18 @@ class s9TradingBot:
                         
                     if direction:
                         logging.info(f"[{col}] {direction} Breakout Detected! Ask={current_ask:.2f}, Bid={current_bid:.2f}, Range=[{r_low:.2f}, {r_high:.2f}]")
+
+                        range_ratio = self.state.get("range_ratio", {}).get(col)
+                        reason = entry_guard_reason(col, now_jst, range_ratio=range_ratio, direction=direction)
+                        if reason:
+                            logging.info(f"[{col}] Entry guard rejected {direction}: {reason}. No more entries today.")
+                            self.state["has_entered_today"][col] = True
+                            self.save_state()
+                            continue
                         
                         tp_dist = atr * param['tp_mult']
                         sl_dist = atr * param['sl_mult']
+                        flags = exit_flags(param.get('exit_mode', 'current_sl_tp_be_ppl'))
                         
                         # TP / SL / PPL のターゲット価格算出
                         if direction == "LONG":
@@ -341,10 +484,12 @@ class s9TradingBot:
                         
                         # 成行発注の実行
                         order_type = ORDER_TYPE_BUY if direction == 'LONG' else ORDER_TYPE_SELL
-                        ticket = self.executor.open_position(col, order_type, target_lot, sl=init_sl, tp=tp_target)
+                        order_sl = init_sl if flags['use_sl'] else 0.0
+                        order_tp = tp_target if flags['use_tp'] else 0.0
+                        ticket = self.executor.open_position(col, order_type, target_lot, sl=order_sl, tp=order_tp)
                         
                         if ticket:
-                            logging.info(f"[{col}] Breakout Order Filled. Ticket: {ticket} Lot: {target_lot} Price: {ticket.price}")
+                            logging.info(f"[{col}] Breakout Order Filled. Ticket: {ticket} Lot: {target_lot} Price: {ticket.price} ExitMode: {param.get('exit_mode')}")
                             self.state["active_tickets"][col] = ticket
                             self.state["has_entered_today"][col] = True
                             self.state["position_direction"][col] = direction
@@ -357,6 +502,7 @@ class s9TradingBot:
                             self.state["ppl_trigger"][col] = float(ppl_trig)
                             self.state["ppl_lock"][col] = float(ppl_lock)
                             self.state["lot_size"][col] = float(target_lot)
+                            self.state["exit_mode"][col] = param.get('exit_mode', 'current_sl_tp_be_ppl')
                             self.save_state()
                             
                             self.log_trade_csv("ENTRY", ticket, col, direction, target_lot, ticket.price)
@@ -375,29 +521,34 @@ class s9TradingBot:
                     ppl_trig = self.state.get("ppl_trigger", {}).get(col, 0.0)
                     ppl_lock = self.state.get("ppl_lock", {}).get(col, 0.0)
                     ticket = self.state["active_tickets"][col]
+                    exit_mode = self.state.get("exit_mode", {}).get(col, param.get('exit_mode', 'current_sl_tp_be_ppl'))
+                    flags = exit_flags(exit_mode)
+                    if not any(flags.values()):
+                        continue
                     
                     close_trade = False
                     reason = ""
+                    current_sl = sl_p
                     
                     if direction == "LONG":
                         # ① 段階的トレール（PPL）判定
-                        if not ppl_act and current_bid >= ppl_trig:
+                        if flags['use_ppl'] and not ppl_act and current_bid >= ppl_trig:
                             logging.info(f"[{col}] LONG Partial Profit Lock Triggered! Move SL to lock profit ({ppl_lock:.2f})")
                             self.executor.modify_position_sl_tp(ticket, ppl_lock, tp_p)
                             self.state["ppl_active"][col] = True
                             self.save_state()
                         # ② 建値移動（BE）判定
-                        elif not ppl_act and not be_act and (current_bid - entry_p) >= be_trig:
+                        elif flags['use_be'] and not ppl_act and not be_act and (current_bid - entry_p) >= be_trig:
                             logging.info(f"[{col}] LONG Breakeven Triggered! Move SL to entry ({entry_p:.2f})")
                             self.executor.modify_position_sl_tp(ticket, entry_p, tp_p)
                             self.state["be_active"][col] = True
                             self.save_state()
                             
                         # 現在のアクティブSL判定
-                        if self.state["ppl_active"][col]:
+                        if flags['use_ppl'] and self.state.get("ppl_active", {}).get(col, False):
                             current_sl = ppl_lock
                             reason_candidate = "PARTIAL_LOCK"
-                        elif self.state["be_active"][col]:
+                        elif flags['use_be'] and self.state.get("be_active", {}).get(col, False):
                             current_sl = entry_p
                             reason_candidate = "BREAKEVEN"
                         else:
@@ -405,22 +556,22 @@ class s9TradingBot:
                             reason_candidate = "STOP_LOSS"
                             
                         # エグジット判定
-                        if current_bid <= current_sl:
+                        if flags['use_sl'] and current_bid <= current_sl:
                             close_trade = True
                             reason = reason_candidate
-                        elif current_bid >= tp_p:
+                        elif flags['use_tp'] and current_bid >= tp_p:
                             close_trade = True
                             reason = "TAKE_PROFIT"
                             
                     else: # SHORT
                         # ① 段階的トレール（PPL）判定
-                        if not ppl_act and current_ask <= ppl_trig:
+                        if flags['use_ppl'] and not ppl_act and current_ask <= ppl_trig:
                             logging.info(f"[{col}] SHORT Partial Profit Lock Triggered! Move SL to lock profit ({ppl_lock:.2f})")
                             self.executor.modify_position_sl_tp(ticket, ppl_lock, tp_p)
                             self.state["ppl_active"][col] = True
                             self.save_state()
                         # ② 建値移動（BE）判定
-                        elif not ppl_act and not be_act and (entry_p - current_ask) >= be_trig:
+                        elif flags['use_be'] and not ppl_act and not be_act and (entry_p - current_ask) >= be_trig:
                             logging.info(f"[{col}] SHORT Breakeven Triggered! Move SL to entry Ask.")
                             self.executor.modify_position_sl_tp(ticket, entry_p * (1 + COST_MAP.get(col, 0.00015)), tp_p)
                             self.state["be_active"][col] = True
@@ -430,10 +581,10 @@ class s9TradingBot:
                         spread_pct = COST_MAP.get(col, 0.00015)
                         be_sl = entry_p * (1 + spread_pct)
                         
-                        if self.state["ppl_active"][col]:
+                        if flags['use_ppl'] and self.state.get("ppl_active", {}).get(col, False):
                             current_sl = ppl_lock
                             reason_candidate = "PARTIAL_LOCK"
-                        elif self.state["be_active"][col]:
+                        elif flags['use_be'] and self.state.get("be_active", {}).get(col, False):
                             current_sl = be_sl
                             reason_candidate = "BREAKEVEN"
                         else:
@@ -441,10 +592,10 @@ class s9TradingBot:
                             reason_candidate = "STOP_LOSS"
                             
                         # エグジット判定
-                        if current_ask >= current_sl:
+                        if flags['use_sl'] and current_ask >= current_sl:
                             close_trade = True
                             reason = reason_candidate
-                        elif current_ask <= tp_p:
+                        elif flags['use_tp'] and current_ask <= tp_p:
                             close_trade = True
                             reason = "TAKE_PROFIT"
                             
@@ -452,8 +603,15 @@ class s9TradingBot:
                         logging.info(f"[{col}] Exit Triggered! Reason: {reason} (Bid={current_bid:.2f}, Ask={current_ask:.2f}, SL={current_sl:.2f}, TP={tp_p:.2f})")
                         success = self.executor.close_position(ticket)
                         if success:
-                            logging.info(f"Successfully closed position for {col} ({reason}). PnL: {success.profit}")
-                            self.log_trade_csv(f"EXIT_{reason}", ticket, col, price=success.close_price, pnl=success.profit)
+                            if getattr(success, "already_closed", False):
+                                logging.warning(
+                                    f"Position {ticket} for {col} was already closed on MT5. "
+                                    "Logging UNKNOWN exit instead of zero price/profit."
+                                )
+                                self.log_trade_csv(f"EXIT_{reason}_UNKNOWN", ticket, col, price=None, pnl=None)
+                            else:
+                                logging.info(f"Successfully closed position for {col} ({reason}). PnL: {success.profit}")
+                                self.log_trade_csv(f"EXIT_{reason}", ticket, col, price=success.close_price, pnl=success.profit)
                             del self.state["active_tickets"][col]
                             self.save_state()
                         else:
