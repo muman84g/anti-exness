@@ -59,24 +59,25 @@ PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
     'symbol': 'GBPUSD',
-    'W_pips': 40.0,
+    'W_pips': 44.0,
+    'b_trigger_ratio': 0.40,
     'lot_multiplier': 0.01,
-    'max_bet_units': 8,
+    'max_bet_units': 12,
     'initial_sequence': [2, 2, 2],
     'weekend_filter': True,
-    'weekend_stop_hour_jst': 20,
+    'weekend_stop_hour_jst': 2,
     'weekend_entry_stop_weekday_jst': 5,
-    'weekend_entry_stop_hour_jst': 4,
+    'weekend_entry_stop_hour_jst': 2,
     'weekend_entry_stop_minute_jst': 0,
     'weekend_close_weekday_jst': 5,
-    'weekend_close_hour_jst': 4,
+    'weekend_close_hour_jst': 2,
     'weekend_close_minute_jst': 30,
     'monday_start_hour_jst': 8,
     'monday_start_minute_jst': 0,
     'news_filter': True,
-    'avoidance_hours': 2.0,
+    'avoidance_hours': 0.0,
     'news_file': 'macro_events_2026.json',
-    'max_spread_pips': 0.8
+    'max_spread_pips': 2.0
 }
 
 def load_params():
@@ -478,6 +479,8 @@ class s14TradingBot:
         if not PARAMS.get("news_filter", True) or not self.macro_times:
             return False
         avoidance_hours = PARAMS.get("avoidance_hours", 2.0)
+        if avoidance_hours <= 0:
+            return False
         dt = pd.Timedelta(hours=avoidance_hours)
         for mt in self.macro_times:
             if mt - dt <= t_jst <= mt + dt:
@@ -788,6 +791,7 @@ class s14TradingBot:
         
         symbol = PARAMS['symbol']
         W_pips = PARAMS['W_pips']
+        b_trigger_ratio = float(PARAMS.get('b_trigger_ratio', 0.40))
         
         if "JPY" in symbol:
             pip_val = 0.01
@@ -1031,8 +1035,8 @@ class s14TradingBot:
                 self.save_state()
                 S = current_ask
                 
-            trigger_up = S + W / 2
-            trigger_dn = S - W / 2
+            trigger_up = S + W * b_trigger_ratio
+            trigger_dn = S - W * b_trigger_ratio
             
             trigger_direction = ""
             if current_ask >= trigger_up:

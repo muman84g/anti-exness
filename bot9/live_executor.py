@@ -21,12 +21,13 @@ class CloseResult:
     Result class that behaves like a boolean (for backward compatibility),
     but holds detailed trade exit information (lot size, open/close price, and profit).
     """
-    def __init__(self, success, lot=0.0, open_price=0.0, close_price=0.0, profit=0.0):
+    def __init__(self, success, lot=0.0, open_price=0.0, close_price=0.0, profit=0.0, already_closed=False):
         self.success = success
         self.lot = lot
         self.open_price = open_price
         self.close_price = close_price
         self.profit = profit
+        self.already_closed = already_closed
 
     def __bool__(self):
         return self.success
@@ -162,7 +163,7 @@ class MT5Executor(BaseExecutor):
                 "or missing on MT5 so local bot state can be cleaned up. "
                 "Close price/profit were not returned by the EA."
             )
-            return CloseResult(True)
+            return CloseResult(True, already_closed=True)
 
         logging.error(f"EA Close failed for {ticket}: {res}")
         return CloseResult(False)
