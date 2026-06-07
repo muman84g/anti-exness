@@ -7,7 +7,7 @@
 # - Timeframe: M5 (5分足)
 # - Trigger: Z-score の乖離（スプレッド = Lead_Z - Lag_Z）が閾値を突破した際、
 #            遅行銘柄が先行銘柄を追従（スプレッド収束）する方向に逆張りエントリー。
-# - Weekend Close: 土曜早朝 JST 05:00 以降は強制クローズ
+# - Weekend Guard: 土曜02:00 JST以降は新規entry禁止、土曜02:30 JST以降は強制クローズ
 # - Risk Sizing: エントリー時点の ATR に基づき、1トレード損切り時の損失が $10 固定となるようロットサイズを逆算
 # ==============================================================================
 import os
@@ -60,18 +60,35 @@ FIXED_RISK_USD = 10.0      # 1トレードあたりの許容リスク（10ドル
 DEFAULT_PARAMS = {
     'lead_symbol': 'USTECm',
     'lag_symbol': 'US500m',
+    'strategy_profile': 'mr_only_weekend_w288_corr63_z1.6',
     'window_z': 288,               # Z-score平滑窓幅 (24時間)
-    'z_entry': 1.0,                # エントリー乖離閾値 (おすすめ: 1.2, PnL Max: 0.6)
+    'z_entry': 1.6,                # focused grid first candidate
     'z_exit': 0.0,                 # 決済収束閾値
     'exit_type': 'MEAN_REVERSION', # 決済ロジック ("MEAN_REVERSION", "TIME", "FIXED_RR", "LEAD_STALL")
+    'mean_reversion_mode': 'zero_cross',
+    'corr_window': 63,
+    'history_bars': 350,
     'max_hold_bars': 24,           # 最大保有バー数 (2時間)
     'sl_mult': 1.0,                # 損切りATR乗数 (1.0 ATR)
     'tp_mult': 1.5,                # 利確ATR乗数
-    'use_be': True,                # 建値移動 (BE) の有無
+    'tp_atr_mult': 1.5,
+    'use_protective_exits': False,
+    'use_time_exit': False,
+    'use_sl': False,
+    'use_tp': False,
+    'use_be': False,               # 建値移動 (BE) の有無
     'multiplier': 50.0,            # US500m コントラクトサイズ
     'use_symbol_trade_value': True, # Prefer broker tick value/tick size for risk sizing
     'max_lot_limit': 2.0,           # Hard cap for live lot sizing
     'spread_pct': 0.00005,         # US500m 標準スプレッド (0.005%)
+    'sync_on_start_without_entry': True,  # On startup/restart, sync the latest bar without opening a catch-up trade
+    'max_completed_bar_age_minutes': 15,  # Reject signal bars older than this many minutes
+    'max_completed_bar_future_minutes': 2, # Reject signal bars too far ahead of local JST clock
+    'weekend_entry_block_weekday': 5,      # Saturday, Python weekday convention
+    'weekend_entry_block_hour': 2,
+    'weekend_entry_block_minute': 0,
+    'weekend_force_close_hour': 2,
+    'weekend_force_close_minute': 30,
 }
 
 def load_params():
@@ -103,9 +120,28 @@ PARAMS = load_params()
 # ============================================================
 # 時間判定ヘルパー
 # ============================================================
-def is_weekend_jst(dt_jst):
-    # 土曜 05:00 JST 以降、または日曜は週末クローズ対象
-    if dt_jst.weekday() == 5 and dt_jst.hour >= 5:
+def is_at_or_after_time(dt_jst, hour, minute):
+    return dt_jst.hour > hour or (dt_jst.hour == hour and dt_jst.minute >= minute)
+
+
+def is_weekend_entry_block_jst(dt_jst):
+    # 土曜02:00 JST以降、または日曜は新規entry禁止
+    block_weekday = int(PARAMS.get("weekend_entry_block_weekday", 5))
+    block_hour = int(PARAMS.get("weekend_entry_block_hour", 2))
+    block_minute = int(PARAMS.get("weekend_entry_block_minute", 0))
+    if dt_jst.weekday() == block_weekday and is_at_or_after_time(dt_jst, block_hour, block_minute):
+        return True
+    if dt_jst.weekday() == 6:
+        return True
+    return False
+
+
+def is_weekend_force_close_jst(dt_jst):
+    # 土曜02:30 JST以降、または日曜は保有positionを強制close
+    block_weekday = int(PARAMS.get("weekend_entry_block_weekday", 5))
+    close_hour = int(PARAMS.get("weekend_force_close_hour", 2))
+    close_minute = int(PARAMS.get("weekend_force_close_minute", 30))
+    if dt_jst.weekday() == block_weekday and is_at_or_after_time(dt_jst, close_hour, close_minute):
         return True
     if dt_jst.weekday() == 6:
         return True
@@ -117,6 +153,7 @@ class s11TradingBot:
         self.executor = MT5Executor(self.dm)
         self.state = {}
         self.load_state()
+        self.log_effective_params()
 
     def load_state(self):
         if os.path.exists(STATE_FILE):
@@ -144,6 +181,35 @@ class s11TradingBot:
                 json.dump(self.state, f, indent=4)
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
+
+    def log_effective_params(self):
+        keys = [
+            "lead_symbol", "lag_symbol", "strategy_profile", "window_z", "z_entry", "z_exit",
+            "exit_type", "mean_reversion_mode", "corr_window", "history_bars",
+            "max_hold_bars", "sl_mult", "tp_mult", "tp_atr_mult",
+            "use_protective_exits", "use_time_exit", "use_sl", "use_tp", "use_be",
+            "spread_pct", "max_lot_limit", "sync_on_start_without_entry",
+            "max_completed_bar_age_minutes", "max_completed_bar_future_minutes",
+            "weekend_entry_block_hour", "weekend_entry_block_minute",
+            "weekend_force_close_hour", "weekend_force_close_minute",
+        ]
+        compact = {key: PARAMS.get(key) for key in keys}
+        logging.info(f"Effective s11 params: {compact}")
+
+    def mark_bar_processed(self, bar_time_str):
+        self.state["last_processed_bar_time"] = bar_time_str
+        self.save_state()
+
+    def normalize_bar_timestamp(self, ts):
+        bar_ts = pd.Timestamp(ts)
+        if bar_ts.tzinfo is None:
+            bar_ts = bar_ts.tz_localize("Asia/Tokyo")
+        else:
+            bar_ts = bar_ts.tz_convert("Asia/Tokyo")
+        return bar_ts
+
+    def completed_bar_age_minutes(self, bar_ts, now_jst):
+        return (pd.Timestamp(now_jst) - bar_ts).total_seconds() / 60.0
 
     def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0, price=0.0, pnl=0.0, reason=""):
         csv_file = os.path.join(LOG_DIR, "s11_trades.csv")
@@ -200,8 +266,12 @@ class s11TradingBot:
         # 2. 先行・遅行の最新ヒストリカルデータを取得し、同期させてシグナル判定
         try:
             # 5分足(timeframe=5)で過去350本取得（Z-score平滑288本窓をカバー）
-            df_lead_raw = self.dm.get_historical_data(lead_sym, 5, 350)
-            df_lag_raw = self.dm.get_historical_data(lag_sym, 5, 350)
+            corr_window = int(PARAMS.get("corr_window", 63))
+            min_history_bars = int(PARAMS["window_z"]) + max(corr_window, 1) - 1
+            history_bars = int(PARAMS.get("history_bars", max(350, min_history_bars)))
+            history_bars = max(history_bars, min_history_bars)
+            df_lead_raw = self.dm.get_historical_data(lead_sym, 5, history_bars)
+            df_lag_raw = self.dm.get_historical_data(lag_sym, 5, history_bars)
             
             if df_lead_raw is None or df_lead_raw.empty or df_lag_raw is None or df_lag_raw.empty:
                 logging.warning("Failed to fetch historical data for lead or lag symbols.")
@@ -223,7 +293,7 @@ class s11TradingBot:
             df_lag = self.calculate_zscore_features(df_lag_raw, PARAMS['window_z'])
             
             # インデックス同期
-            common_idx = df_lead.index.intersection(df_lag.index)
+            common_idx = df_lead.index.intersection(df_lag.index).sort_values()
             if len(common_idx) < 5:
                 logging.warning("No overlapping timestamps found.")
                 return
@@ -232,22 +302,74 @@ class s11TradingBot:
             df_lag_sync = df_lag.loc[common_idx]
             
             # 最新の確定バーの時刻
-            last_completed_bar_time = common_idx[-2].strftime("%Y-%m-%d %H:%M:%S")
+            last_completed_bar_ts = self.normalize_bar_timestamp(common_idx[-2])
+            last_completed_bar_time = last_completed_bar_ts.strftime("%Y-%m-%d %H:%M:%S")
+            bar_age_minutes = self.completed_bar_age_minutes(last_completed_bar_ts, now_jst)
             recorded_processed_time = self.state.get("last_processed_bar_time")
 
             # 新しい確定バーが出現した場合のみシグナル評価
             if recorded_processed_time != last_completed_bar_time:
-                logging.info(f"New completed bar detected at {last_completed_bar_time}. Running evaluation...")
+                max_age = float(PARAMS.get("max_completed_bar_age_minutes", 15))
+                max_future = float(PARAMS.get("max_completed_bar_future_minutes", 2))
+                logging.info(
+                    f"New completed bar detected at {last_completed_bar_time} "
+                    f"(age={bar_age_minutes:.2f}m)."
+                )
+
+                if recorded_processed_time is None and PARAMS.get("sync_on_start_without_entry", True):
+                    logging.info(
+                        "Startup sync: marking latest completed bar as processed without signal evaluation "
+                        f"(bar={last_completed_bar_time}, age={bar_age_minutes:.2f}m)."
+                    )
+                    self.mark_bar_processed(last_completed_bar_time)
+                    return
+
+                if bar_age_minutes > max_age:
+                    logging.warning(
+                        f"Skipping stale completed bar {last_completed_bar_time}: "
+                        f"age={bar_age_minutes:.2f}m exceeds max_completed_bar_age_minutes={max_age}."
+                    )
+                    self.mark_bar_processed(last_completed_bar_time)
+                    return
+
+                if bar_age_minutes < -max_future:
+                    logging.warning(
+                        f"Skipping future-dated completed bar {last_completed_bar_time}: "
+                        f"age={bar_age_minutes:.2f}m is earlier than allowed future skew {-max_future:.2f}m."
+                    )
+                    self.mark_bar_processed(last_completed_bar_time)
+                    return
                 
                 # 相関係数の符号確認
-                c_val = df_lead_sync["Z"].corr(df_lag_sync["Z"])
+                corr_df = pd.DataFrame({
+                    "lead_z": df_lead_sync["Z"],
+                    "lag_z": df_lag_sync["Z"],
+                }).dropna().tail(corr_window)
+                if len(corr_df) < 2:
+                    logging.warning(
+                        f"Not enough valid Z rows for corr_window={corr_window}; using corr_sign=1."
+                    )
+                    c_val = np.nan
+                else:
+                    c_val = corr_df["lead_z"].corr(corr_df["lag_z"])
                 corr_sign = np.sign(c_val) if not pd.isna(c_val) else 1.0
                 if corr_sign == 0: corr_sign = 1.0
+                logging.info(
+                    f"Correlation sign calculated with valid_z_rows={len(corr_df)} "
+                    f"corr_window={corr_window} corr={c_val if not pd.isna(c_val) else 'nan'} "
+                    f"sign={corr_sign:.0f}"
+                )
                 
-                self.evaluate_completed_bar(df_lead_sync, df_lag_sync, corr_sign, last_completed_bar_time, now_jst)
+                self.evaluate_completed_bar(
+                    df_lead_sync,
+                    df_lag_sync,
+                    corr_sign,
+                    last_completed_bar_time,
+                    now_jst,
+                    bar_age_minutes,
+                )
                 
-                self.state["last_processed_bar_time"] = last_completed_bar_time
-                self.save_state()
+                self.mark_bar_processed(last_completed_bar_time)
 
         except Exception as e:
             logging.error(f"Error in cycle processing: {e}")
@@ -276,7 +398,7 @@ class s11TradingBot:
         entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
 
         # A. 週末強制決済
-        if is_weekend_jst(now_jst):
+        if is_weekend_force_close_jst(now_jst):
             logging.info(f"[{symbol}] Weekend close triggered JST={now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Closing ticket {ticket}.")
             self.close_and_cleanup(symbol, ticket, "WEEKEND")
             return
@@ -284,12 +406,19 @@ class s11TradingBot:
         # B. 時間強制決済 (max_hold_bars 分相当)
         elapsed_seconds = (now_jst - entry_time).total_seconds()
         # M5足で max_hold_bars 分経過しているか
-        if elapsed_seconds >= PARAMS['max_hold_bars'] * 5 * 60:
+        if (PARAMS.get('use_time_exit', True) or PARAMS.get('exit_type') == "TIME") and elapsed_seconds >= PARAMS['max_hold_bars'] * 5 * 60:
             logging.info(f"[{symbol}] Time close triggered. Closing ticket {ticket}.")
             self.close_and_cleanup(symbol, ticket, "TIME")
             return
 
         # C. リアルタイム SL/TP 監視 & 建値移動 (FIXED_RR)
+        use_protective = PARAMS.get('use_protective_exits', True) or PARAMS.get('exit_type') == "FIXED_RR"
+        if not use_protective:
+            return
+        use_sl = PARAMS.get('use_sl', True)
+        use_tp = PARAMS.get('use_tp', True)
+        use_be = PARAMS.get('use_be', True) and use_sl
+
         close_position = False
         exit_reason = ""
 
@@ -297,7 +426,7 @@ class s11TradingBot:
             pos["max_seen_p"] = max(pos.get("max_seen_p", entry_price), current_bid)
             
             # 建値移動 (BE)
-            if PARAMS['use_be'] and not be_active and pos["max_seen_p"] >= (entry_price + atr):
+            if use_be and not be_active and pos["max_seen_p"] >= (entry_price + atr):
                 logging.info(f"[{symbol}] Breakeven triggered for LONG. Moving SL from {sl_price:.4f} to {entry_price:.4f}")
                 if self.executor.modify_position_sl_tp(ticket, entry_price, tp_price):
                     pos["be_active"] = True
@@ -307,10 +436,10 @@ class s11TradingBot:
                 self.save_state()
                 sl_price = entry_price
 
-            if current_bid <= sl_price:
+            if use_sl and sl_price and current_bid <= sl_price:
                 close_position = True
                 exit_reason = "SL"
-            elif current_bid >= tp_price:
+            elif use_tp and tp_price and current_bid >= tp_price:
                 close_position = True
                 exit_reason = "TP"
 
@@ -318,7 +447,7 @@ class s11TradingBot:
             pos["min_seen_p"] = min(pos.get("min_seen_p", entry_price), current_ask)
 
             # 建値移動 (BE)
-            if PARAMS['use_be'] and not be_active and pos["min_seen_p"] <= (entry_price - atr):
+            if use_be and not be_active and pos["min_seen_p"] <= (entry_price - atr):
                 logging.info(f"[{symbol}] Breakeven triggered for SHORT. Moving SL from {sl_price:.4f} to {entry_price:.4f}")
                 new_sl = entry_price * (1.0 + PARAMS['spread_pct'])
                 if self.executor.modify_position_sl_tp(ticket, new_sl, tp_price):
@@ -329,10 +458,10 @@ class s11TradingBot:
                 self.save_state()
                 sl_price = pos["sl_price"]
 
-            if current_ask >= sl_price:
+            if use_sl and sl_price and current_ask >= sl_price:
                 close_position = True
                 exit_reason = "SL"
-            elif current_ask <= tp_price:
+            elif use_tp and tp_price and current_ask <= tp_price:
                 close_position = True
                 exit_reason = "TP"
 
@@ -340,7 +469,7 @@ class s11TradingBot:
             logging.info(f"[{symbol}] Realtime exit triggered: {exit_reason}. Closing ticket {ticket}.")
             self.close_and_cleanup(symbol, ticket, exit_reason)
 
-    def evaluate_completed_bar(self, df_lead, df_lag, corr_sign, bar_time_str, now_jst):
+    def evaluate_completed_bar(self, df_lead, df_lag, corr_sign, bar_time_str, now_jst, bar_age_minutes):
         lag_sym = PARAMS['lag_symbol']
         ticket = self.state["active_tickets"].get(lag_sym)
         pos = self.state["positions"].get(lag_sym)
@@ -359,6 +488,14 @@ class s11TradingBot:
         spread = z_lead_val - z_lag_val
         atr = row_lag["ATR_24"]
 
+        logging.info(
+            f"[{lag_sym}] Signal evaluation bar={bar_time_str} age={bar_age_minutes:.2f}m "
+            f"lead_z={z_lead_val:.4f} lag_z={z_lag_val:.4f} spread_z={spread:.4f} "
+            f"corr_sign={corr_sign:.0f} z_entry={PARAMS['z_entry']} z_exit={PARAMS['z_exit']} "
+            f"exit_type={PARAMS['exit_type']} mean_reversion_mode={PARAMS.get('mean_reversion_mode')} "
+            f"window_z={PARAMS['window_z']} corr_window={PARAMS.get('corr_window')}"
+        )
+
         # ────────────── インジケータ決済の判定 ──────────────
         if ticket and pos:
             direction = pos["direction"]
@@ -366,7 +503,15 @@ class s11TradingBot:
             exit_reason = ""
             
             if PARAMS['exit_type'] == "MEAN_REVERSION":
-                if abs(spread) <= PARAMS['z_exit']:
+                if PARAMS.get("mean_reversion_mode", "zero_cross") == "bot_abs":
+                    exit_triggered = abs(spread) <= PARAMS['z_exit']
+                else:
+                    adj_spread = corr_sign * spread
+                    if direction == "LONG":
+                        exit_triggered = adj_spread <= PARAMS['z_exit']
+                    else:
+                        exit_triggered = adj_spread >= -PARAMS['z_exit']
+                if exit_triggered:
                     exit_triggered = True
                     exit_reason = "INDICATOR_TP"
             elif PARAMS['exit_type'] == "LEAD_STALL":
@@ -388,7 +533,8 @@ class s11TradingBot:
         # ────────────── 新規エントリー判定 ──────────────
         if not ticket:
             # 週末期間中はエントリー不可
-            if is_weekend_jst(now_jst):
+            if is_weekend_entry_block_jst(now_jst):
+                logging.info(f"[{lag_sym}] Weekend entry block JST={now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Skipping new entry.")
                 return
 
             # シグナル判定
@@ -399,10 +545,27 @@ class s11TradingBot:
                 sig_dir = "SHORT"
                 
             if sig_dir:
-                logging.info(f"[{lag_sym}] Divergence Signal detected: {sig_dir} at completed bar {bar_time_str} (Spread Z: {spread:.4f})")
-                self.execute_entry(lag_sym, sig_dir, row_lag, atr)
+                logging.info(
+                    f"[{lag_sym}] Divergence Signal detected: {sig_dir} at completed bar {bar_time_str} "
+                    f"(Spread Z: {spread:.4f}, age={bar_age_minutes:.2f}m, threshold={PARAMS['z_entry']})"
+                )
+                signal_context = {
+                    "signal_bar_time": bar_time_str,
+                    "signal_bar_age_minutes": float(bar_age_minutes),
+                    "signal_spread_z": float(spread),
+                    "signal_lead_z": float(z_lead_val),
+                    "signal_lag_z": float(z_lag_val),
+                    "signal_corr_sign": float(corr_sign),
+                    "signal_window_z": int(PARAMS["window_z"]),
+                    "signal_corr_window": int(PARAMS.get("corr_window", 63)),
+                    "signal_z_entry": float(PARAMS["z_entry"]),
+                    "signal_exit_type": PARAMS["exit_type"],
+                    "signal_mean_reversion_mode": PARAMS.get("mean_reversion_mode", "zero_cross"),
+                }
+                self.execute_entry(lag_sym, sig_dir, row_lag, atr, signal_context)
 
-    def execute_entry(self, symbol, direction, row_lag, atr):
+    def execute_entry(self, symbol, direction, row_lag, atr, signal_context=None):
+        signal_context = signal_context or {}
         info = self.executor.get_symbol_info(symbol)
         if not info:
             logging.error(f"[{symbol}] Failed to get symbol info for entry.")
@@ -436,12 +599,18 @@ class s11TradingBot:
         order_type = ORDER_TYPE_BUY if direction == "LONG" else ORDER_TYPE_SELL
 
         expected_entry_price = current_ask if direction == "LONG" else current_bid
+        use_sl = PARAMS.get('use_sl', True)
+        use_tp = PARAMS.get('use_tp', True)
+        tp_atr_mult = float(PARAMS.get('tp_atr_mult', PARAMS.get('tp_mult', 1.5)))
+        tp_d = max(tp_atr_mult * atr, 0.0001)
         if direction == "LONG":
-            sl_px = expected_entry_price - sl_d
-            tp_px = expected_entry_price + PARAMS['tp_mult'] * sl_d
+            raw_sl_px = expected_entry_price - sl_d
+            raw_tp_px = expected_entry_price + tp_d
         else:
-            sl_px = (expected_entry_price + sl_d) * (1.0 + PARAMS['spread_pct'])
-            tp_px = expected_entry_price - PARAMS['tp_mult'] * sl_d
+            raw_sl_px = (expected_entry_price + sl_d) * (1.0 + PARAMS['spread_pct'])
+            raw_tp_px = expected_entry_price - tp_d
+        sl_px = raw_sl_px if use_sl else 0.0
+        tp_px = raw_tp_px if use_tp else 0.0
 
         ticket = self.executor.open_position(symbol, order_type, target_lot, sl=sl_px, tp=tp_px)
 
@@ -468,11 +637,33 @@ class s11TradingBot:
                 "be_active": False,
                 "lot_size": float(target_lot),
                 "max_seen_p": actual_entry_price,
-                "min_seen_p": actual_entry_price
+                "min_seen_p": actual_entry_price,
+                "signal_bar_time": signal_context.get("signal_bar_time"),
+                "signal_bar_age_minutes": signal_context.get("signal_bar_age_minutes"),
+                "signal_spread_z": signal_context.get("signal_spread_z"),
+                "signal_lead_z": signal_context.get("signal_lead_z"),
+                "signal_lag_z": signal_context.get("signal_lag_z"),
+                "signal_corr_sign": signal_context.get("signal_corr_sign"),
+                "signal_window_z": signal_context.get("signal_window_z"),
+                "signal_corr_window": signal_context.get("signal_corr_window"),
+                "signal_z_entry": signal_context.get("signal_z_entry"),
+                "signal_exit_type": signal_context.get("signal_exit_type"),
+                "signal_mean_reversion_mode": signal_context.get("signal_mean_reversion_mode"),
+                "use_sl": bool(use_sl),
+                "use_tp": bool(use_tp),
+                "use_time_exit": bool(PARAMS.get('use_time_exit', True)),
+                "use_protective_exits": bool(PARAMS.get('use_protective_exits', True)),
+                "raw_sl_price": float(raw_sl_px),
+                "raw_tp_price": float(raw_tp_px),
             }
             self.save_state()
             
-            logging.info(f"[{symbol}] Position opened successfully. Ticket: {ticket}, Lot: {target_lot}, Entry: {actual_entry_price:.4f}, SL: {self.state['positions'][symbol]['sl_price']:.4f}, TP: {tp_px:.4f}")
+            logging.info(
+                f"[{symbol}] Position opened successfully. Ticket: {ticket}, Lot: {target_lot}, "
+                f"Entry: {actual_entry_price:.4f}, SL: {self.state['positions'][symbol]['sl_price']:.4f}, "
+                f"TP: {self.state['positions'][symbol]['tp_price']:.4f}, SignalBar: {signal_context.get('signal_bar_time')}, "
+                f"SignalSpreadZ: {signal_context.get('signal_spread_z')}"
+            )
             self.log_trade_csv("ENTRY", ticket, symbol, direction, target_lot, actual_entry_price)
         else:
             logging.error(f"[{symbol}] Failed to open position.")

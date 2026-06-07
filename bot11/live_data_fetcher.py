@@ -1,6 +1,9 @@
+import os
+import time
 import pandas as pd
 from datetime import datetime, timezone
 import pytz
+import logging
 from live_config import MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
 from base_interfaces import BaseDataManager
 from ea_bridge import ea_bridge
@@ -9,18 +12,36 @@ class MT5DataManager(BaseDataManager):
     def __init__(self, path=MT5_PATH):
         self.path = path
         
+    def bridge_heartbeat_age_seconds(self):
+        heartbeat_file = getattr(ea_bridge, "heartbeat_file", None)
+        if not heartbeat_file or not os.path.exists(heartbeat_file):
+            return None
+        try:
+            return time.time() - os.path.getmtime(heartbeat_file)
+        except OSError:
+            return None
+
     def connect(self) -> bool:
-        # Start the Python server and wait for EA
-        print("Starting TCP Server for EA Bridge...")
+        # Start the file IPC bridge and wait for EA.
         ea_bridge.start_server()
-        
-        # Ping the EA to verify connection
-        res = ea_bridge.send_command("ECHO|")
-        if res == "OK|Alive":
-            print("Successfully connected to MT5 EA Bridge!")
-            return True
-            
-        print("Failed to communicate with MT5 EA Bridge.")
+
+        for attempt in range(1, 6):
+            res = ea_bridge.send_command("ECHO|", timeout=10)
+            if res == "OK|Alive":
+                logging.info("Successfully connected to MT5 EA Bridge.")
+                return True
+
+            hb_age = self.bridge_heartbeat_age_seconds()
+            hb_status = "missing" if hb_age is None else f"{hb_age:.1f}s old"
+            logging.warning(
+                "EA Bridge ping failed attempt %d/5: response=%s heartbeat=%s",
+                attempt,
+                res,
+                hb_status,
+            )
+            time.sleep(3)
+
+        logging.error("Failed to communicate with MT5 EA Bridge after retries.")
         return False
         
     def disconnect(self):
@@ -61,6 +82,16 @@ class MT5DataManager(BaseDataManager):
         except ValueError:
             df['time'] = pd.to_datetime(df['time'])
         df.set_index('time', inplace=True)
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+        if not df.empty:
+            logging.info(
+                "HIST %s tf=%s bars=%d range=%s -> %s",
+                mt5_symbol,
+                timeframe,
+                len(df),
+                df.index[0],
+                df.index[-1],
+            )
         return df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
 if __name__ == "__main__":
