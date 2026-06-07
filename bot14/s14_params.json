@@ -1,25 +1,26 @@
 {
     "symbol": "GBPUSD",
-    "W_pips": 40.0,
+    "W_pips": 44.0,
+    "b_trigger_ratio": 0.4,
     "lot_multiplier": 0.01,
-    "max_bet_units": 8,
+    "max_bet_units": 12,
     "initial_sequence": [
         2,
         2,
         2
     ],
     "weekend_filter": true,
-    "weekend_stop_hour_jst": 20,
+    "weekend_stop_hour_jst": 2,
     "weekend_entry_stop_weekday_jst": 5,
-    "weekend_entry_stop_hour_jst": 4,
+    "weekend_entry_stop_hour_jst": 2,
     "weekend_entry_stop_minute_jst": 0,
     "weekend_close_weekday_jst": 5,
-    "weekend_close_hour_jst": 4,
+    "weekend_close_hour_jst": 2,
     "weekend_close_minute_jst": 30,
     "monday_start_hour_jst": 8,
     "monday_start_minute_jst": 0,
     "news_filter": true,
-    "avoidance_hours": 2.0,
+    "avoidance_hours": 0.0,
     "news_file": "macro_events_2026.json",
-    "max_spread_pips": 0.8
+    "max_spread_pips": 2.0
 }
