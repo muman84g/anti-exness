@@ -614,14 +614,25 @@ class s8TradingBot:
         now_jst = now_utc + timedelta(hours=9)
         minute = now_jst.minute
         
-        # ── 1. 強制決済フェーズ (JST H:55) ────────────────────────
-        if minute >= 55:
+        # ── 1. 強制決済フェーズ ────────────────────────
+        # A. 週末の強制クローズ判定 (土曜日 02:30 JST以降、市場閉鎖前の全決済)
+        is_weekend_close = (now_jst.weekday() == 5 and (now_jst.hour > 2 or (now_jst.hour == 2 and now_jst.minute >= 30)))
+        
+        # B. 通常の時間決済判定 (JST H:55 〜 H:59)
+        is_normal_close = (minute >= 55)
+        
+        if is_weekend_close or is_normal_close:
             if not self.state["active_tickets"]:
-                logging.info("No active positions to close at H:55.")
+                if is_normal_close:
+                    logging.info("No active positions to close at H:55.")
                 self.maybe_update_market_cache(now_utc)
                 return
                 
-            logging.info("H:55 reached. Checking positions for hold time exit...")
+            if is_weekend_close:
+                logging.info(f"Weekend force close triggered at JST {now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Closing all positions...")
+            else:
+                logging.info("H:55 reached. Checking positions for hold time exit...")
+                
             for col, pos_data in list(self.state["active_tickets"].items()):
                 # Handle legacy state (where pos_data was just ticket_id)
                 if isinstance(pos_data, dict):
@@ -638,8 +649,10 @@ class s8TradingBot:
                 age_hours = (now_jst - entry_time).total_seconds() / 3600.0
                 logging.info(f"[{col}] Position Ticket {ticket} age: {age_hours:.2f} hours (JST Entry: {entry_time.strftime('%Y-%m-%d %H:%M:%S')})")
                 
-                if age_hours >= 3.5:
-                    logging.info(f"[{col}] Position has been held for {age_hours:.2f} hours. Closing...")
+                # 週末強制決済、または通常の3.5時間以上保有による決済
+                if is_weekend_close or age_hours >= 3.5:
+                    reason = "Weekend Force Close" if is_weekend_close else f"Hold Time Limit ({age_hours:.2f}h)"
+                    logging.info(f"[{col}] Position closing. Reason: {reason}...")
                     success = self.executor.close_position(ticket)
                     if success:
                         logging.info(f"Successfully closed position for {col}. PnL: {success.profit}")
@@ -712,17 +725,22 @@ class s8TradingBot:
                     logging.info(f"[{col}] Local Hour {local_hour} ({tz_name}) is NOT an anomaly window. Skip.")
                     continue
                     
-                # 2.1.5. 曜日・時間フィルターによる市場閉鎖時のスキップ (ERR|10018対策)
-                local_weekday = local_time.weekday()  # 0=月, 4=金, 5=土, 6=日
-                if local_weekday == 4 and local_hour >= 17:
-                    logging.info(f"[{col}] Friday evening ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
+                # 2.1.5. 曜日・時間フィルターによる市場閉鎖時のスキップ (JSTベース)
+                # 土曜 02:00 JST 以降 〜 日曜終日 〜 月曜 07:00 JST までエントリー禁止
+                jst_weekday = now_jst.weekday()  # 0=月, 5=土, 6=日
+                jst_hour = now_jst.hour
+                
+                if jst_weekday == 5:  # 土曜日
+                    if jst_hour >= 2:
+                        logging.info(f"[{col}] Saturday {now_jst.strftime('%H:%M')} JST is after weekend entry limit (02:00 JST). Skip.")
+                        continue
+                elif jst_weekday == 6:  # 日曜日
+                    logging.info(f"[{col}] Sunday is market closed. Skip.")
                     continue
-                elif local_weekday == 5:
-                    logging.info(f"[{col}] Saturday ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
-                    continue
-                elif local_weekday == 6 and local_hour < 18:
-                    logging.info(f"[{col}] Sunday morning/afternoon ({local_time.strftime('%Y-%m-%d %H:%M:%S')}) is market closed. Skip.")
-                    continue
+                elif jst_weekday == 0:  # 月曜日
+                    if jst_hour < 7:
+                        logging.info(f"[{col}] Monday morning before 07:00 JST is market closed/unstable. Skip.")
+                        continue
                     
                 model = self.models.get(col)
                 meta = self.pipeline_meta.get(col)
