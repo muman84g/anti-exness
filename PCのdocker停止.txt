@@ -1,0 +1,7 @@
+【PCのdocker停止】
+docker ps
+docker stop exness-bot-8
+
+【docker停止後にWSLも停止】
+wsl --shutdown
+wsl -l -v

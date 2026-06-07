@@ -3,19 +3,19 @@ sudo docker cp live_s4_bot.py exness-bot:/app/live_s4_bot.py
 
 
 1.コンテナを起動
-sudo docker compose down
+sudo docker compose stop exness-bot-14
 sudo docker compose up -d exness-bot-8
 
 2.noVNCで画面とBotBridgeのセットとAlgoの許可
 http://118.27.2.117:6080/vnc.html → s4_bot
 http://118.27.2.117:6081/vnc.html → s5_bot
-http://118.27.2.117:6082/vnc.html → s6_bot
+http://118.27.2.117:6090/vnc.html → s15_bot
 
 
 3.Botファイルの起動
-sudo docker exec -d exness-bot-11 python3 /app/bot11/live_s11_bot.py
+sudo docker exec -d exness-bot-14 python3 /app/bot14/live_s14_bot.py
 ※-d　はバックグランドの意味
-sudo docker exec -it exness-bot-11 python3 /app/bot11/live_s11_bot.py
+sudo docker exec -it exness-bot-14 python3 /app/bot14/live_s14_bot.py
 ※log自体確認したかったら上記手動の方で実行
 
 
@@ -49,3 +49,16 @@ sudo sh -c 'echo "Timestamp_JST,Action,Ticket,Symbol,Direction,LotSize,Price,PnL
 sudo docker cp live_s8_bot.py exness-bot:/app/live_s8_bot.py
 
 /home/muu/python_program/anti-exness/logs/s4_bot.log
+
+
+【gitでの対応時】
+CentOS側はPythonファイルがbind mountなので、基本これで反映できます。
+
+cd /home/muu/python_program/anti-exness
+git pull
+sudo docker compose restart exness-bot-11
+もしまたpullでlocal変更エラーが出たら、bot11だけ退避してからpullでOKです。
+
+git stash push -m "backup bot11 live_executor before pull" -- bot11/live_executor.py
+git pull
+sudo docker compose restart exness-bot-11

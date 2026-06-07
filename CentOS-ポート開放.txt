@@ -1,0 +1,7 @@
+CentOS-ポート開放
+
+・ポート開放追加
+sudo firewall-cmd --add-port=6090/tcp --permanent
+
+・設定を反映
+sudo firewall-cmd --reload
