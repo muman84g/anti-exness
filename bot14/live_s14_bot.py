@@ -6,10 +6,10 @@
 # ------------------------------------------------------------------------------
 # - Instrument: GBPUSD (GBP/USD Pro Account)
 # - Logic: Bot A (Always in market, reverses on TP, continues on SL)
-#          Bot B (Grid hedging bot, triggers at S ± W/2 with counter-trend entry)
+#          Bot B (Grid hedging bot, triggers at S +/- 0.55W with counter-trend entry)
 # - Weekend: block new entries from Saturday 04:00 JST, close positions at 04:30, restart Monday 08:00
-# - News Filter: Avoids major high-impact news window (e.g., ±2 hours)
-# - Money Management: Decomposed Monte Carlo with Goodman backup, lot cap at 8
+# - News Filter: Avoids major high-impact news window (1 hour)
+# - Money Management: Decomposed Monte Carlo with Goodman backup, lot cap at 10
 # ==============================================================================
 import os
 import sys
@@ -59,10 +59,10 @@ PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
     'symbol': 'GBPUSD',
-    'W_pips': 44.0,
-    'b_trigger_ratio': 0.40,
+    'W_pips': 42.0,
+    'b_trigger_ratio': 0.55,
     'lot_multiplier': 0.01,
-    'max_bet_units': 12,
+    'max_bet_units': 10,
     'initial_sequence': [2, 2, 2],
     'weekend_filter': True,
     'weekend_stop_hour_jst': 2,
@@ -75,9 +75,9 @@ DEFAULT_PARAMS = {
     'monday_start_hour_jst': 8,
     'monday_start_minute_jst': 0,
     'news_filter': True,
-    'avoidance_hours': 0.0,
+    'avoidance_hours': 1.0,
     'news_file': 'macro_events_2026.json',
-    'max_spread_pips': 2.0
+    'max_spread_pips': 1.1
 }
 
 def load_params():

@@ -1,9 +1,9 @@
 {
     "symbol": "GBPUSD",
-    "W_pips": 44.0,
-    "b_trigger_ratio": 0.4,
+    "W_pips": 42.0,
+    "b_trigger_ratio": 0.55,
     "lot_multiplier": 0.01,
-    "max_bet_units": 12,
+    "max_bet_units": 10,
     "initial_sequence": [
         2,
         2,
@@ -20,7 +20,7 @@
     "monday_start_hour_jst": 8,
     "monday_start_minute_jst": 0,
     "news_filter": true,
-    "avoidance_hours": 0.0,
+    "avoidance_hours": 1.0,
     "news_file": "macro_events_2026.json",
-    "max_spread_pips": 2.0
+    "max_spread_pips": 1.1
 }
