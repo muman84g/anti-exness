@@ -77,7 +77,9 @@ DEFAULT_PARAMS = {
     'news_filter': True,
     'avoidance_hours': 1.0,
     'news_file': 'macro_events_2026.json',
-    'max_spread_pips': 1.1
+    'max_spread_pips': 1.1,
+    'repair_missing_sl_tp_on_sync': True,
+    'warn_sl_tp_mismatch_pips': 0.2
 }
 
 def load_params():
@@ -447,6 +449,26 @@ class s14TradingBot:
         self.macro_times = []
         self.load_news_events()
         self.load_state()
+        logging.info(
+            "Effective s14 params: "
+            f"symbol={PARAMS.get('symbol')} "
+            f"W_pips={PARAMS.get('W_pips')} "
+            f"b_trigger_ratio={PARAMS.get('b_trigger_ratio')} "
+            f"lot_multiplier={PARAMS.get('lot_multiplier')} "
+            f"max_bet_units={PARAMS.get('max_bet_units')} "
+            f"max_spread_pips={PARAMS.get('max_spread_pips')} "
+            f"avoidance_hours={PARAMS.get('avoidance_hours')} "
+            f"repair_missing_sl_tp_on_sync={PARAMS.get('repair_missing_sl_tp_on_sync')}"
+        )
+        logging.info(
+            "Restored s14 state: "
+            f"pos_A={self.state.get('pos_A')} "
+            f"pos_B={self.state.get('pos_B')} "
+            f"next_direction_A={self.state.get('next_direction_A')} "
+            f"waiting_B={self.state.get('waiting_B')} "
+            f"S={self.state.get('S')} "
+            f"mc_manager={json.dumps(self.mc_manager.to_dict(), ensure_ascii=True)}"
+        )
 
     def load_news_events(self):
         news_file = PARAMS.get("news_file", "macro_events_2026.json")
@@ -542,6 +564,103 @@ class s14TradingBot:
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
 
+    @staticmethod
+    def positive_float(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if value > 0.0 else 0.0
+
+    def resolve_entry_price(self, ticket, fallback_price, bot_type):
+        exec_price = self.positive_float(getattr(ticket, "price", 0.0))
+        if exec_price > 0.0:
+            return exec_price
+
+        fallback_price = self.positive_float(fallback_price)
+        if fallback_price > 0.0:
+            logging.warning(
+                f"[Bot {bot_type}] EA did not return entry price for ticket {int(ticket)}. "
+                f"Using current market price {fallback_price:.5f} for state and CSV."
+            )
+            return fallback_price
+
+        return 0.0
+
+    def get_market_exit_price(self, symbol, direction, current_bid=None, current_ask=None):
+        bid = self.positive_float(current_bid)
+        ask = self.positive_float(current_ask)
+
+        if direction == "LONG" and bid > 0.0:
+            return bid
+        if direction == "SHORT" and ask > 0.0:
+            return ask
+
+        try:
+            info = self.executor.get_symbol_info(symbol)
+        except Exception as e:
+            logging.warning(f"Failed to fetch market price for exit log: {e}")
+            return 0.0
+
+        if not info:
+            return 0.0
+        if direction == "LONG":
+            return self.positive_float(getattr(info, "bid", 0.0))
+        if direction == "SHORT":
+            return self.positive_float(getattr(info, "ask", 0.0))
+        return 0.0
+
+    def estimate_gross_pnl(self, symbol, direction, entry_price, exit_price, lot):
+        entry_price = self.positive_float(entry_price)
+        exit_price = self.positive_float(exit_price)
+        lot = self.positive_float(lot)
+        if entry_price <= 0.0 or exit_price <= 0.0 or lot <= 0.0:
+            return 0.0
+
+        contract_size = 100000.0
+        if direction == "LONG":
+            pnl_quote = (exit_price - entry_price) * lot * contract_size
+        elif direction == "SHORT":
+            pnl_quote = (entry_price - exit_price) * lot * contract_size
+        else:
+            return 0.0
+
+        if "JPY" in symbol:
+            return pnl_quote / exit_price
+        return pnl_quote
+
+    def get_exit_log_values(self, symbol, pos, close_result=None, current_bid=None, current_ask=None, live_pos=None):
+        direction = pos.get("direction", "")
+        lot = self.positive_float(pos.get("lot_size", 0.0))
+        entry_price = self.positive_float(pos.get("entry_price", 0.0))
+
+        if live_pos is not None:
+            lot = self.positive_float(getattr(live_pos, "volume", lot)) or lot
+            entry_price = self.positive_float(getattr(live_pos, "open_price", entry_price)) or entry_price
+
+        if close_result is not None:
+            lot = self.positive_float(getattr(close_result, "lot", lot)) or lot
+            entry_price = self.positive_float(getattr(close_result, "open_price", entry_price)) or entry_price
+            close_price = self.positive_float(getattr(close_result, "close_price", 0.0))
+            pnl = float(getattr(close_result, "profit", 0.0) or 0.0)
+        else:
+            close_price = 0.0
+            pnl = 0.0
+
+        if close_price <= 0.0:
+            close_price = self.get_market_exit_price(symbol, direction, current_bid, current_ask)
+
+        if abs(pnl) <= 0.0000001:
+            live_profit = 0.0
+            if live_pos is not None:
+                live_profit = float(getattr(live_pos, "profit", 0.0) or 0.0)
+            if abs(live_profit) > 0.0000001:
+                pnl = live_profit
+            else:
+                pnl = self.estimate_gross_pnl(symbol, direction, entry_price, close_price, lot)
+
+        return lot, close_price, pnl
+
     def classify_live_position(self, live_pos):
         comment = live_pos.comment or ""
         if live_pos.magic == S14_MAGIC_A or comment.startswith(S14_COMMENT_A):
@@ -568,15 +687,69 @@ class s14TradingBot:
             return max(1, int(round(float(live_pos.volume) / lot_multiplier)))
         return 1
 
+    def expected_sl_tp(self, direction, entry_price, W):
+        if direction == "LONG":
+            return entry_price - W, entry_price + W
+        if direction == "SHORT":
+            return entry_price + W, entry_price - W
+        return 0.0, 0.0
+
+    def repair_missing_sl_tp_on_sync(self, bot_type, live_pos, expected_sl, expected_tp):
+        ticket = int(live_pos.ticket)
+        current_sl = self.positive_float(getattr(live_pos, "sl", 0.0))
+        current_tp = self.positive_float(getattr(live_pos, "tp", 0.0))
+
+        if current_sl > 0.0 and current_tp > 0.0:
+            return True, False
+
+        if not PARAMS.get("repair_missing_sl_tp_on_sync", True):
+            logging.warning(
+                f"[Bot {bot_type}] MT5 position ticket {ticket} is missing SL/TP "
+                "but auto repair is disabled."
+            )
+            return False, False
+
+        repaired_sl = current_sl if current_sl > 0.0 else expected_sl
+        repaired_tp = current_tp if current_tp > 0.0 else expected_tp
+        if repaired_sl <= 0.0 or repaired_tp <= 0.0:
+            logging.warning(
+                f"[Bot {bot_type}] Cannot repair missing SL/TP for ticket {ticket}: "
+                f"expected_sl={expected_sl}, expected_tp={expected_tp}"
+            )
+            return False, False
+
+        logging.warning(
+            f"[Bot {bot_type}] MT5 position ticket {ticket} is missing SL/TP. "
+            f"Repairing to SL={repaired_sl:.5f}, TP={repaired_tp:.5f}."
+        )
+        if self.executor.modify_position_sl_tp(ticket, repaired_sl, repaired_tp):
+            live_pos.sl = float(repaired_sl)
+            live_pos.tp = float(repaired_tp)
+            return True, True
+
+        logging.error(f"[Bot {bot_type}] Failed to repair missing SL/TP for ticket {ticket}.")
+        return False, False
+
+    def warn_sl_tp_mismatch(self, bot_type, live_pos, expected_sl, expected_tp, pip_val):
+        current_sl = self.positive_float(getattr(live_pos, "sl", 0.0))
+        current_tp = self.positive_float(getattr(live_pos, "tp", 0.0))
+        if current_sl <= 0.0 or current_tp <= 0.0:
+            return
+
+        tolerance = float(PARAMS.get("warn_sl_tp_mismatch_pips", 0.2)) * pip_val
+        sl_diff = abs(current_sl - expected_sl)
+        tp_diff = abs(current_tp - expected_tp)
+        if sl_diff > tolerance or tp_diff > tolerance:
+            logging.warning(
+                f"[Bot {bot_type}] MT5 SL/TP differs from current W-based expectation for ticket {int(live_pos.ticket)}. "
+                f"MT5 SL={current_sl:.5f}, TP={current_tp:.5f}; "
+                f"expected SL={expected_sl:.5f}, TP={expected_tp:.5f}. Keeping MT5 values."
+            )
+
     def live_position_to_state(self, live_pos, W, now_jst):
         direction = live_pos.direction
         entry_price = float(live_pos.open_price)
-        if direction == "LONG":
-            fallback_tp = entry_price + W
-            fallback_sl = entry_price - W
-        else:
-            fallback_tp = entry_price - W
-            fallback_sl = entry_price + W
+        fallback_sl, fallback_tp = self.expected_sl_tp(direction, entry_price, W)
 
         tp = float(live_pos.tp) if live_pos.tp > 0 else fallback_tp
         sl = float(live_pos.sl) if live_pos.sl > 0 else fallback_sl
@@ -595,12 +768,27 @@ class s14TradingBot:
             "restored_from_mt5": True,
         }
 
-    def refresh_state_position_from_live(self, pos_key, live_pos):
+    def refresh_state_position_from_live(self, pos_key, live_pos, W, pip_val, bot_type):
         pos = self.state.get(pos_key)
         if not pos:
-            return False
+            return False, False
 
         changed = False
+        entry_price = self.positive_float(pos.get("entry_price", 0.0)) or self.positive_float(live_pos.open_price)
+        expected_sl = self.positive_float(pos.get("sl", 0.0))
+        expected_tp = self.positive_float(pos.get("tp", 0.0))
+        if expected_sl <= 0.0 or expected_tp <= 0.0:
+            expected_sl, expected_tp = self.expected_sl_tp(live_pos.direction, entry_price, W)
+
+        repaired_ok, repaired = self.repair_missing_sl_tp_on_sync(bot_type, live_pos, expected_sl, expected_tp)
+        if not repaired_ok:
+            return changed, True
+        if repaired:
+            changed = True
+
+        current_expected_sl, current_expected_tp = self.expected_sl_tp(live_pos.direction, float(live_pos.open_price), W)
+        self.warn_sl_tp_mismatch(bot_type, live_pos, current_expected_sl, current_expected_tp, pip_val)
+
         updates = {
             "entry_price": float(live_pos.open_price),
             "lot_size": float(live_pos.volume),
@@ -622,7 +810,7 @@ class s14TradingBot:
                 pos[key] = value
                 changed = True
 
-        return changed
+        return changed, False
 
     def infer_missing_position_outcome(self, pos, current_bid, current_ask, pip_val):
         direction = pos.get("direction")
@@ -664,7 +852,10 @@ class s14TradingBot:
                 self.mc_manager.update_mc(None, outcome, 0, pos.get("bet_units", 0))
                 self.state["waiting_B"] = True
                 self.state["S"] = current_bid if direction == "LONG" else current_ask
-            self.log_trade_csv(f"EXIT_SYNC_{outcome}", ticket, PARAMS["symbol"], direction, lot, 0.0, 0.0, outcome)
+            log_lot, log_price, log_pnl = self.get_exit_log_values(
+                PARAMS["symbol"], pos, current_bid=current_bid, current_ask=current_ask
+            )
+            self.log_trade_csv(f"EXIT_SYNC_{outcome}", ticket, PARAMS["symbol"], direction, log_lot or lot, log_price, log_pnl, outcome)
             block_entries_this_cycle = False
         else:
             # Manual/external closes cannot be scored safely, so do not mutate MC state.
@@ -673,7 +864,8 @@ class s14TradingBot:
             else:
                 self.state["waiting_B"] = True
                 self.state["S"] = current_bid if direction == "LONG" else current_ask
-            self.log_trade_csv("EXIT_SYNC_MANUAL", ticket, PARAMS["symbol"], direction, lot, 0.0, 0.0, "MANUAL_OR_EXTERNAL")
+            log_price = self.get_market_exit_price(PARAMS["symbol"], direction, current_bid, current_ask)
+            self.log_trade_csv("EXIT_SYNC_MANUAL", ticket, PARAMS["symbol"], direction, lot, log_price, 0.0, "MANUAL_OR_EXTERNAL")
             block_entries_this_cycle = True
 
         self.state[pos_key] = None
@@ -704,7 +896,9 @@ class s14TradingBot:
             live_pos = live_by_ticket.get(ticket)
             if live_pos:
                 managed_tickets.add(ticket)
-                if self.refresh_state_position_from_live(pos_key, live_pos):
+                did_refresh, should_block = self.refresh_state_position_from_live(pos_key, live_pos, W, pip_val, bot_type)
+                block_entries_this_cycle = block_entries_this_cycle or should_block
+                if did_refresh:
                     logging.info(f"[Bot {bot_type}] Refreshed state from MT5 position ticket {ticket}.")
                     changed = True
             else:
@@ -726,6 +920,15 @@ class s14TradingBot:
             pos_key = "pos_A" if bot_type == "A" else "pos_B"
             if self.state.get(pos_key) is not None:
                 continue
+
+            entry_price = float(live_pos.open_price)
+            expected_sl, expected_tp = self.expected_sl_tp(live_pos.direction, entry_price, W)
+            repaired_ok, repaired = self.repair_missing_sl_tp_on_sync(bot_type, live_pos, expected_sl, expected_tp)
+            if not repaired_ok:
+                block_entries_this_cycle = True
+            if repaired:
+                changed = True
+            self.warn_sl_tp_mismatch(bot_type, live_pos, expected_sl, expected_tp, pip_val)
 
             self.state[pos_key] = self.live_position_to_state(live_pos, W, now_jst)
             managed_tickets.add(ticket)
@@ -892,7 +1095,7 @@ class s14TradingBot:
 
             if close_A:
                 logging.info(f"[Bot A] Exit Target Triggered ({outcome_A}). Ticket: {ticket_A}.")
-                close_res = self.close_and_cleanup('A', ticket_A, outcome_A)
+                close_res = self.close_and_cleanup('A', ticket_A, outcome_A, current_bid, current_ask)
                 if not close_res:
                     return
                 
@@ -938,7 +1141,7 @@ class s14TradingBot:
 
             if close_B:
                 logging.info(f"[Bot B] Exit Target Triggered ({outcome_B}). Ticket: {ticket_B}.")
-                close_res = self.close_and_cleanup('B', ticket_B, outcome_B)
+                close_res = self.close_and_cleanup('B', ticket_B, outcome_B, current_bid, current_ask)
                 if not close_res:
                     return
                 
@@ -988,7 +1191,7 @@ class s14TradingBot:
                     comment=f"{S14_COMMENT_A}:{bet_units}",
                 )
                 if ticket:
-                    exec_px = float(ticket.price)
+                    exec_px = self.resolve_entry_price(ticket, expected_px, "A")
                     if next_dir == "LONG":
                         tp = exec_px + W
                         sl = exec_px - W
@@ -1059,7 +1262,14 @@ class s14TradingBot:
                     else:
                         initial_tp = expected_px - W
                         initial_sl = expected_px + W
-                    logging.info(f"[Bot B] Triggered activation {trigger_direction} (S: {S:.5f}, Current: {current_bid if trigger_direction == 'LONG' else current_ask:.5f}) | Bet Units: {bet_units} | Lot: {lot}")
+                    current_trigger_price = current_bid if trigger_direction == "LONG" else current_ask
+                    logging.info(
+                        f"[Bot B] Triggered activation {trigger_direction} "
+                        f"(S: {S:.5f}, Current: {current_trigger_price:.5f}, "
+                        f"TriggerUp: {trigger_up:.5f}, TriggerDn: {trigger_dn:.5f}, "
+                        f"W_pips: {W_pips}, b_trigger_ratio: {b_trigger_ratio}) "
+                        f"| Bet Units: {bet_units} | Lot: {lot}"
+                    )
                     
                     ticket = self.executor.open_position(
                         symbol,
@@ -1071,7 +1281,7 @@ class s14TradingBot:
                         comment=f"{S14_COMMENT_B}:{bet_units}",
                     )
                     if ticket:
-                        exec_px = float(ticket.price)
+                        exec_px = self.resolve_entry_price(ticket, expected_px, "B")
                         if trigger_direction == "LONG":
                             tp = exec_px + W
                             sl = exec_px - W
@@ -1105,7 +1315,7 @@ class s14TradingBot:
                     elif not spread_ok:
                         logging.info(f"[Bot B] Activation postponed: Spread too wide ({current_spread/pip_val:.1f} pips > {max_spread/pip_val:.1f} pips limit).")
 
-    def close_and_cleanup(self, bot_type, ticket, reason):
+    def close_and_cleanup(self, bot_type, ticket, reason, current_bid=None, current_ask=None):
         pos_key = "pos_A" if bot_type == 'A' else "pos_B"
         pos = self.state[pos_key]
         if not pos:
@@ -1114,11 +1324,20 @@ class s14TradingBot:
         lot = pos.get("lot_size", 0.0)
         direction = pos.get("direction", "")
         symbol = PARAMS['symbol']
+
+        live_pos = None
+        try:
+            live_pos = self.executor.get_position(ticket)
+        except Exception as e:
+            logging.warning(f"[Bot {bot_type}] Failed to read live position before close for CSV details: {e}")
         
         success = self.executor.close_position(ticket)
         if success:
-            logging.info(f"[Bot {bot_type}] Successfully closed position. Ticket: {ticket}, Lot: {lot}, Exit Price: {success.close_price:.5f}, Profit: {success.profit}")
-            self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
+            log_lot, log_price, log_pnl = self.get_exit_log_values(
+                symbol, pos, success, current_bid, current_ask, live_pos
+            )
+            logging.info(f"[Bot {bot_type}] Successfully closed position. Ticket: {ticket}, Lot: {log_lot}, Exit Price: {log_price:.5f}, Profit: {log_pnl}")
+            self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, log_lot, log_price, log_pnl, reason)
         else:
             logging.warning(f"[Bot {bot_type}] Failed to close ticket {ticket} via EA. Keeping state so the bot can retry.")
             self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)

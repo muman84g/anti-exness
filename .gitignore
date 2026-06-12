@@ -7,13 +7,24 @@ env/
 venv/
 ENV/
 .env
+.env.*
+!.env.example
 
 # Trading data & sensitive configs
 live_trades.json
 live_config.py
+**/live_config.py
+**/live_config.local.py
+*_bot_state.json
+s*_bot_state.json
 bot8/cache/*.sqlite
 bot8/cache/*.sqlite-*
+*.sqlite
+*.sqlite-*
 *.log
+logs/
+**/logs/
+*_trades.csv
 logs_dump/
 build_log*.txt
 
