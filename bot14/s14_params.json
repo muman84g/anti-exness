@@ -1,9 +1,4 @@
 {
-    "symbol": "GBPUSD",
-    "W_pips": 42.0,
-    "b_trigger_ratio": 0.55,
-    "lot_multiplier": 0.01,
-    "max_bet_units": 10,
     "initial_sequence": [
         2,
         2,
@@ -20,7 +15,26 @@
     "monday_start_hour_jst": 8,
     "monday_start_minute_jst": 0,
     "news_filter": true,
-    "avoidance_hours": 1.0,
+    "avoidance_hours": 0.0,
     "news_file": "macro_events_2026.json",
-    "max_spread_pips": 1.1
+    "repair_missing_sl_tp_on_sync": true,
+    "warn_sl_tp_mismatch_pips": 0.2,
+    "symbols": [
+        {
+            "symbol": "GBPUSD",
+            "W_pips": 41.0,
+            "b_trigger_ratio": 0.63,
+            "lot_multiplier": 0.01,
+            "max_bet_units": 10,
+            "max_spread_pips": 1.1
+        },
+        {
+            "symbol": "AUDCHF",
+            "W_pips": 42.8,
+            "b_trigger_ratio": 0.5,
+            "lot_multiplier": 0.01,
+            "max_bet_units": 6,
+            "max_spread_pips": 1.2
+        }
+    ]
 }

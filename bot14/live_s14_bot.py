@@ -59,8 +59,8 @@ PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
     'symbol': 'GBPUSD',
-    'W_pips': 42.0,
-    'b_trigger_ratio': 0.55,
+    'W_pips': 41.0,
+    'b_trigger_ratio': 0.63,
     'lot_multiplier': 0.01,
     'max_bet_units': 10,
     'initial_sequence': [2, 2, 2],
@@ -75,7 +75,7 @@ DEFAULT_PARAMS = {
     'monday_start_hour_jst': 8,
     'monday_start_minute_jst': 0,
     'news_filter': True,
-    'avoidance_hours': 1.0,
+    'avoidance_hours': 0.0,
     'news_file': 'macro_events_2026.json',
     'max_spread_pips': 1.1,
     'repair_missing_sl_tp_on_sync': True,
@@ -105,7 +105,57 @@ def load_params():
             logging.error(f"Failed to create default parameters file: {e}")
         return DEFAULT_PARAMS.copy()
 
-PARAMS = load_params()
+def normalize_params(raw_params, overrides=None):
+    params = DEFAULT_PARAMS.copy()
+    if raw_params:
+        params.update(raw_params)
+    if overrides:
+        params.update(overrides)
+    return params
+
+def build_param_profiles(raw_params):
+    if not isinstance(raw_params, dict):
+        return [DEFAULT_PARAMS.copy()]
+
+    symbols_config = raw_params.get("symbols")
+    if not symbols_config:
+        return [normalize_params(raw_params)]
+
+    shared = {k: v for k, v in raw_params.items() if k != "symbols"}
+    profiles = []
+    if isinstance(symbols_config, dict):
+        iterable = []
+        for symbol, symbol_params in symbols_config.items():
+            item = dict(symbol_params or {})
+            item.setdefault("symbol", symbol)
+            iterable.append(item)
+    else:
+        iterable = list(symbols_config)
+
+    seen = set()
+    for item in iterable:
+        if isinstance(item, str):
+            item = {"symbol": item}
+        if not isinstance(item, dict):
+            logging.warning(f"Skipping invalid symbol profile: {item}")
+            continue
+        profile = normalize_params(shared, item)
+        symbol = str(profile.get("symbol", "")).strip()
+        if not symbol:
+            logging.warning(f"Skipping symbol profile without symbol: {item}")
+            continue
+        if symbol in seen:
+            logging.warning(f"Skipping duplicate symbol profile: {symbol}")
+            continue
+        profile["symbol"] = symbol
+        seen.add(symbol)
+        profiles.append(profile)
+
+    return profiles or [normalize_params(shared)]
+
+RAW_PARAMS = load_params()
+PARAM_PROFILES = build_param_profiles(RAW_PARAMS)
+PARAMS = PARAM_PROFILES[0]
 
 S14_MAGIC_A = 140014
 S14_MAGIC_B = 140015
@@ -444,34 +494,52 @@ class s14TradingBot:
     def __init__(self):
         self.dm = MT5DataManager()
         self.executor = MT5Executor(self.dm)
+        self.param_profiles = PARAM_PROFILES
+        self.params = None
+        self.active_symbol = None
+        self.state_by_symbol = {}
+        self.mc_manager_by_symbol = {}
+        self.uses_multi_symbol_state = len(self.param_profiles) > 1
         self.state = {}
-        self.mc_manager = MonteCarloManager(initial_sequence=PARAMS.get("initial_sequence", [2, 2, 2]))
+        self.mc_manager = None
         self.macro_times = []
         self.load_news_events()
         self.load_state()
-        logging.info(
-            "Effective s14 params: "
-            f"symbol={PARAMS.get('symbol')} "
-            f"W_pips={PARAMS.get('W_pips')} "
-            f"b_trigger_ratio={PARAMS.get('b_trigger_ratio')} "
-            f"lot_multiplier={PARAMS.get('lot_multiplier')} "
-            f"max_bet_units={PARAMS.get('max_bet_units')} "
-            f"max_spread_pips={PARAMS.get('max_spread_pips')} "
-            f"avoidance_hours={PARAMS.get('avoidance_hours')} "
-            f"repair_missing_sl_tp_on_sync={PARAMS.get('repair_missing_sl_tp_on_sync')}"
-        )
-        logging.info(
-            "Restored s14 state: "
-            f"pos_A={self.state.get('pos_A')} "
-            f"pos_B={self.state.get('pos_B')} "
-            f"next_direction_A={self.state.get('next_direction_A')} "
-            f"waiting_B={self.state.get('waiting_B')} "
-            f"S={self.state.get('S')} "
-            f"mc_manager={json.dumps(self.mc_manager.to_dict(), ensure_ascii=True)}"
-        )
+        for params in self.param_profiles:
+            self.activate_profile(params)
+            logging.info(
+                "Effective s14 params: "
+                f"symbol={PARAMS.get('symbol')} "
+                f"W_pips={PARAMS.get('W_pips')} "
+                f"b_trigger_ratio={PARAMS.get('b_trigger_ratio')} "
+                f"lot_multiplier={PARAMS.get('lot_multiplier')} "
+                f"max_bet_units={PARAMS.get('max_bet_units')} "
+                f"max_spread_pips={PARAMS.get('max_spread_pips')} "
+                f"avoidance_hours={PARAMS.get('avoidance_hours')} "
+                f"repair_missing_sl_tp_on_sync={PARAMS.get('repair_missing_sl_tp_on_sync')}"
+            )
+            logging.info(
+                "Restored s14 state: "
+                f"symbol={PARAMS.get('symbol')} "
+                f"pos_A={self.state.get('pos_A')} "
+                f"pos_B={self.state.get('pos_B')} "
+                f"next_direction_A={self.state.get('next_direction_A')} "
+                f"waiting_B={self.state.get('waiting_B')} "
+                f"S={self.state.get('S')} "
+                f"mc_manager={json.dumps(self.mc_manager.to_dict(), ensure_ascii=True)}"
+            )
+
+    def activate_profile(self, params):
+        global PARAMS
+        symbol = params["symbol"]
+        PARAMS = params
+        self.params = params
+        self.active_symbol = symbol
+        self.state = self.state_by_symbol[symbol]
+        self.mc_manager = self.mc_manager_by_symbol[symbol]
 
     def load_news_events(self):
-        news_file = PARAMS.get("news_file", "macro_events_2026.json")
+        news_file = RAW_PARAMS.get("news_file", PARAMS.get("news_file", "macro_events_2026.json"))
         
         # Paths to search
         paths_to_try = [
@@ -510,25 +578,38 @@ class s14TradingBot:
         return False
 
     def load_state(self):
+        loaded_state = None
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, "r") as f:
-                    state_data = json.load(f)
-                
-                # Check properties inside state_data
-                self.state = state_data
-                if "mc_manager" in state_data:
-                    self.mc_manager.from_dict(state_data["mc_manager"])
-                
-                logging.info("Successfully loaded state file and restored Monte Carlo state.")
+                    loaded_state = json.load(f)
+                logging.info("Successfully loaded state file.")
             except Exception as e:
                 logging.error(f"Error loading state file: {e}")
-                self.init_empty_state()
-        else:
-            self.init_empty_state()
+                loaded_state = None
 
-    def init_empty_state(self):
-        self.state = {
+        symbol_states = {}
+        if isinstance(loaded_state, dict) and isinstance(loaded_state.get("symbols"), dict):
+            self.uses_multi_symbol_state = True
+            symbol_states = loaded_state["symbols"]
+        elif isinstance(loaded_state, dict) and "pos_A" in loaded_state:
+            first_symbol = self.param_profiles[0]["symbol"]
+            symbol_states[first_symbol] = loaded_state
+            if len(self.param_profiles) > 1:
+                self.uses_multi_symbol_state = True
+                logging.warning(
+                    f"Legacy single-symbol state detected. Assigning existing state to {first_symbol}; "
+                    "other symbols start from empty state."
+                )
+
+        for params in self.param_profiles:
+            symbol = params["symbol"]
+            state, manager = self.build_runtime_state(params, symbol_states.get(symbol))
+            self.state_by_symbol[symbol] = state
+            self.mc_manager_by_symbol[symbol] = manager
+
+    def build_runtime_state(self, params, state_data=None):
+        state = {
             "pos_A": None,
             "pos_B": None,
             "next_direction_A": "LONG",
@@ -536,14 +617,40 @@ class s14TradingBot:
             "S": None,
             "mc_manager": {}
         }
-        self.mc_manager = MonteCarloManager(initial_sequence=PARAMS.get("initial_sequence", [2, 2, 2]))
+        if isinstance(state_data, dict):
+            state.update(state_data)
+
+        manager = MonteCarloManager(initial_sequence=params.get("initial_sequence", [2, 2, 2]))
+        if isinstance(state.get("mc_manager"), dict):
+            manager.from_dict(state["mc_manager"])
+        state["mc_manager"] = manager.to_dict()
+        return state, manager
+
+    def init_empty_state(self):
+        self.state_by_symbol = {}
+        self.mc_manager_by_symbol = {}
+        for params in self.param_profiles:
+            state, manager = self.build_runtime_state(params)
+            self.state_by_symbol[params["symbol"]] = state
+            self.mc_manager_by_symbol[params["symbol"]] = manager
+        if self.param_profiles:
+            self.activate_profile(self.param_profiles[0])
         self.save_state()
 
     def save_state(self):
         try:
-            self.state["mc_manager"] = self.mc_manager.to_dict()
+            if self.active_symbol:
+                self.state["mc_manager"] = self.mc_manager.to_dict()
+                self.state_by_symbol[self.active_symbol] = self.state
+            if self.uses_multi_symbol_state:
+                state_to_save = {
+                    "version": 2,
+                    "symbols": self.state_by_symbol,
+                }
+            else:
+                state_to_save = self.state
             with open(STATE_FILE, "w") as f:
-                json.dump(self.state, f, indent=4)
+                json.dump(state_to_save, f, indent=4)
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
 
@@ -982,11 +1089,13 @@ class s14TradingBot:
             self.dm.disconnect()
 
     def run_cycle(self):
-        try:
-            self._run_cycle_core()
-        except Exception as e:
-            logging.error(f"Error in execution cycle: {e}")
-            logging.error(traceback.format_exc())
+        for params in self.param_profiles:
+            self.activate_profile(params)
+            try:
+                self._run_cycle_core()
+            except Exception as e:
+                logging.error(f"Error in execution cycle for {params.get('symbol')}: {e}")
+                logging.error(traceback.format_exc())
 
     def _run_cycle_core(self):
         now_utc = datetime.now(timezone.utc)
