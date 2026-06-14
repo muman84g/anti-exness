@@ -51,11 +51,9 @@ def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_json(path: Path, payload: dict[str, Any]) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as file:
+    with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, ensure_ascii=False)
         file.write("\n")
-    tmp_path.replace(path)
 
 
 def append_trade_event(row: dict[str, Any]) -> None:
