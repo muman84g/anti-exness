@@ -3,9 +3,9 @@ import platform
 
 
 if platform.system() == "Windows":
-    MT5_PATH = os.environ.get("BOT17_MT5_PATH", r"C:\Program Files\MetaTrader 5\terminal64.exe")
+    MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 else:
-    MT5_PATH = os.environ.get("BOT17_MT5_PATH", "/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe")
+    MT5_PATH = os.path.expanduser("~/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe")
 
 # Keep credentials out of this repository. The current EA bridge works by file IPC
 # and does not use these values, but live_data_fetcher imports the names.
