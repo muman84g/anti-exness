@@ -1,4 +1,4 @@
-0.データをdockerに入れる
+﻿0.データをdockerに入れる
 sudo docker cp live_s4_bot.py exness-bot:/app/live_s4_bot.py
 
 
@@ -19,8 +19,8 @@ sudo docker exec -d exness-bot-14 python3 /app/bot14/live_s14_bot.py
 ※-d　はバックグランドの意味
 sudo docker exec -it exness-bot-14 python3 /app/bot14/live_s14_bot.py
 ※log自体確認したかったら上記手動の方で実行
-sudo docker exec -d exness-bot-17 python3 /app/bot17/live_bot17_bot.py
-sudo docker exec -it exness-bot-17 python3 /app/bot17/live_bot17_bot.py
+sudo docker exec -d exness-bot-17 python3 /app/bot17/live_s17_bot.py
+sudo docker exec -it exness-bot-17 python3 /app/bot17/live_s17_bot.py
 
 
 4.dockerが何個動いているか確認
@@ -35,8 +35,8 @@ sudo docker exec exness-bot-8 ps aux | grep python
 
 6.ログの確認
 tail -n 20 bot9/logs/s9_bot.log
-tail -n 80 bot17/logs/bot17_bot.log
-tail -n 80 bot17/logs/bot17_trades.csv
+tail -n 80 bot17/logs/s17_bot.log
+tail -n 80 bot17/logs/s17_trades.csv
 
 
 

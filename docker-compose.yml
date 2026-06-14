@@ -1,4 +1,4 @@
-version: "3.8"
+﻿version: "3.8"
 
 services:
   # ── Bot 8 (S8用設定) ──────────────────────────────────────
@@ -219,15 +219,15 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot17/bot17_state.json:/app/bot17/bot17_state.json
+      - ./bot17/s17_bot_state.json:/app/bot17/s17_bot_state.json
       - ./bot17/logs:/app/bot17/logs
       - ./bot17/live_config.py:/app/bot17/live_config.py:ro
-      - ./bot17/live_bot17_bot.py:/app/bot17/live_bot17_bot.py:ro
+      - ./bot17/live_s17_bot.py:/app/bot17/live_s17_bot.py:ro
       - ./bot17/live_data_fetcher.py:/app/bot17/live_data_fetcher.py:ro
       - ./bot17/live_executor.py:/app/bot17/live_executor.py:ro
       - ./bot17/base_interfaces.py:/app/bot17/base_interfaces.py:ro
       - ./bot17/ea_bridge.py:/app/bot17/ea_bridge.py:ro
-      - ./bot17/bot17_params.json:/app/bot17/bot17_params.json:ro
+      - ./bot17/s17_params.json:/app/bot17/s17_params.json:ro
       - ./bot17/macro_events_2026.json:/app/bot17/macro_events_2026.json:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"

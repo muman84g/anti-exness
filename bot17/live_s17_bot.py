@@ -19,10 +19,10 @@ from live_executor import MT5Executor, ORDER_TYPE_BUY, ORDER_TYPE_SELL
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-LOG_FILE = LOG_DIR / "bot17_bot.log"
-TRADE_LOG_FILE = LOG_DIR / "bot17_trades.csv"
-DEFAULT_PARAMS_FILE = BASE_DIR / "bot17_params.json"
-DEFAULT_STATE_FILE = BASE_DIR / "bot17_state.json"
+LOG_FILE = LOG_DIR / "s17_bot.log"
+TRADE_LOG_FILE = LOG_DIR / "s17_trades.csv"
+DEFAULT_PARAMS_FILE = BASE_DIR / "s17_params.json"
+DEFAULT_STATE_FILE = BASE_DIR / "s17_bot_state.json"
 JST = timezone(timedelta(hours=9), "JST")
 
 CURRENCIES = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]
@@ -169,7 +169,7 @@ def evaluate_signal(
 
     strategy = str(profile.get("strategy", "currency_strength_dashboard_rank"))
     if strategy != "currency_strength_dashboard_rank":
-        raise ValueError(f"Unsupported bot17 strategy: {strategy}")
+        raise ValueError(f"Unsupported s17 strategy: {strategy}")
 
     if mode == "fade_extreme":
         long_state = (diff <= -entry) & (roc_diff >= roc_threshold) & fade_long_filter
@@ -393,7 +393,7 @@ class Bot17:
                     "lot": float(live_position.volume),
                     "entry_signal_bar_time": timestamp_to_state(signal_bar_time),
                 }
-                logging.warning("%s live position restored into bot17 state.", symbol)
+                logging.warning("%s live position restored into s17 state.", symbol)
             self.manage_open_position(profile, live_position, signal, state)
             state["last_processed_bar_time"] = timestamp_to_state(signal_bar_time)
             return
@@ -531,7 +531,7 @@ class Bot17:
             tp=prices["tp"],
             deviation=int(profile.get("deviation", 20)),
             magic=int(profile["magic"]),
-            comment=str(profile.get("comment", "bot17")),
+            comment=str(profile.get("comment", "s17")),
         )
         if ticket is None:
             logging.error("%s failed to open %s.", symbol, side)
@@ -593,10 +593,10 @@ class Bot17:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="bot17 live runner for v2 currency strength tick candidates.")
+    parser = argparse.ArgumentParser(description="s17 live runner for v2 currency strength tick candidates.")
     parser.add_argument("--once", action="store_true", help="Run one polling cycle and exit.")
-    parser.add_argument("--params", default=str(DEFAULT_PARAMS_FILE), help="Path to bot17_params.json.")
-    parser.add_argument("--state", default=str(DEFAULT_STATE_FILE), help="Path to bot17_state.json.")
+    parser.add_argument("--params", default=str(DEFAULT_PARAMS_FILE), help="Path to s17_params.json.")
+    parser.add_argument("--state", default=str(DEFAULT_STATE_FILE), help="Path to s17_bot_state.json.")
     return parser.parse_args()
 
 
@@ -604,7 +604,7 @@ def main() -> int:
     args = parse_args()
     setup_logging()
     bot = Bot17(Path(args.params), Path(args.state))
-    logging.info("Starting bot17. trading_enabled=%s", bot.params.get("trading_enabled", False))
+    logging.info("Starting s17. trading_enabled=%s", bot.params.get("trading_enabled", False))
     if not bot.connect():
         logging.error("Could not connect to MT5 EA bridge.")
         return 1

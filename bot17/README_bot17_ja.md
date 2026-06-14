@@ -1,4 +1,4 @@
-# bot17
+﻿# bot17
 
 ForexFactory EA 調査 v2 の tick-only 通貨強弱 Top2 を、bot14 の EA bridge / executor 構成で動かすための live bot。
 
@@ -13,9 +13,9 @@ ForexFactory EA 調査 v2 の tick-only 通貨強弱 Top2 を、bot14 の EA bri
 
 ## 安全設定
 
-`bot17_params.json` は初期状態で `trading_enabled: false`。
+`s17_params.json` は初期状態で `trading_enabled: false`。
 
-この状態では、EA bridge からデータとスプレッドを取得し、シグナルが出ても発注せず `logs/bot17_trades.csv` に `SIGNAL_DRY_RUN` として記録する。
+この状態では、EA bridge からデータとスプレッドを取得し、シグナルが出ても発注せず `logs/s17_trades.csv` に `SIGNAL_DRY_RUN` として記録する。
 
 実発注する場合は、MT5 側で bot14 と同じ EA bridge が動いていること、28ペアの M15 履歴が取れること、symbol 名が `GBPUSDm` / `USDJPYm` / universe と一致していることを確認してから `trading_enabled` を `true` に変更する。
 
@@ -29,14 +29,14 @@ copy .\live_config.example.py .\live_config.py
 
 ```powershell
 cd C:\botter\bot\bot17
-py .\live_bot17_bot.py --once
+py .\live_s17_bot.py --once
 ```
 
 常駐起動:
 
 ```powershell
 cd C:\botter\bot\bot17
-py .\live_bot17_bot.py
+py .\live_s17_bot.py
 ```
 
 ## 実装メモ
