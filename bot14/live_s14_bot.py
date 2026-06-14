@@ -654,20 +654,56 @@ class s14TradingBot:
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
 
+    def write_trade_log_row(self, csv_file, header, row):
+        file_exists = os.path.isfile(csv_file) and os.path.getsize(csv_file) > 0
+        active_header = header
+        if file_exists:
+            try:
+                with open(csv_file, mode="r", newline="", encoding="utf-8-sig") as f:
+                    active_header = next(csv.reader(f), header)
+            except Exception as e:
+                logging.warning(f"Failed to read existing trade CSV header: {e}")
+                active_header = header
+
+        row_map = dict(zip(header, row))
+        if active_header != header:
+            legacy_header = header[:-1]
+            if active_header == legacy_header:
+                row = [row_map.get(col, "") for col in active_header]
+            else:
+                logging.warning(
+                    f"Unexpected trade CSV header in {csv_file}. Writing to a v2 CSV instead."
+                )
+                csv_file = csv_file.replace(".csv", "_v2.csv")
+                file_exists = os.path.isfile(csv_file) and os.path.getsize(csv_file) > 0
+                active_header = header
+                row = [row_map.get(col, "") for col in active_header]
+        else:
+            row = [row_map.get(col, "") for col in active_header]
+
+        with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(active_header)
+            writer.writerow(row)
+
     def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0.0, price=0.0, pnl=0.0, reason=""):
-        csv_file = os.path.join(LOG_DIR, "s14_trades.csv")
-        file_exists = os.path.isfile(csv_file)
-        
+        csv_file = os.path.join(LOG_DIR, "s14_trade_errors.csv" if action.startswith("EXIT_FAIL_") else "s14_trades.csv")
         now_jst = datetime.now(JST)
-        
+        header = ["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL", "Reason"]
+        row = [
+            now_jst.strftime("%Y-%m-%d %H:%M:%S"),
+            action,
+            ticket,
+            symbol,
+            direction,
+            lot_size,
+            "" if price is None else price,
+            "" if pnl is None else pnl,
+            reason,
+        ]
         try:
-            with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL", "Reason"])
-                writer.writerow([
-                    now_jst.strftime("%Y-%m-%d %H:%M:%S"), action, ticket, symbol, direction, lot_size, price, pnl, reason
-                ])
+            self.write_trade_log_row(csv_file, header, row)
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
 
