@@ -65,7 +65,7 @@ class MT5DataManager(BaseDataManager):
 if __name__ == "__main__":
     fetcher = MT5DataManager()
     if fetcher.connect():
-        df = fetcher.get_historical_data("GBPUSD", 16385, 100)
+        df = fetcher.get_historical_data("GBPUSDm", 16385, 100)
         if df is not None:
-            print("GBPUSD H1 Data:\n", df.tail())
+            print("GBPUSDm H1 Data:\n", df.tail())
         fetcher.disconnect()

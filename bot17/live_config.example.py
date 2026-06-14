@@ -14,6 +14,6 @@ MT5_PASSWORD = os.environ.get("BOT17_MT5_PASSWORD", "")
 MT5_SERVER = os.environ.get("BOT17_MT5_SERVER", "")
 
 MIN_LOT_OVERRIDES = {
-    "GBPUSD": 0.01,
-    "USDJPY": 0.01,
+    "GBPUSDm": 0.01,
+    "USDJPYm": 0.01,
 }
