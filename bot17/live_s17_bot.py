@@ -296,10 +296,32 @@ class Bot17:
         symbols = self.state.setdefault("symbols", {})
         return symbols.setdefault(symbol, {"last_processed_bar_time": None, "position": None})
 
-    def update_symbol_bars(self, symbol: str, history_bars: int, refresh_bars: int) -> pd.DataFrame | None:
+    def update_symbol_bars(
+        self,
+        symbol: str,
+        history_bars: int,
+        refresh_bars: int,
+        fetch_retries: int,
+        retry_sleep_seconds: float,
+    ) -> pd.DataFrame | None:
         cached = self.bar_cache.get(symbol)
         fetch_bars = history_bars if cached is None or cached.empty else refresh_bars
-        df = self.data_manager.get_historical_data(symbol, 15, fetch_bars)
+        df = None
+        max_attempts = max(1, fetch_retries + 1)
+        for attempt in range(1, max_attempts + 1):
+            df = self.data_manager.get_historical_data(symbol, 15, fetch_bars)
+            if df is not None and not df.empty:
+                break
+            if attempt < max_attempts:
+                logging.warning(
+                    "Failed to fetch M15 bars for %s attempt %d/%d; retrying in %.1fs.",
+                    symbol,
+                    attempt,
+                    max_attempts,
+                    retry_sleep_seconds,
+                )
+                if retry_sleep_seconds > 0:
+                    time.sleep(retry_sleep_seconds)
         if df is None or df.empty:
             if cached is not None and not cached.empty:
                 logging.warning(
@@ -328,13 +350,21 @@ class Bot17:
         universe = list(self.params.get("universe", []))
         history_bars = int(self.params.get("history_bars", 360))
         refresh_bars = max(2, int(self.params.get("refresh_bars", 8)))
+        fetch_retries = max(0, int(self.params.get("fetch_retries", 2)))
+        retry_sleep_seconds = max(0.0, float(self.params.get("fetch_retry_sleep_seconds", 1.0)))
         if not universe:
             logging.error("No universe symbols configured.")
             return None
 
         frames: dict[str, pd.DataFrame] = {}
         for symbol in universe:
-            df = self.update_symbol_bars(str(symbol), history_bars, refresh_bars)
+            df = self.update_symbol_bars(
+                str(symbol),
+                history_bars,
+                refresh_bars,
+                fetch_retries,
+                retry_sleep_seconds,
+            )
             if df is None:
                 return None
             frames[str(symbol)] = df
