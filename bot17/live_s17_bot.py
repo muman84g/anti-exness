@@ -281,6 +281,7 @@ class Bot17:
         self.state = load_json(state_file, {"version": 1, "symbols": {}})
         self.data_manager = MT5DataManager()
         self.executor = MT5Executor(self.data_manager)
+        self.bar_cache: dict[str, pd.DataFrame] = {}
 
     def connect(self) -> bool:
         return self.data_manager.connect()
@@ -295,20 +296,48 @@ class Bot17:
         symbols = self.state.setdefault("symbols", {})
         return symbols.setdefault(symbol, {"last_processed_bar_time": None, "position": None})
 
+    def update_symbol_bars(self, symbol: str, history_bars: int, refresh_bars: int) -> pd.DataFrame | None:
+        cached = self.bar_cache.get(symbol)
+        fetch_bars = history_bars if cached is None or cached.empty else refresh_bars
+        df = self.data_manager.get_historical_data(symbol, 15, fetch_bars)
+        if df is None or df.empty:
+            if cached is not None and not cached.empty:
+                logging.warning(
+                    "Failed to refresh M15 bars for %s; using cached %d rows latest=%s.",
+                    symbol,
+                    len(cached),
+                    cached.index[-1],
+                )
+                return cached
+            logging.error("Failed to load initial M15 bars for %s.", symbol)
+            return None
+
+        fresh = df.sort_index()
+        if cached is not None and not cached.empty:
+            merged = pd.concat([cached, fresh]).sort_index()
+            merged = merged[~merged.index.duplicated(keep="last")]
+        else:
+            merged = fresh
+            logging.info("Seeded M15 cache for %s rows=%d latest=%s.", symbol, len(merged), merged.index[-1])
+
+        merged = merged.tail(history_bars)
+        self.bar_cache[symbol] = merged
+        return merged
+
     def load_universe_bars(self) -> tuple[dict[str, pd.DataFrame], pd.DataFrame] | None:
         universe = list(self.params.get("universe", []))
         history_bars = int(self.params.get("history_bars", 360))
+        refresh_bars = max(2, int(self.params.get("refresh_bars", 8)))
         if not universe:
             logging.error("No universe symbols configured.")
             return None
 
         frames: dict[str, pd.DataFrame] = {}
         for symbol in universe:
-            df = self.data_manager.get_historical_data(str(symbol), 15, history_bars)
-            if df is None or df.empty:
-                logging.error("Failed to load M15 bars for %s.", symbol)
+            df = self.update_symbol_bars(str(symbol), history_bars, refresh_bars)
+            if df is None:
                 return None
-            frames[str(symbol)] = df.sort_index()
+            frames[str(symbol)] = df
 
         close = pd.concat({symbol: df["Close"] for symbol, df in frames.items()}, axis=1, join="inner").sort_index()
         close = close.dropna(how="any")

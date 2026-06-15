@@ -2,6 +2,7 @@
   "trading_enabled": false,
   "poll_seconds": 5,
   "history_bars": 360,
+  "refresh_bars": 8,
   "drop_last_bar_as_forming": true,
   "prime_on_first_run": true,
   "universe": [
