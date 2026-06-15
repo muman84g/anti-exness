@@ -90,7 +90,8 @@ class MT5Executor(BaseExecutor):
         info.margin_free = float(parts[3])
         info.point = float(parts[4])
 
-        # 譛蟆上Ο繝・ヨ縺ｮ蜿門ｾ励→蠑ｷ蛻ｶ繧ｪ繝ｼ繝舌・繝ｩ繧､繝・        raw_min_vol = float(parts[5])
+        # Broker-provided volume limits, with optional local minimum-lot override.
+        raw_min_vol = float(parts[5])
         raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
         raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
         tick_value = float(parts[8]) if len(parts) > 8 else 0.0
