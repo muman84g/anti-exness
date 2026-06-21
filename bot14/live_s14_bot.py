@@ -186,6 +186,63 @@ def build_param_profiles(raw_params):
         raise ValueError("No enabled symbol profiles are configured.")
     return profiles
 
+
+def apply_confirmed_pending_open_reconciliations(state_by_symbol, directives):
+    """Apply explicit operator-confirmed pending-open reconciliations."""
+    if not isinstance(directives, list):
+        return []
+
+    applied = []
+    for directive in directives:
+        if not isinstance(directive, dict):
+            continue
+        if directive.get("confirmed_no_position_order_or_deal") is not True:
+            continue
+
+        symbol = str(directive.get("symbol", "")).strip()
+        request_id = str(directive.get("request_id", "")).strip()
+        state = state_by_symbol.get(symbol)
+        if not symbol or not request_id or not isinstance(state, dict):
+            continue
+
+        pending_open = state.get("pending_open")
+        if not isinstance(pending_open, dict):
+            continue
+        if (
+            pending_open.get("symbol") != symbol
+            or pending_open.get("request_id") != request_id
+        ):
+            continue
+
+        state.pop("pending_open", None)
+        reconciliation = state.get("reconciliation_required")
+        if (
+            isinstance(reconciliation, dict)
+            and reconciliation.get("type") == "pending_open"
+            and reconciliation.get("request_id") == request_id
+        ):
+            state.pop("reconciliation_required", None)
+
+        expected_reason = f"Unresolved pending_open request: {request_id}"
+        if state.get("sync_block_reason") == expected_reason:
+            state.pop("sync_block_reason", None)
+            state.pop("sync_block_new_entries", None)
+
+        audit_entry = {
+            "request_id": request_id,
+            "confirmed_at_jst": str(directive.get("confirmed_at_jst", "")),
+            "reason": str(directive.get("reason", "")),
+        }
+        audit_log = state.setdefault("manual_pending_open_reconciliations", [])
+        if not any(
+            isinstance(item, dict) and item.get("request_id") == request_id
+            for item in audit_log
+        ):
+            audit_log.append(audit_entry)
+        applied.append({"symbol": symbol, "request_id": request_id})
+
+    return applied
+
 RAW_PARAMS = load_params()
 PARAM_PROFILES = build_param_profiles(RAW_PARAMS)
 PARAMS = PARAM_PROFILES[0]
@@ -264,6 +321,7 @@ class S14TradingBot:
         self.macro_times = []
         self.load_news_events()
         self.load_state()
+        self.apply_configured_pending_open_reconciliations()
         for params in self.param_profiles:
             self.activate_profile(params)
             logging.info(
@@ -300,6 +358,26 @@ class S14TradingBot:
         self.active_symbol = symbol
         self.state = self.state_by_symbol[symbol]
         self.mc_manager = self.mc_manager_by_symbol[symbol]
+
+    def apply_configured_pending_open_reconciliations(self):
+        directives = RAW_PARAMS.get("confirmed_pending_open_reconciliations", [])
+        applied = apply_confirmed_pending_open_reconciliations(
+            self.state_by_symbol,
+            directives,
+        )
+        if not applied:
+            return
+        if not self.save_state():
+            self.state_load_error = (
+                "Confirmed pending_open reconciliation could not be persisted."
+            )
+            return
+        for item in applied:
+            logging.warning(
+                f"[{item['symbol']}] Cleared operator-confirmed pending_open "
+                f"request {item['request_id']}; no live position, order, or deal "
+                "was found during manual reconciliation."
+            )
 
     def load_news_events(self):
         news_file = RAW_PARAMS.get("news_file", PARAMS.get("news_file", "macro_events_2026.json"))
@@ -1200,7 +1278,8 @@ class S14TradingBot:
                 changed = True
             block_entries_this_cycle = True
             logging.critical(
-                f"pending_open request {request_id} could not be matched to a live position. "
+                f"[{symbol}] pending_open request {request_id} could not be matched "
+                "to a live position. "
                 "Automatic retry is blocked."
             )
 
@@ -1480,7 +1559,11 @@ class S14TradingBot:
                 elif in_news:
                     logging.info("[Bot A] Entry postponed: currently in NEWS window.")
                 elif not spread_ok:
-                    logging.info(f"[Bot A] Entry postponed: Spread too wide ({current_spread/pip_val:.1f} pips >= {max_spread/pip_val:.1f} pips limit).")
+                    logging.info(
+                        f"[{symbol}][Bot A] Entry postponed: Spread too wide "
+                        f"({current_spread/pip_val:.1f} pips >= "
+                        f"{max_spread/pip_val:.1f} pips limit)."
+                    )
 
         # --- Bot B Activation Trigger ---
         if self.state["pos_B"] is None:
@@ -1527,7 +1610,7 @@ class S14TradingBot:
                 logging.info("[Bot B] Entry postponed: currently in NEWS window.")
             elif not spread_ok:
                 logging.info(
-                    f"[Bot B] Entry postponed: Spread too wide "
+                    f"[{symbol}][Bot B] Entry postponed: Spread too wide "
                     f"({current_spread/pip_val:.1f} pips >= "
                     f"{max_spread/pip_val:.1f} pips limit)."
                 )

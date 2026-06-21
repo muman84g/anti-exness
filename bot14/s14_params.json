@@ -24,6 +24,15 @@
     "pair_alignment_tolerance_pips": 0.6,
     "pair_alignment_spread_multiplier": 2.0,
     "enforce_pair_alignment_on_reentry": false,
+    "confirmed_pending_open_reconciliations": [
+        {
+            "symbol": "AUDUSD",
+            "request_id": "3bbbc9ff",
+            "confirmed_no_position_order_or_deal": true,
+            "confirmed_at_jst": "2026-06-22",
+            "reason": "Operator verified that no AUDUSD position, order, or deal exists for this request."
+        }
+    ],
     "symbols": [
         {
             "enabled": true,
