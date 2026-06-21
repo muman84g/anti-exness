@@ -160,7 +160,7 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
-      - ./bot14/s14_bot_state.json:/app/bot14/s14_bot_state.json
+      - ./bot14/state:/app/bot14/state
       - ./bot14/logs:/app/bot14/logs
       - ./bot14/live_config.py:/app/bot14/live_config.py:ro
       - ./bot14/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro

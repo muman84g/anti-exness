@@ -74,7 +74,8 @@ from s14_money_management import (
 # Bot Configuration & Path Variables
 # ============================================================
 POLL_INTERVAL_SECONDS = 1  # TP/SL後の再エントリー遅延を抑える
-STATE_FILE = os.path.join(script_dir, "s14_bot_state.json")
+STATE_DIR = os.path.join(script_dir, "state")
+STATE_FILE = os.path.join(STATE_DIR, "s14_bot_state.json")
 PARAMS_FILE = os.path.join(script_dir, "s14_params.json")
 
 DEFAULT_PARAMS = {
@@ -419,6 +420,7 @@ class S14TradingBot:
     def save_state(self):
         temp_state_file = STATE_FILE + ".tmp"
         try:
+            os.makedirs(STATE_DIR, exist_ok=True)
             if self.active_symbol:
                 self.state["mc_manager"] = self.mc_manager.to_dict()
                 self.state_by_symbol[self.active_symbol] = self.state

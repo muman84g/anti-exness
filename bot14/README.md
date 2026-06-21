@@ -37,7 +37,8 @@ Move-catcher記事の二系統反転構造を実装した正式bot14。
 - `live_config.py`は認証情報を含むため、このフォルダには同梱していない。既存運用と同じ形式で別途配置する。
 - 現在のGit設定は`live_trading_enabled=true`かつ`allow_unbounded_bet_units=true`。500 USDデモ口座forward専用で、実口座へ流用しない。
 - `max_bet_units=0`のためDMC bet unitsは無制限。brokerのmargin・volume上限までlotが増え得るstress条件であり、安全性を保証しない。
-- `s14_bot_state.json`、`logs/`、取引CSVは初回起動時に新規作成する。v2からコピーしない。
+- stateは`state/s14_bot_state.json`へ保存する。`state/`をDockerでディレクトリmountし、同一ディレクトリ内の原子的`os.replace`を可能にする。
+- `state/`、`logs/`、取引CSVは初回起動時に新規作成する。v2からstateをコピーしない。
 - 旧単一通貨stateまたはversion 3以外のstateを検出した場合は自動移行せず、安全停止する。
 - 旧実装の資金管理stateは互換性がないため自動移行せず、新しい`[0,1]`数列から開始する。
 - bet units上限やbrokerのvolume上限に達した場合、数列を壊さないため新規発注を停止する。
