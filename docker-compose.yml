@@ -166,6 +166,8 @@ services:
       - ./bot14/live_s14_bot.py:/app/bot14/live_s14_bot.py:ro
       - ./bot14/live_data_fetcher.py:/app/bot14/live_data_fetcher.py:ro
       - ./bot14/live_executor.py:/app/bot14/live_executor.py:ro
+      - ./bot14/s14_money_management.py:/app/bot14/s14_money_management.py:ro
+      - ./bot14/s14_pair_alignment.py:/app/bot14/s14_pair_alignment.py:ro
       - ./bot14/base_interfaces.py:/app/bot14/base_interfaces.py:ro
       - ./bot14/ea_bridge.py:/app/bot14/ea_bridge.py:ro
       - ./bot14/s14_params.json:/app/bot14/s14_params.json:ro
