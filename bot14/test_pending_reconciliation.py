@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -17,7 +18,10 @@ live_executor_stub.ORDER_TYPE_BUY = 0
 live_executor_stub.ORDER_TYPE_SELL = 1
 sys.modules["live_executor"] = live_executor_stub
 
-from live_s14_bot import apply_confirmed_pending_open_reconciliations  # noqa: E402
+from live_s14_bot import (  # noqa: E402
+    apply_confirmed_pending_open_reconciliations,
+    backup_state_before_pending_open_reconciliation,
+)
 
 
 class PendingOpenReconciliationTests(unittest.TestCase):
@@ -106,6 +110,34 @@ class PendingOpenReconciliationTests(unittest.TestCase):
                 )
                 self.assertEqual(applied, [])
                 self.assertIn("pending_open", states["AUDUSD"])
+
+    def test_pre_reconciliation_backup_preserves_original_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "s14_bot_state.json"
+            state_file.write_text("original-state", encoding="utf-8")
+            applied = [{"symbol": "AUDUSD", "request_id": "3bbbc9ff"}]
+
+            backup_file = Path(
+                backup_state_before_pending_open_reconciliation(
+                    str(state_file),
+                    applied,
+                )
+            )
+            self.assertEqual(
+                backup_file.read_text(encoding="utf-8"),
+                "original-state",
+            )
+
+            state_file.write_text("new-state", encoding="utf-8")
+            second_backup = backup_state_before_pending_open_reconciliation(
+                str(state_file),
+                applied,
+            )
+            self.assertEqual(second_backup, str(backup_file))
+            self.assertEqual(
+                backup_file.read_text(encoding="utf-8"),
+                "original-state",
+            )
 
 
 if __name__ == "__main__":

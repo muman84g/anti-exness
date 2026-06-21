@@ -19,6 +19,7 @@ import logging
 import traceback
 import csv
 import uuid
+import shutil
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
@@ -243,6 +244,27 @@ def apply_confirmed_pending_open_reconciliations(state_by_symbol, directives):
 
     return applied
 
+
+def backup_state_before_pending_open_reconciliation(state_file, applied):
+    """Preserve the pre-reconciliation state without overwriting an old backup."""
+    if not applied:
+        return None
+
+    def safe_token(value):
+        return "".join(
+            char if char.isalnum() or char in "-_" else "_"
+            for char in str(value)
+        )
+
+    suffix = "__".join(
+        f"{safe_token(item['symbol'])}_{safe_token(item['request_id'])}"
+        for item in applied
+    )
+    backup_file = f"{state_file}.before_pending_reconcile_{suffix}.bak"
+    if not os.path.exists(backup_file):
+        shutil.copy2(state_file, backup_file)
+    return backup_file
+
 RAW_PARAMS = load_params()
 PARAM_PROFILES = build_param_profiles(RAW_PARAMS)
 PARAMS = PARAM_PROFILES[0]
@@ -367,11 +389,23 @@ class S14TradingBot:
         )
         if not applied:
             return
+        try:
+            backup_file = backup_state_before_pending_open_reconciliation(
+                STATE_FILE,
+                applied,
+            )
+        except Exception as exc:
+            self.state_load_error = (
+                "Confirmed pending_open reconciliation backup failed: " + str(exc)
+            )
+            logging.critical(self.state_load_error)
+            return
         if not self.save_state():
             self.state_load_error = (
                 "Confirmed pending_open reconciliation could not be persisted."
             )
             return
+        logging.warning(f"Pre-reconciliation state backup: {backup_file}")
         for item in applied:
             logging.warning(
                 f"[{item['symbol']}] Cleared operator-confirmed pending_open "
