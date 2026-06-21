@@ -29,14 +29,14 @@ Move-catcher記事の二系統反転構造を実装した正式bot14。
 - lot倍率: 0.01、bet units上限なし
 - 最大spread: 0.9 pips（上限と同値を許可）
 - 週末強制決済とニュース回避: 無効
-- ライブ起動許可: 無効
-- 無制限bet unitsの明示許可: 無効
+- ライブ起動許可: 有効（500 USDデモ口座forward専用）
+- 無制限bet unitsの明示許可: 有効（デモ口座で破産耐性を観測するstress条件）
 
 ## 起動前の注意
 
 - `live_config.py`は認証情報を含むため、このフォルダには同梱していない。既存運用と同じ形式で別途配置する。
-- `live_trading_enabled=true`を明示するまで、bridge接続前に停止する。
-- `max_bet_units=0`のまま起動する場合は、別途`allow_unbounded_bet_units=true`も必要。これは安全性を保証する設定ではなく、危険性を明示的に受け入れるためのガード。
+- 現在のGit設定は`live_trading_enabled=true`かつ`allow_unbounded_bet_units=true`。500 USDデモ口座forward専用で、実口座へ流用しない。
+- `max_bet_units=0`のためDMC bet unitsは無制限。brokerのmargin・volume上限までlotが増え得るstress条件であり、安全性を保証しない。
 - `s14_bot_state.json`、`logs/`、取引CSVは初回起動時に新規作成する。v2からコピーしない。
 - 旧単一通貨stateまたはversion 3以外のstateを検出した場合は自動移行せず、安全停止する。
 - 旧実装の資金管理stateは互換性がないため自動移行せず、新しい`[0,1]`数列から開始する。

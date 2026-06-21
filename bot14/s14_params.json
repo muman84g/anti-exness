@@ -1,6 +1,6 @@
 {
-    "live_trading_enabled": false,
-    "allow_unbounded_bet_units": false,
+    "live_trading_enabled": true,
+    "allow_unbounded_bet_units": true,
     "initial_sequence": [
         0,
         1
