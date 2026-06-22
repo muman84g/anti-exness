@@ -23,7 +23,7 @@
     "pair_alignment_target_ratio": 0.5,
     "pair_alignment_tolerance_pips": 0.6,
     "pair_alignment_spread_multiplier": 2.0,
-    "enforce_pair_alignment_on_reentry": false,
+    "enforce_pair_alignment_on_reentry": true,
     "confirmed_pending_open_reconciliations": [
         {
             "symbol": "AUDUSD",

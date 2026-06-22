@@ -106,7 +106,7 @@ DEFAULT_PARAMS = {
     'pair_alignment_target_ratio': 0.50,
     'pair_alignment_tolerance_pips': 0.6,
     'pair_alignment_spread_multiplier': 2.0,
-    'enforce_pair_alignment_on_reentry': False,
+    'enforce_pair_alignment_on_reentry': True,
     'repair_missing_sl_tp_on_sync': True,
     'warn_sl_tp_mismatch_pips': 0.2
 }
@@ -751,7 +751,7 @@ class S14TradingBot:
         )
         initial_pair_entry = bot_type == "B" and not self.state.get("pair_initialized")
         enforce_alignment = initial_pair_entry or bool(
-            PARAMS.get("enforce_pair_alignment_on_reentry", False)
+            PARAMS.get("enforce_pair_alignment_on_reentry", True)
         )
         if not aligned and enforce_alignment:
             distance_text = "unknown" if distance_pips is None else f"{distance_pips:.1f}"
