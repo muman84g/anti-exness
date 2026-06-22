@@ -33,6 +33,28 @@
             "reason": "Operator verified that no AUDUSD position, order, or deal exists for this request."
         }
     ],
+    "confirmed_missing_position_reconciliations": [
+        {
+            "symbol": "GBPUSD",
+            "bot_type": "B",
+            "ticket": 2003802449,
+            "direction": "LONG",
+            "outcome": "LOSE",
+            "confirmed_by_operator": true,
+            "confirmed_at_jst": "2026-06-22",
+            "reason": "First missing-position observation at 2026-06-22 08:11:49 logged the protected SL-side boundary (LOSE); operator requested reconciliation fix."
+        },
+        {
+            "symbol": "GBPUSD",
+            "bot_type": "A",
+            "ticket": 2002834244,
+            "direction": "LONG",
+            "outcome": "WIN",
+            "confirmed_by_operator": true,
+            "confirmed_at_jst": "2026-06-22",
+            "reason": "First missing-position observation at 2026-06-22 12:08:23 logged the protected TP-side boundary (WIN); operator confirmed TP arrival."
+        }
+    ],
     "symbols": [
         {
             "enabled": false,

@@ -48,3 +48,12 @@ Move-catcher記事の二系統反転構造を実装した正式bot14。
 - deal履歴によるmissing positionの自動照合は未実装。`reconciliation_required`発生時はライブ運用者による確認が必要。
 - order履歴によるOPEN timeoutの自動照合も未実装。`pending_open`が残った場合は自動再送せず照合待ちで停止する。
 - Magic numberはA=`140034`、B=`140035`。
+
+## Broker側TP/SL決済の照合
+
+- MT5のserver-side TP/SLは、Pythonの1秒監視より先にpositionを決済する場合がある。
+- state上のticketがbulk position一覧から消えた場合、同じticketを`POSITION`で個別再照会する。
+- 個別再照会も明示的に`POSITION_NOT_FOUND`を返し、かつ現在の決済側価格が保存済みTP/SL境界へ到達している場合だけ、保護注文によるWIN/LOSEとして確定する。
+- WINなら次方向を反転、LOSEなら同方向を維持し、DMC・position削除・次方向を一括保存する。
+- Bridge timeout、個別照会でpositionが残る場合、TP/SL境界外、手動決済の可能性がある場合は自動確定せず、従来どおりfail-closedで停止する。
+- 修正導入前から停止していたGBPUSDのA/B ticketは、`confirmed_missing_position_reconciliations`でsymbol・Bot種別・ticket・方向を厳密一致させ、初回起動時に一度だけ反映する。反映前stateは`state/`内へbackupする。

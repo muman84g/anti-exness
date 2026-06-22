@@ -245,6 +245,106 @@ def apply_confirmed_pending_open_reconciliations(state_by_symbol, directives):
     return applied
 
 
+def apply_confirmed_missing_position_reconciliations(
+    state_by_symbol,
+    manager_by_symbol,
+    directives,
+):
+    """Apply exact operator-confirmed exits to legacy blocked positions."""
+    if not isinstance(directives, list):
+        return []
+
+    applied = []
+    for directive in directives:
+        if not isinstance(directive, dict):
+            continue
+        if directive.get("confirmed_by_operator") is not True:
+            continue
+
+        symbol = str(directive.get("symbol", "")).strip()
+        bot_type = str(directive.get("bot_type", "")).strip().upper()
+        direction = str(directive.get("direction", "")).strip().upper()
+        outcome = str(directive.get("outcome", "")).strip().upper()
+        try:
+            ticket = int(directive.get("ticket", 0))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not symbol
+            or bot_type not in {"A", "B"}
+            or direction not in {"LONG", "SHORT"}
+            or outcome not in {"WIN", "LOSE"}
+            or ticket <= 0
+        ):
+            continue
+
+        state = state_by_symbol.get(symbol)
+        manager = manager_by_symbol.get(symbol)
+        if not isinstance(state, dict) or manager is None:
+            continue
+        pos_key = "pos_A" if bot_type == "A" else "pos_B"
+        next_key = "next_direction_A" if bot_type == "A" else "next_direction_B"
+        position = state.get(pos_key)
+        if not isinstance(position, dict):
+            continue
+        if (
+            int(position.get("ticket", 0)) != ticket
+            or position.get("direction") != direction
+            or position.get("missing_on_mt5") is not True
+        ):
+            continue
+
+        bet_units = int(position.get("bet_units", 0))
+        if bot_type == "A":
+            manager.update_mc(outcome, None, bet_units, 0)
+        else:
+            manager.update_mc(None, outcome, 0, bet_units)
+        state[pos_key] = None
+        state[next_key] = next_direction_after_outcome(direction, outcome)
+        if bot_type == "A" and not state.get("pair_initialized"):
+            state["initial_anchor_A"] = None
+
+        pending_close = state.get("pending_close")
+        if isinstance(pending_close, dict) and pending_close.get("ticket") == ticket:
+            state.pop("pending_close", None)
+        reconciliation = state.get("reconciliation_required")
+        if isinstance(reconciliation, dict) and reconciliation.get("ticket") == ticket:
+            state.pop("reconciliation_required", None)
+        state.pop("sync_block_new_entries", None)
+        state.pop("sync_block_reason", None)
+        state["pair_mode"] = classify_pair_mode(
+            state.get("pos_A"),
+            state.get("pos_B"),
+            state.get("pair_initialized", False),
+        )
+        state["mc_manager"] = manager.to_dict()
+
+        audit_entry = {
+            "ticket": ticket,
+            "bot_type": bot_type,
+            "direction": direction,
+            "outcome": outcome,
+            "confirmed_at_jst": str(directive.get("confirmed_at_jst", "")),
+            "reason": str(directive.get("reason", "")),
+        }
+        audit_log = state.setdefault("manual_missing_position_reconciliations", [])
+        if not any(
+            isinstance(item, dict) and int(item.get("ticket", 0)) == ticket
+            for item in audit_log
+        ):
+            audit_log.append(audit_entry)
+        applied.append(
+            {
+                "symbol": symbol,
+                "ticket": ticket,
+                "bot_type": bot_type,
+                "outcome": outcome,
+            }
+        )
+
+    return applied
+
+
 def backup_state_before_pending_open_reconciliation(state_file, applied):
     """Preserve the pre-reconciliation state without overwriting an old backup."""
     if not applied:
@@ -261,6 +361,21 @@ def backup_state_before_pending_open_reconciliation(state_file, applied):
         for item in applied
     )
     backup_file = f"{state_file}.before_pending_reconcile_{suffix}.bak"
+    if not os.path.exists(backup_file):
+        shutil.copy2(state_file, backup_file)
+    return backup_file
+
+
+def backup_state_before_missing_position_reconciliation(state_file, applied):
+    """Preserve state before applying confirmed legacy exit outcomes."""
+    if not applied:
+        return None
+
+    suffix = "__".join(
+        f"{item['symbol']}_{item['bot_type']}_{item['ticket']}_{item['outcome']}"
+        for item in applied
+    )
+    backup_file = f"{state_file}.before_exit_reconcile_{suffix}.bak"
     if not os.path.exists(backup_file):
         shutil.copy2(state_file, backup_file)
     return backup_file
@@ -344,6 +459,7 @@ class S14TradingBot:
         self.load_news_events()
         self.load_state()
         self.apply_configured_pending_open_reconciliations()
+        self.apply_configured_missing_position_reconciliations()
         for params in self.param_profiles:
             self.activate_profile(params)
             logging.info(
@@ -411,6 +527,42 @@ class S14TradingBot:
                 f"[{item['symbol']}] Cleared operator-confirmed pending_open "
                 f"request {item['request_id']}; no live position, order, or deal "
                 "was found during manual reconciliation."
+            )
+
+    def apply_configured_missing_position_reconciliations(self):
+        directives = RAW_PARAMS.get(
+            "confirmed_missing_position_reconciliations",
+            [],
+        )
+        applied = apply_confirmed_missing_position_reconciliations(
+            self.state_by_symbol,
+            self.mc_manager_by_symbol,
+            directives,
+        )
+        if not applied:
+            return
+        try:
+            backup_file = backup_state_before_missing_position_reconciliation(
+                STATE_FILE,
+                applied,
+            )
+        except Exception as exc:
+            self.state_load_error = (
+                "Confirmed missing-position reconciliation backup failed: "
+                + str(exc)
+            )
+            logging.critical(self.state_load_error)
+            return
+        if not self.save_state():
+            self.state_load_error = (
+                "Confirmed missing-position reconciliation could not be persisted."
+            )
+            return
+        logging.warning(f"Pre-exit-reconciliation state backup: {backup_file}")
+        for item in applied:
+            logging.warning(
+                f"[{item['symbol']}][Bot {item['bot_type']}] Applied operator-confirmed "
+                f"{item['outcome']} for missing ticket {item['ticket']}."
             )
 
     def load_news_events(self):
@@ -1133,6 +1285,35 @@ class S14TradingBot:
         price_hint = self.infer_missing_position_outcome(
             pos, current_bid, current_ask, pip_val
         )
+
+        # A server-side TP/SL can remove the position before the one-second
+        # Python loop observes the target. Corroborate the bulk-list absence
+        # with a dedicated ticket lookup. Only a protected price boundary and
+        # an explicit POSITION_NOT_FOUND response may advance DMC state.
+        absence_confirmed = self.executor.confirm_position_absent(ticket)
+        if absence_confirmed is True and price_hint in {"WIN", "LOSE"}:
+            bet_units = int(pos.get("bet_units", 0))
+            next_direction = next_direction_after_outcome(direction, price_hint)
+            logging.warning(
+                f"[Bot {bot_type}] Confirmed missing ticket {ticket} as {price_hint}: "
+                "bulk position list and dedicated ticket lookup both report it "
+                f"absent while the protected price boundary is reached. "
+                f"Applying DMC and scheduling {next_direction}."
+            )
+            if not self.commit_confirmed_exit(
+                bot_type,
+                direction,
+                price_hint,
+                bet_units,
+                ticket,
+            ):
+                logging.critical(
+                    f"[Bot {bot_type}] Failed to persist the corroborated "
+                    f"{price_hint} exit for ticket {ticket}."
+                )
+                return False, True
+            return True, False
+
         existing = self.state.get("reconciliation_required")
         if isinstance(existing, dict) and existing.get("ticket") == ticket:
             return False, True
@@ -1150,8 +1331,9 @@ class S14TradingBot:
         pos["missing_on_mt5"] = True
         logging.critical(
             f"[Bot {bot_type}] State ticket {ticket} is missing from MT5 positions. "
-            f"Current-price hint={price_hint} is not applied to DMC. "
-            "Further entries are blocked until deal-history reconciliation."
+            f"Dedicated absence confirmation={absence_confirmed}; "
+            f"current-price hint={price_hint} is not applied to DMC. "
+            "Further entries are blocked until operator reconciliation."
         )
         return True, True
 
@@ -1665,6 +1847,9 @@ class S14TradingBot:
         pending_close = self.state.get("pending_close")
         if isinstance(pending_close, dict) and pending_close.get("ticket") == ticket:
             self.state.pop("pending_close", None)
+        reconciliation = self.state.get("reconciliation_required")
+        if isinstance(reconciliation, dict) and reconciliation.get("ticket") == ticket:
+            self.state.pop("reconciliation_required", None)
         self.update_pair_mode()
         return self.save_state()
 

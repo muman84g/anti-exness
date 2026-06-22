@@ -152,6 +152,28 @@ class MT5Executor(BaseExecutor):
             logging.error(f"Failed to parse position response for ticket {ticket}: {e}")
             return None
 
+    def confirm_position_absent(self, ticket):
+        """Confirm absence with a dedicated ticket lookup.
+
+        True means the EA explicitly reported that the position is absent.
+        False means the position still exists. None means the bridge response is
+        unavailable or malformed, so callers must fail closed.
+        """
+        res = ea_bridge.send_command(f"POSITION|{ticket}")
+        if res in {
+            "ERR|POSITION_NOT_FOUND",
+            "ERR|Position Not Found",
+            "ERR|0",
+            "ERR|10009",
+        }:
+            return True
+        if res and res.startswith("OK|"):
+            return False
+        logging.error(
+            f"EA could not confirm whether position ticket {ticket} is absent: {res}"
+        )
+        return None
+
     def get_positions(self, symbol, magic=None):
         """Returns all live MT5 positions for symbol. None means bridge failure."""
         magic_filter = -1 if magic is None else int(magic)
