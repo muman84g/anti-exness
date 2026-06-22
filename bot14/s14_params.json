@@ -35,7 +35,7 @@
     ],
     "symbols": [
         {
-            "enabled": true,
+            "enabled": false,
             "symbol": "EURCHF",
             "W_pips": 43.0,
             "initial_offset_ratio": 0.5,
