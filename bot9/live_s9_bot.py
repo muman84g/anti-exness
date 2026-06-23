@@ -4,7 +4,7 @@
 # ------------------------------------------------------------------------------
 # - Base Strategy: 東京セッション（JST 9:00 - 10:00）の高値安値ブレイクアウト。
 # - Traded Assets:
-#   ['USTECm', 'US30m', 'JP225m', 'USOILm', 'US500m', 'NZDCADm']
+#   ['USTECm', 'US30m', 'JP225m', 'USOILm', 'US500m']
 # - Risk Management:
 #   * VolFilter: 東京レンジ幅が日次ATRの 15%〜70% の日のみ取引（だまし・値幅枯渇の回避）。
 #   * ATR動的TP/SL: 過去5日間の日次平均レンジ（ATR）ベースで決済幅を決定。
@@ -61,7 +61,7 @@ STATE_FILE = os.path.join(script_dir, "s9_bot_state.json")
 RISK_USD = 10.0  # 1トレードあたりの許容リスク金額
 MAX_LOT_LIMIT = 2.0
 
-TRADED_SYMBOLS = ['USTECm', 'US30m', 'JP225m', 'USOILm', 'US500m', 'NZDCADm']
+TRADED_SYMBOLS = ['USTECm', 'US30m', 'JP225m', 'USOILm', 'US500m']
 
 # Adopted live params from the validated bot9 primary candidate.
 PARAMS = {
