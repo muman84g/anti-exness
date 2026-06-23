@@ -186,6 +186,7 @@ class s9TradingBot:
             try:
                 with open(STATE_FILE, "r") as f:
                     self.state = json.load(f)
+                self.ensure_state_shape()
                 logging.info(f"Loaded existing state for date: {self.state.get('date')}")
             except Exception as e:
                 logging.error(f"Error loading state: {e}")
@@ -195,12 +196,18 @@ class s9TradingBot:
 
     def save_state(self):
         try:
-            with open(STATE_FILE, "w") as f:
+            with open(STATE_FILE, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(self.state, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            return True
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
+            return False
 
     def ensure_state_shape(self):
+        if not isinstance(self.state, dict):
+            self.state = {}
         defaults = {
             "active_tickets": {},
             "range_high": {},
@@ -219,28 +226,95 @@ class s9TradingBot:
             "entry_price": {},
             "lot_size": {},
             "exit_mode": {},
+            "last_close_fail": {},
+            "last_close_fail_signature": {},
         }
         for key, value in defaults.items():
             self.state.setdefault(key, value.copy())
 
-    def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0, price=0.0, pnl=0.0):
-        csv_file = os.path.join(LOG_DIR, "s9_trades.csv")
-        file_exists = os.path.isfile(csv_file)
-        
+    def write_trade_log_row(self, csv_file, header, row):
+        file_exists = os.path.isfile(csv_file) and os.path.getsize(csv_file) > 0
+        active_header = header
+        if file_exists:
+            try:
+                with open(csv_file, mode="r", newline="", encoding="utf-8-sig") as f:
+                    active_header = next(csv.reader(f), header)
+            except Exception as e:
+                logging.warning(f"Failed to read existing trade CSV header: {e}")
+                active_header = header
+
+        row_map = dict(zip(header, row))
+        if active_header != header:
+            legacy_header = header[:-1]
+            if active_header == legacy_header:
+                row = [row_map.get(col, "") for col in active_header]
+            else:
+                logging.warning(
+                    f"Unexpected trade CSV header in {csv_file}. Writing to a v2 CSV instead."
+                )
+                csv_file = csv_file.replace(".csv", "_v2.csv")
+                file_exists = os.path.isfile(csv_file) and os.path.getsize(csv_file) > 0
+                active_header = header
+                row = [row_map.get(col, "") for col in active_header]
+        else:
+            row = [row_map.get(col, "") for col in active_header]
+
+        with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(active_header)
+            writer.writerow(row)
+
+    def log_trade_csv(
+        self,
+        action,
+        ticket,
+        symbol,
+        direction="",
+        lot_size=0,
+        price=0.0,
+        pnl=0.0,
+        reason="",
+    ):
+        csv_name = "s9_trade_errors.csv" if action.startswith("EXIT_FAIL_") else "s9_trades.csv"
+        csv_file = os.path.join(LOG_DIR, csv_name)
         now_jst = datetime.now(JST)
-        price_value = "" if price is None else price
-        pnl_value = "" if pnl is None else pnl
-        
+        header = ["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL", "Reason"]
+        row = [
+            now_jst.strftime("%Y-%m-%d %H:%M:%S"),
+            action,
+            ticket,
+            symbol,
+            direction,
+            lot_size,
+            "" if price is None else price,
+            "" if pnl is None else pnl,
+            reason,
+        ]
         try:
-            with open(csv_file, mode='a', newline='', encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL"])
-                writer.writerow([
-                    now_jst.strftime("%Y-%m-%d %H:%M:%S"), action, ticket, symbol, direction, lot_size, price_value, pnl_value
-                ])
+            self.write_trade_log_row(csv_file, header, row)
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
+
+    def record_close_failure(self, symbol, ticket, reason, direction, lot_size, now_jst):
+        signature = f"{ticket}:{reason}"
+        signatures = self.state.setdefault("last_close_fail_signature", {})
+        if signatures.get(symbol) != signature:
+            self.log_trade_csv(
+                f"EXIT_FAIL_{reason}",
+                ticket,
+                symbol,
+                direction,
+                lot_size,
+                None,
+                None,
+                reason,
+            )
+            signatures[symbol] = signature
+        self.state.setdefault("last_close_fail", {})[symbol] = now_jst.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        self.save_state()
 
     def start(self):
         logging.info("Starting s9 ORB Live Bot execution loop...")
@@ -305,6 +379,8 @@ class s9TradingBot:
             if time_close_due or weekend_close_due:
                 if col in self.state["active_tickets"]:
                     ticket = self.state["active_tickets"][col]
+                    direction = self.state["position_direction"].get(col, "")
+                    lot_size = self.state["lot_size"].get(col, 0.0)
                     close_label = "WEEKEND" if weekend_close_due else "TIME"
                     close_text = "Saturday 02:30 JST" if weekend_close_due else f"JST {close_hour}:00"
                     logging.info(f"[{col}] {close_text} reached ({close_label} Close). Closing position (Ticket: {ticket}).")
@@ -315,16 +391,42 @@ class s9TradingBot:
                                 f"Position {ticket} for {col} was already closed on MT5. "
                                 "Logging UNKNOWN exit instead of zero price/profit."
                             )
-                            self.log_trade_csv(f"EXIT_{close_label}_UNKNOWN", ticket, col, price=None, pnl=None)
+                            self.log_trade_csv(
+                                f"EXIT_{close_label}_UNKNOWN",
+                                ticket,
+                                col,
+                                direction,
+                                lot_size,
+                                None,
+                                None,
+                                f"{close_label}:MT5_ABSENT_CONFIRMED",
+                            )
                         else:
                             logging.info(f"Successfully closed position for {col} ({close_label} Close). PnL: {success.profit}")
-                            self.log_trade_csv(f"EXIT_{close_label}", ticket, col, price=success.close_price, pnl=success.profit)
+                            self.log_trade_csv(
+                                f"EXIT_{close_label}",
+                                ticket,
+                                col,
+                                direction,
+                                lot_size,
+                                success.close_price,
+                                success.profit,
+                                close_label,
+                            )
                         del self.state["active_tickets"][col]
+                        self.state["last_close_fail"].pop(col, None)
+                        self.state["last_close_fail_signature"].pop(col, None)
                         self.save_state()
                     else:
                         logging.warning(f"Failed to close position {ticket} for {col}. Keeping state so the bot can retry.")
-                        self.state.setdefault("last_close_fail", {})[col] = now_jst.strftime("%Y-%m-%d %H:%M:%S")
-                        self.save_state()
+                        self.record_close_failure(
+                            col,
+                            ticket,
+                            close_label,
+                            direction,
+                            lot_size,
+                            now_jst,
+                        )
                 continue
 
             if saturday_entry_forbidden(now_jst) and col not in self.state["active_tickets"]:
@@ -485,7 +587,14 @@ class s9TradingBot:
                         order_type = ORDER_TYPE_BUY if direction == 'LONG' else ORDER_TYPE_SELL
                         order_sl = init_sl if flags['use_sl'] else 0.0
                         order_tp = tp_target if flags['use_tp'] else 0.0
-                        ticket = self.executor.open_position(col, order_type, target_lot, sl=order_sl, tp=order_tp)
+                        ticket = self.executor.open_position(
+                            col,
+                            order_type,
+                            target_lot,
+                            sl=order_sl,
+                            tp=order_tp,
+                            digits=getattr(info, "digits", 5),
+                        )
                         
                         if ticket:
                             logging.info(f"[{col}] Breakout Order Filled. Ticket: {ticket} Lot: {target_lot} Price: {ticket.price} ExitMode: {param.get('exit_mode')}")
@@ -607,16 +716,42 @@ class s9TradingBot:
                                     f"Position {ticket} for {col} was already closed on MT5. "
                                     "Logging UNKNOWN exit instead of zero price/profit."
                                 )
-                                self.log_trade_csv(f"EXIT_{reason}_UNKNOWN", ticket, col, price=None, pnl=None)
+                                self.log_trade_csv(
+                                    f"EXIT_{reason}_UNKNOWN",
+                                    ticket,
+                                    col,
+                                    direction,
+                                    self.state["lot_size"].get(col, 0.0),
+                                    None,
+                                    None,
+                                    f"{reason}:MT5_ABSENT_CONFIRMED",
+                                )
                             else:
                                 logging.info(f"Successfully closed position for {col} ({reason}). PnL: {success.profit}")
-                                self.log_trade_csv(f"EXIT_{reason}", ticket, col, price=success.close_price, pnl=success.profit)
+                                self.log_trade_csv(
+                                    f"EXIT_{reason}",
+                                    ticket,
+                                    col,
+                                    direction,
+                                    self.state["lot_size"].get(col, 0.0),
+                                    success.close_price,
+                                    success.profit,
+                                    reason,
+                                )
                             del self.state["active_tickets"][col]
+                            self.state["last_close_fail"].pop(col, None)
+                            self.state["last_close_fail_signature"].pop(col, None)
                             self.save_state()
                         else:
                             logging.warning(f"Failed to close position {ticket} for {col}. Keeping state so the bot can retry.")
-                            self.state.setdefault("last_close_fail", {})[col] = now_jst.strftime("%Y-%m-%d %H:%M:%S")
-                            self.save_state()
+                            self.record_close_failure(
+                                col,
+                                ticket,
+                                reason,
+                                direction,
+                                self.state["lot_size"].get(col, 0.0),
+                                now_jst,
+                            )
 
 if __name__ == "__main__":
     bot = s9TradingBot()

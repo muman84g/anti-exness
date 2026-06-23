@@ -21,13 +21,23 @@ class CloseResult:
     Result class that behaves like a boolean (for backward compatibility),
     but holds detailed trade exit information (lot size, open/close price, and profit).
     """
-    def __init__(self, success, lot=0.0, open_price=0.0, close_price=0.0, profit=0.0, already_closed=False):
+    def __init__(
+        self,
+        success,
+        lot=0.0,
+        open_price=0.0,
+        close_price=0.0,
+        profit=0.0,
+        already_closed=False,
+        status="CONFIRMED",
+    ):
         self.success = success
         self.lot = lot
         self.open_price = open_price
         self.close_price = close_price
         self.profit = profit
         self.already_closed = already_closed
+        self.status = status
 
     def __bool__(self):
         return self.success
@@ -50,21 +60,38 @@ class MT5Executor(BaseExecutor):
         # Expected from EA:
         # OK | ask | bid | margin_free | point | min_vol
         #    | max_vol | vol_step | tick_value | tick_size | contract_size | digits | stops_level
-        info = SymbolInfoDummy()
-        info.ask = float(parts[1])
-        info.bid = float(parts[2])
-        info.margin_free = float(parts[3])
-        info.point = float(parts[4])
-        
-        # 最小ロットの取得と強制オーバーライド
-        raw_min_vol = float(parts[5])
-        raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
-        raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
-        tick_value = float(parts[8]) if len(parts) > 8 else 0.0
-        tick_size = float(parts[9]) if len(parts) > 9 else 0.0
-        contract_size = float(parts[10]) if len(parts) > 10 else 0.0
-        info.digits = int(float(parts[11])) if len(parts) > 11 else 5
-        info.stops_level = int(float(parts[12])) if len(parts) > 12 else 0
+        if len(parts) < 6:
+            logging.error(f"EA returned malformed info for symbol {symbol}: {res}")
+            return None
+        try:
+            info = SymbolInfoDummy()
+            info.symbol = symbol
+            info.ask = float(parts[1])
+            info.bid = float(parts[2])
+            info.margin_free = float(parts[3])
+            info.point = float(parts[4])
+
+            # 最小ロットの取得と強制オーバーライド
+            raw_min_vol = float(parts[5])
+            raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
+            raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
+            tick_value = float(parts[8]) if len(parts) > 8 else 0.0
+            tick_size = float(parts[9]) if len(parts) > 9 else 0.0
+            contract_size = float(parts[10]) if len(parts) > 10 else 0.0
+            info.digits = int(float(parts[11])) if len(parts) > 11 else 5
+            info.stops_level = int(float(parts[12])) if len(parts) > 12 else 0
+        except (TypeError, ValueError) as exc:
+            logging.error(
+                f"EA returned unparsable info for symbol {symbol}: {res} ({exc})"
+            )
+            return None
+
+        if info.ask <= 0 or info.bid <= 0 or info.ask < info.bid or info.point <= 0:
+            logging.error(
+                f"EA returned invalid prices for symbol {symbol}: "
+                f"ask={info.ask} bid={info.bid} point={info.point}"
+            )
+            return None
 
         try:
             from live_config import MIN_LOT_OVERRIDES
@@ -95,16 +122,43 @@ class MT5Executor(BaseExecutor):
         lot = round(lot / info.volume_step) * info.volume_step
         return lot
 
-    def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456):
+    def confirm_position_absent(self, ticket):
+        """Return True only when a dedicated ticket lookup confirms absence."""
+        res = ea_bridge.send_command(f"POSITION|{ticket}")
+        if res in {
+            "ERR|POSITION_NOT_FOUND",
+            "ERR|Position Not Found",
+            "ERR|0",
+            "ERR|10009",
+        }:
+            return True
+        if res and res.startswith("OK|"):
+            return False
+        logging.error(
+            f"EA could not confirm whether position ticket {ticket} is absent: {res}"
+        )
+        return None
+
+    def open_position(
+        self,
+        symbol,
+        order_type,
+        lot_size,
+        sl=0.0,
+        tp=0.0,
+        deviation=20,
+        magic=123456,
+        digits=None,
+    ):
         """
         Opens a market order via EA Bridge.
         order_type: 0 (BUY) or 1 (SELL)
         """
-        info = self.get_symbol_info(symbol)
-        if info is None:
-            return None
-            
-        digits = getattr(info, "digits", 5)
+        if digits is None:
+            info = self.get_symbol_info(symbol)
+            if info is None:
+                return None
+            digits = getattr(info, "digits", 5)
         sl_text = f"{float(sl):.{digits}f}" if sl else "0"
         tp_text = f"{float(tp):.{digits}f}" if tp else "0"
         logging.info(
@@ -135,6 +189,10 @@ class MT5Executor(BaseExecutor):
             logging.info(f"Position {ticket} SL/TP modified successfully via EA.")
             return True
 
+        if res == "ERR|10025":
+            logging.info(f"Position {ticket} SL/TP already matches requested levels.")
+            return True
+
         logging.error(f"EA Modify failed for {ticket}: {res}")
         return False
 
@@ -156,14 +214,30 @@ class MT5Executor(BaseExecutor):
 
             return CloseResult(True, lot, open_price, close_price, profit)
 
-        already_closed_responses = {"ERR|0", "ERR|10009", "ERR|POSITION_NOT_FOUND", "ERR|Position Not Found"}
+        already_closed_responses = {
+            "ERR|0",
+            "ERR|10009",
+            "ERR|POSITION_NOT_FOUND",
+            "ERR|Position Not Found",
+        }
         if res in already_closed_responses:
-            logging.warning(
-                f"EA returned {res} for close ticket {ticket}; treating it as already closed "
-                "or missing on MT5 so local bot state can be cleaned up. "
-                "Close price/profit were not returned by the EA."
-            )
-            return CloseResult(True, already_closed=True)
+            absence_confirmed = self.confirm_position_absent(ticket)
+            if absence_confirmed is True:
+                logging.warning(
+                    f"EA returned {res} for close ticket {ticket}; a dedicated "
+                    "ticket lookup also confirmed that the position is absent."
+                )
+                return CloseResult(
+                    True,
+                    already_closed=True,
+                    status="ABSENT_CONFIRMED",
+                )
+            if absence_confirmed is False:
+                logging.error(
+                    f"EA returned {res} for close ticket {ticket}, but the "
+                    "dedicated ticket lookup still found the position."
+                )
+            return CloseResult(False, status="ABSENCE_UNCONFIRMED")
 
         logging.error(f"EA Close failed for {ticket}: {res}")
-        return CloseResult(False)
+        return CloseResult(False, status="FAILED")

@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class EABridgeServer:
         self.cmd_file = os.path.join(self.bridge_dir, "cmd.txt")
         self.res_file = os.path.join(self.bridge_dir, "res.txt")
         self.heartbeat_file = os.path.join(self.bridge_dir, "heartbeat.txt")
+        self._command_lock = threading.Lock()
         
         logger.info(f"File IPC Bridge initialized at {self.bridge_dir}")
 
@@ -26,37 +28,45 @@ class EABridgeServer:
         self.start()
 
     def send_command(self, cmd_str, timeout=10):
-        # Clean up stale response
-        if os.path.exists(self.res_file):
-            try:
-                os.remove(self.res_file)
-            except:
-                pass
-            
-        # Write command
-        try:
-            with open(self.cmd_file, "w") as f:
-                f.write(cmd_str)
-        except Exception as e:
-            logger.error(f"Error writing command file: {e}")
-            return "ERR|WRITE_FAILED"
-        
-        # Wait for response
-        start_time = time.time()
-        while time.time() - start_time < timeout:
+        # cmd.txt/res.txt are one shared IPC lane. Serialize all commands and
+        # reject response files that pre-date the current command.
+        with self._command_lock:
             if os.path.exists(self.res_file):
                 try:
-                    with open(self.res_file, "r") as f:
-                        res = f.read().strip()
                     os.remove(self.res_file)
-                    return res
-                except Exception as e:
-                    # File might be locked while EA is writing
-                    time.sleep(0.05)
-                    continue
-            time.sleep(0.1)
-        
-        return "ERR|TIMEOUT"
+                except Exception:
+                    pass
+
+            try:
+                with open(self.cmd_file, "w") as f:
+                    f.write(cmd_str)
+                    f.flush()
+                    os.fsync(f.fileno())
+                command_written_at = time.time()
+            except Exception as e:
+                logger.error(f"Error writing command file: {e}")
+                return "ERR|WRITE_FAILED"
+
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if os.path.exists(self.res_file):
+                    try:
+                        response_mtime = os.path.getmtime(self.res_file)
+                        if response_mtime + 0.001 < command_written_at:
+                            os.remove(self.res_file)
+                            continue
+                        with open(self.res_file, "r") as f:
+                            res = f.read().strip()
+                        os.remove(self.res_file)
+                        if res:
+                            return res
+                    except Exception:
+                        # The EA may still be writing or holding the file.
+                        time.sleep(0.05)
+                        continue
+                time.sleep(0.1)
+
+            return "ERR|TIMEOUT"
 
     def stop(self):
         """Cleanup if needed"""
