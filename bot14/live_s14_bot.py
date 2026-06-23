@@ -460,6 +460,7 @@ class S14TradingBot:
         self.load_state()
         self.apply_configured_pending_open_reconciliations()
         self.apply_configured_missing_position_reconciliations()
+        self.last_symbol_mid_by_symbol = {}
         for params in self.param_profiles:
             self.activate_profile(params)
             logging.info(
@@ -719,6 +720,68 @@ class S14TradingBot:
             logging.info(f"Pair mode changed: {old_mode} -> {new_mode}")
         return new_mode
 
+    def known_price_references_for_active_symbol(self):
+        references = []
+        for pos_key in ("pos_A", "pos_B"):
+            pos = self.state.get(pos_key)
+            if not isinstance(pos, dict):
+                continue
+            for key in ("entry_price", "tp", "sl", "desired_tp", "desired_sl"):
+                value = self.positive_float(pos.get(key))
+                if value:
+                    references.append(value)
+        anchor = self.positive_float(self.state.get("initial_anchor_A"))
+        if anchor:
+            references.append(anchor)
+        previous_mid = self.positive_float(
+            self.last_symbol_mid_by_symbol.get(PARAMS.get("symbol"))
+        )
+        if previous_mid:
+            references.append(previous_mid)
+        return references
+
+    def validate_symbol_info_for_active_state(self, symbol, info, W_pips, pip_val):
+        if info is None:
+            return False
+        ask = self.positive_float(getattr(info, "ask", 0.0))
+        bid = self.positive_float(getattr(info, "bid", 0.0))
+        if not ask or not bid or ask < bid:
+            logging.critical(
+                f"[{symbol}] Invalid symbol info from EA: ask={ask} bid={bid}. "
+                "Blocking this cycle."
+            )
+            return False
+
+        spread_pips = (ask - bid) / pip_val
+        if spread_pips < 0 or spread_pips > max(50.0, W_pips * 2.0):
+            logging.critical(
+                f"[{symbol}] Implausible symbol info spread from EA: "
+                f"spread={spread_pips:.1f} pips. Blocking this cycle."
+            )
+            return False
+
+        mid = (ask + bid) / 2.0
+        references = self.known_price_references_for_active_symbol()
+        if references:
+            nearest_gap_pips = min(abs(mid - ref) / pip_val for ref in references)
+            max_gap_pips = float(
+                PARAMS.get(
+                    "stale_symbol_info_max_gap_pips",
+                    max(W_pips * 8.0, 300.0),
+                )
+            )
+            if nearest_gap_pips > max_gap_pips:
+                logging.critical(
+                    f"[{symbol}] Symbol info price is inconsistent with saved state: "
+                    f"mid={mid:.5f}, nearest_gap={nearest_gap_pips:.1f} pips, "
+                    f"limit={max_gap_pips:.1f} pips. Possible stale/cross-symbol "
+                    "EA bridge response; blocking this cycle."
+                )
+                return False
+
+        self.last_symbol_mid_by_symbol[symbol] = mid
+        return True
+
     def open_bot_position(
         self,
         bot_type,
@@ -738,7 +801,35 @@ class S14TradingBot:
         comment = S14_COMMENT_A if bot_type == "A" else S14_COMMENT_B
         mc = self.mc_manager.mc_A if bot_type == "A" else self.mc_manager.mc_B
 
-        expected_px = info.ask if direction == "LONG" else info.bid
+        if not self.validate_symbol_info_for_active_state(symbol, info, W_pips, pip_val):
+            return False
+
+        first_expected_px = info.ask if direction == "LONG" else info.bid
+        confirm_info = self.executor.get_symbol_info(symbol)
+        if not confirm_info:
+            logging.warning(f"[Bot {bot_type}] Entry blocked: could not confirm symbol info for {symbol}.")
+            return False
+        if not self.validate_symbol_info_for_active_state(symbol, confirm_info, W_pips, pip_val):
+            return False
+        confirm_expected_px = confirm_info.ask if direction == "LONG" else confirm_info.bid
+        info_gap_pips = abs(confirm_expected_px - first_expected_px) / pip_val
+        max_info_gap_pips = float(
+            PARAMS.get(
+                "max_entry_info_confirmation_gap_pips",
+                max(3.0, (confirm_info.ask - confirm_info.bid) / pip_val * 3.0),
+            )
+        )
+        if info_gap_pips > max_info_gap_pips:
+            logging.critical(
+                f"[{symbol}][Bot {bot_type}] Entry blocked: symbol info changed "
+                f"{info_gap_pips:.1f} pips between confirmation reads "
+                f"(limit={max_info_gap_pips:.1f}). Possible stale EA bridge response."
+            )
+            return False
+        info = confirm_info
+        current_spread = info.ask - info.bid
+        expected_px = confirm_expected_px
+
         aligned, distance_pips, target_pips, tolerance_pips = evaluate_pair_alignment(
             expected_px,
             self.state.get(other_key),
@@ -824,8 +915,18 @@ class S14TradingBot:
             tp=initial_tp,
             magic=magic,
             comment=request_comment,
+            digits=price_digits,
         )
         if not ticket:
+            last_order_error = getattr(self.executor, "last_order_error", None)
+            if last_order_error in {"ERR|10016", "ERR|10030", "ERR|10013", "ERR|10014", "ERR|10015"}:
+                self.state.pop("pending_open", None)
+                self.save_state()
+                logging.critical(
+                    f"[Bot {bot_type}] OPEN was explicitly rejected by EA ({last_order_error}); "
+                    "cleared pending_open because no ticket was accepted."
+                )
+                return False
             pending_open = self.state.get("pending_open")
             if isinstance(pending_open, dict):
                 pending_open["status"] = "OPEN_RESPONSE_UNCONFIRMED"
@@ -1650,6 +1751,8 @@ class S14TradingBot:
         info = self.executor.get_symbol_info(symbol)
         if not info:
             logging.warning(f"Failed to fetch symbol info for {symbol}. Skipping cycle.")
+            return
+        if not self.validate_symbol_info_for_active_state(symbol, info, W_pips, pip_val):
             return
 
         current_ask = info.ask

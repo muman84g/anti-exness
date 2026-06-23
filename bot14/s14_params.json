@@ -31,6 +31,13 @@
             "confirmed_no_position_order_or_deal": true,
             "confirmed_at_jst": "2026-06-22",
             "reason": "Operator verified that no AUDUSD position, order, or deal exists for this request."
+        },
+        {
+            "symbol": "AUDUSD",
+            "request_id": "9feb4271",
+            "confirmed_no_position_order_or_deal": true,
+            "confirmed_at_jst": "2026-06-23",
+            "reason": "EA explicitly rejected the AUDUSD OPEN with ERR|10016 before ticket creation; clear stale pending_open after the stale-price guard fix."
         }
     ],
     "confirmed_missing_position_reconciliations": [

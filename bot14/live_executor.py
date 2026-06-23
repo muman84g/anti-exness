@@ -88,33 +88,46 @@ class MT5Executor(BaseExecutor):
         if not res or not res.startswith("OK|"):
             logging.error(f"EA failed to get info for symbol {symbol}: {res}")
             return None
-            
+
         parts = res.split("|")
         # Expected from EA:
         # OK | ask | bid | margin_free | point | min_vol
         #    | max_vol | vol_step | tick_value | tick_size | contract_size | digits | stops_level
-        info = SymbolInfoDummy()
-        info.ask = float(parts[1])
-        info.bid = float(parts[2])
-        info.margin_free = float(parts[3])
-        info.point = float(parts[4])
-        
-        # 最小ロットの取得と強制オーバーライド
-        raw_min_vol = float(parts[5])
-        raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
-        raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
-        tick_value = float(parts[8]) if len(parts) > 8 else 0.0
-        tick_size = float(parts[9]) if len(parts) > 9 else 0.0
-        contract_size = float(parts[10]) if len(parts) > 10 else 0.0
-        info.digits = int(float(parts[11])) if len(parts) > 11 else 5
-        info.stops_level = int(float(parts[12])) if len(parts) > 12 else 0
+        if len(parts) < 6:
+            logging.error(f"EA returned malformed info for symbol {symbol}: {res}")
+            return None
+        try:
+            info = SymbolInfoDummy()
+            info.symbol = symbol
+            info.ask = float(parts[1])
+            info.bid = float(parts[2])
+            info.margin_free = float(parts[3])
+            info.point = float(parts[4])
+            raw_min_vol = float(parts[5])
+            raw_max_vol = float(parts[6]) if len(parts) > 6 else 100.0
+            raw_vol_step = float(parts[7]) if len(parts) > 7 else raw_min_vol
+            tick_value = float(parts[8]) if len(parts) > 8 else 0.0
+            tick_size = float(parts[9]) if len(parts) > 9 else 0.0
+            contract_size = float(parts[10]) if len(parts) > 10 else 0.0
+            info.digits = int(float(parts[11])) if len(parts) > 11 else 5
+            info.stops_level = int(float(parts[12])) if len(parts) > 12 else 0
+        except (TypeError, ValueError) as exc:
+            logging.error(f"EA returned unparsable info for symbol {symbol}: {res} ({exc})")
+            return None
+
+        if info.ask <= 0 or info.bid <= 0 or info.ask < info.bid or info.point <= 0:
+            logging.error(
+                f"EA returned invalid prices for symbol {symbol}: "
+                f"ask={info.ask} bid={info.bid} point={info.point}"
+            )
+            return None
 
         try:
             from live_config import MIN_LOT_OVERRIDES
             min_override = MIN_LOT_OVERRIDES.get(symbol, raw_min_vol)
         except Exception:
             min_override = raw_min_vol
-            
+
         info.volume_min = max(raw_min_vol, min_override)
         info.volume_max = max(raw_max_vol, info.volume_min)
         info.volume_step = raw_vol_step if raw_vol_step > 0 else info.volume_min
@@ -193,16 +206,19 @@ class MT5Executor(BaseExecutor):
                 logging.error(f"Failed to parse position record '{record}': {e}")
         return positions
 
-    def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456, comment=""):
+    def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456, comment="", digits=None):
         """
         Opens a market order via EA Bridge.
         order_type: 0 (BUY) or 1 (SELL)
         """
-        info = self.get_symbol_info(symbol)
-        if info is None:
-            return None
-            
-        digits = getattr(info, "digits", 5)
+        self.last_order_error = None
+        if digits is None:
+            info = self.get_symbol_info(symbol)
+            if info is None:
+                self.last_order_error = "INFO_UNAVAILABLE"
+                return None
+            digits = getattr(info, "digits", 5)
+
         sl_text = f"{float(sl):.{digits}f}" if sl else "0"
         tp_text = f"{float(tp):.{digits}f}" if tp else "0"
         logging.info(
@@ -212,15 +228,16 @@ class MT5Executor(BaseExecutor):
         res = ea_bridge.send_command(
             f"OPEN|{symbol}|{order_type}|{lot_size}|{sl_text}|{tp_text}|{int(magic)}|{safe_comment}"
         )
-        
+
         if not res or not res.startswith("OK|"):
+            self.last_order_error = res or "NO_RESPONSE"
             logging.error(f"EA Order failed for {symbol}: {res}")
             return None
-            
+
         parts = res.split("|")
         ticket_id = int(parts[1])
         exec_price = float(parts[2]) if len(parts) > 2 else 0.0
-        
+
         ticket = Ticket(ticket_id, exec_price)
         logging.info(f"Order filled via EA / Ticket: {ticket} (Price: {ticket.price})")
         return ticket
