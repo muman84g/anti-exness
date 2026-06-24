@@ -160,6 +160,7 @@ class s11TradingBot:
             try:
                 with open(STATE_FILE, "r") as f:
                     self.state = json.load(f)
+                self.ensure_state_shape()
                 logging.info("Successfully loaded state file.")
             except Exception as e:
                 logging.error(f"Error loading state file: {e}")
@@ -167,20 +168,33 @@ class s11TradingBot:
         else:
             self.init_empty_state()
 
+    def ensure_state_shape(self):
+        if not isinstance(self.state, dict):
+            self.state = {}
+        self.state.setdefault("active_tickets", {})
+        self.state.setdefault("positions", {})
+        self.state.setdefault("last_processed_bar_time", None)
+        self.state.setdefault("last_close_fail_signature", {})
+
     def init_empty_state(self):
         self.state = {
             "active_tickets": {},
             "positions": {},
-            "last_processed_bar_time": None
+            "last_processed_bar_time": None,
+            "last_close_fail_signature": {},
         }
         self.save_state()
 
     def save_state(self):
         try:
-            with open(STATE_FILE, "w") as f:
+            with open(STATE_FILE, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(self.state, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            return True
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
+            return False
 
     def log_effective_params(self):
         keys = [
@@ -263,6 +277,29 @@ class s11TradingBot:
             self.write_trade_log_row(csv_file, header, row)
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
+
+    def record_close_failure(self, symbol, ticket, reason, direction, lot_size):
+        signature = f"{ticket}:{reason}"
+        signatures = self.state.setdefault("last_close_fail_signature", {})
+        if signatures.get(symbol) != signature:
+            self.log_trade_csv(
+                f"EXIT_FAIL_{reason}",
+                ticket,
+                symbol,
+                direction,
+                lot_size,
+                None,
+                None,
+                reason,
+            )
+            signatures[symbol] = signature
+        pos = self.state.get("positions", {}).get(symbol)
+        if pos is not None:
+            pos["last_close_fail_reason"] = reason
+            pos["last_close_fail_time"] = datetime.now(JST).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        self.save_state()
 
     def calculate_zscore_features(self, df: pd.DataFrame, window: int) -> pd.DataFrame:
         df = df.copy()
@@ -648,7 +685,14 @@ class s11TradingBot:
         sl_px = raw_sl_px if use_sl else 0.0
         tp_px = raw_tp_px if use_tp else 0.0
 
-        ticket = self.executor.open_position(symbol, order_type, target_lot, sl=sl_px, tp=tp_px)
+        ticket = self.executor.open_position(
+            symbol,
+            order_type,
+            target_lot,
+            sl=sl_px,
+            tp=tp_px,
+            digits=getattr(info, "digits", 5),
+        )
 
         if ticket:
             actual_entry_price = float(ticket.price)
@@ -711,21 +755,35 @@ class s11TradingBot:
         
         success = self.executor.close_position(ticket)
         if success:
-            logging.info(f"[{symbol}] Successfully closed position (Reason: {reason}). Ticket: {ticket}, PnL: {success.profit}")
-            self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
+            if getattr(success, "already_closed", False):
+                logging.warning(
+                    f"[{symbol}] Ticket {ticket} was already absent on MT5. "
+                    "Cleaning local state after dedicated absence confirmation; "
+                    "exact close price and PnL are unavailable."
+                )
+                self.log_trade_csv(
+                    f"EXIT_{reason}_UNKNOWN",
+                    ticket,
+                    symbol,
+                    direction,
+                    lot,
+                    None,
+                    None,
+                    f"{reason}:MT5_ABSENT_CONFIRMED",
+                )
+            else:
+                logging.info(f"[{symbol}] Successfully closed position (Reason: {reason}). Ticket: {ticket}, PnL: {success.profit}")
+                self.log_trade_csv(f"EXIT_{reason}", ticket, symbol, direction, lot, success.close_price, success.profit, reason)
         else:
             logging.warning(f"[{symbol}] Failed to close ticket {ticket} via EA. Keeping state so the bot can retry.")
-            self.log_trade_csv(f"EXIT_FAIL_{reason}", ticket, symbol, direction, lot, 0.0, 0.0, reason)
-            if pos is not None:
-                pos["last_close_fail_reason"] = reason
-                pos["last_close_fail_time"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-                self.save_state()
+            self.record_close_failure(symbol, ticket, reason, direction, lot)
             return
             
         if symbol in self.state["active_tickets"]:
             del self.state["active_tickets"][symbol]
         if symbol in self.state["positions"]:
             del self.state["positions"][symbol]
+        self.state.setdefault("last_close_fail_signature", {}).pop(symbol, None)
         self.save_state()
 
 if __name__ == "__main__":
