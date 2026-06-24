@@ -1057,11 +1057,51 @@ class S14TradingBot:
                 writer.writerow(active_header)
             writer.writerow(row)
 
-    def log_trade_csv(self, action, ticket, symbol, direction="", lot_size=0.0, price=0.0, pnl=0.0, reason=""):
+    def trade_log_row_exists(self, csv_file, action, ticket):
+        if not os.path.isfile(csv_file) or os.path.getsize(csv_file) <= 0:
+            return False
+        try:
+            with open(csv_file, mode="r", newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    if (
+                        row.get("Action") == action
+                        and str(row.get("Ticket", "")) == str(ticket)
+                    ):
+                        return True
+            return False
+        except Exception as e:
+            logging.error(
+                f"Failed to inspect existing trade CSV for duplicate exit: {e}"
+            )
+            return None
+
+    def log_trade_csv(
+        self,
+        action,
+        ticket,
+        symbol,
+        direction="",
+        lot_size=0.0,
+        price=0.0,
+        pnl=0.0,
+        reason="",
+        deduplicate=False,
+    ):
         csv_file = os.path.join(
             LOG_DIR,
             "s14_trade_errors.csv" if action.startswith("EXIT_FAIL_") else "s14_trades.csv",
         )
+        if deduplicate:
+            existing = self.trade_log_row_exists(csv_file, action, ticket)
+            if existing is None:
+                return False
+            if existing:
+                logging.warning(
+                    f"Trade CSV already contains {action} for ticket {ticket}; "
+                    "skipping duplicate append."
+                )
+                return True
+
         now_jst = datetime.now(JST)
         header = ["Timestamp_JST", "Action", "Ticket", "Symbol", "Direction", "LotSize", "Price", "PnL", "Reason"]
         row = [
@@ -1077,8 +1117,10 @@ class S14TradingBot:
         ]
         try:
             self.write_trade_log_row(csv_file, header, row)
+            return True
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
+            return False
 
     @staticmethod
     def positive_float(value):
@@ -1176,6 +1218,39 @@ class S14TradingBot:
                 pnl = self.estimate_gross_pnl(symbol, direction, entry_price, close_price, lot)
 
         return lot, close_price, pnl
+
+    def get_confirmed_missing_exit_log_values(
+        self,
+        pos,
+        outcome,
+        symbol_info=None,
+    ):
+        direction = pos.get("direction", "")
+        entry_price = self.positive_float(pos.get("entry_price", 0.0))
+        lot = self.positive_float(pos.get("lot_size", 0.0))
+        if outcome == "WIN":
+            exit_price = self.positive_float(pos.get("tp", 0.0))
+        else:
+            exit_price = self.positive_float(pos.get("sl", 0.0))
+
+        pnl = None
+        price_unit_value = self.positive_float(
+            getattr(symbol_info, "price_unit_value", 0.0)
+        )
+        if (
+            direction in {"LONG", "SHORT"}
+            and entry_price > 0.0
+            and exit_price > 0.0
+            and lot > 0.0
+            and price_unit_value > 0.0
+        ):
+            if direction == "LONG":
+                price_move = exit_price - entry_price
+            else:
+                price_move = entry_price - exit_price
+            pnl = price_move * lot * price_unit_value
+
+        return lot, exit_price, pnl
 
     def classify_live_position(self, live_pos):
         comment = live_pos.comment or ""
@@ -1380,7 +1455,15 @@ class S14TradingBot:
                 return "LOSE"
         return "MANUAL"
 
-    def handle_missing_state_position(self, bot_type, pos, current_bid, current_ask, pip_val):
+    def handle_missing_state_position(
+        self,
+        bot_type,
+        pos,
+        current_bid,
+        current_ask,
+        pip_val,
+        symbol_info=None,
+    ):
         ticket = pos.get("ticket")
         direction = pos.get("direction", "")
         price_hint = self.infer_missing_position_outcome(
@@ -1395,12 +1478,46 @@ class S14TradingBot:
         if absence_confirmed is True and price_hint in {"WIN", "LOSE"}:
             bet_units = int(pos.get("bet_units", 0))
             next_direction = next_direction_after_outcome(direction, price_hint)
+            symbol = getattr(self, "active_symbol", PARAMS["symbol"])
+            log_lot, log_price, log_pnl = (
+                self.get_confirmed_missing_exit_log_values(
+                    pos,
+                    price_hint,
+                    symbol_info,
+                )
+            )
+            pnl_status = (
+                "PNL_ESTIMATED_FROM_BROKER_TICK_VALUE"
+                if log_pnl is not None
+                else "PNL_UNAVAILABLE"
+            )
+            log_reason = (
+                f"{price_hint}:MT5_ABSENT_CONFIRMED:"
+                f"PRICE_TARGET_ESTIMATED:{pnl_status}"
+            )
             logging.warning(
                 f"[Bot {bot_type}] Confirmed missing ticket {ticket} as {price_hint}: "
                 "bulk position list and dedicated ticket lookup both report it "
                 f"absent while the protected price boundary is reached. "
                 f"Applying DMC and scheduling {next_direction}."
             )
+            if not self.log_trade_csv(
+                f"EXIT_SYNC_{price_hint}",
+                ticket,
+                symbol,
+                direction,
+                log_lot,
+                log_price if log_price > 0.0 else None,
+                log_pnl,
+                log_reason,
+                deduplicate=True,
+            ):
+                logging.critical(
+                    f"[Bot {bot_type}] Confirmed missing exit for ticket {ticket} "
+                    "could not be recorded in the trade CSV. DMC/state transition "
+                    "is blocked so the log write can be retried."
+                )
+                return False, True
             if not self.commit_confirmed_exit(
                 bot_type,
                 direction,
@@ -1438,7 +1555,16 @@ class S14TradingBot:
         )
         return True, True
 
-    def sync_positions_with_mt5(self, symbol, W, current_bid, current_ask, pip_val, now_jst):
+    def sync_positions_with_mt5(
+        self,
+        symbol,
+        W,
+        current_bid,
+        current_ask,
+        pip_val,
+        now_jst,
+        symbol_info=None,
+    ):
         live_positions = self.executor.get_positions(symbol)
         if live_positions is None:
             reason = "MT5 position list unavailable"
@@ -1483,7 +1609,12 @@ class S14TradingBot:
                     changed = True
             else:
                 did_change, should_block = self.handle_missing_state_position(
-                    bot_type, pos, current_bid, current_ask, pip_val
+                    bot_type,
+                    pos,
+                    current_bid,
+                    current_ask,
+                    pip_val,
+                    symbol_info,
                 )
                 changed = changed or did_change
                 block_entries_this_cycle = block_entries_this_cycle or should_block
@@ -1760,7 +1891,13 @@ class S14TradingBot:
         current_spread = current_ask - current_bid
         max_spread = PARAMS.get("max_spread_pips", 0.3) * pip_val
         position_sync_ok = self.sync_positions_with_mt5(
-            symbol, W, current_bid, current_ask, pip_val, now_jst
+            symbol,
+            W,
+            current_bid,
+            current_ask,
+            pip_val,
+            now_jst,
+            info,
         )
 
         if not position_sync_ok:
