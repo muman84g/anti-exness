@@ -51,6 +51,7 @@
 - `logs/`、`__pycache__/`、`.pyc`、実行ログ、取引CSVはgitに含めない。
 - push前に `git status --short` と `git diff --cached --name-only` を確認し、意図しないbot、削除、機密ファイル、state JSONがstageされていないことを確認する。
 - 既存repoの作業ツリーに大量の未commit変更や削除がある場合は、直接stageせず、`C:\tmp` などへクリーンcloneを作って必要ファイルだけ反映してpushする。
+- pushや修正前にbotディレクトリのバックアップを作る場合は、`C:\botter\bot` 直下へ `bot14_backup_...` のように並べず、対象bot配下の `_backups/`（例: `C:\botter\bot\bot14\_backups\bot14_backup_YYYYMMDD_label`）へ作成する。`_backups/` はローカル退避用でgitに含めない。
 - 新規botをpushする場合、原則として対象botディレクトリ、`docker-compose.yml`、`AGENTS.md`、必要な運用メモだけをstageし、`live_config.py` と実state JSONは手動配置に残す。
 - 既存botの更新をpushする場合、対象botディレクトリ丸ごとではなく、変更した実ファイルだけをstageする。`docker-compose.yml` や `AGENTS.md` は変更した場合だけstageする。
 
