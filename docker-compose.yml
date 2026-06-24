@@ -1,4 +1,4 @@
-﻿version: "3.8"
+version: "3.8"
 
 services:
   # ── Bot 8 (S8用設定) ──────────────────────────────────────
@@ -239,3 +239,33 @@ services:
       - NOVNC_PORT=6091
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot17
+
+  # ---- Bot 18 (S18 GBPUSD Snowball anti-grid) ----
+  exness-bot-18:
+    image: exness-bot:latest
+    container_name: exness-bot-18
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot18/state:/app/bot18/state
+      - ./bot18/logs:/app/bot18/logs
+      - ./bot18/live_config.py:/app/bot18/live_config.py:ro
+      - ./bot18/live_s18_bot.py:/app/bot18/live_s18_bot.py:ro
+      - ./bot18/live_data_fetcher.py:/app/bot18/live_data_fetcher.py:ro
+      - ./bot18/live_executor.py:/app/bot18/live_executor.py:ro
+      - ./bot18/base_interfaces.py:/app/bot18/base_interfaces.py:ro
+      - ./bot18/ea_bridge.py:/app/bot18/ea_bridge.py:ro
+      - ./bot18/s18_params.json:/app/bot18/s18_params.json:ro
+      - ./bot18/macro_events_2026.json:/app/bot18/macro_events_2026.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:111
+      - VNC_PORT=5912
+      - NOVNC_PORT=6092
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot18

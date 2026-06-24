@@ -1,51 +1,68 @@
-私が内部的に実行した、GitHubへプッシュするまでの具体的なGitコマンドの流れとコードは以下の通りです。
+GitHubへのpush手順メモ
 
-通常、単純にファイルを変更して送るだけでなく、他のボット（bot9やbot14など）の作業中ファイルを汚さないように退避したり、リモート側の変更と同期しながら安全にプッシュを行いました。
+## 基本方針
 
-1. 実際に実行したコマンドの手順
-① 変更したファイルをコミット対象にする (Stage)
-まず、今回修正した live_s8_bot.py をGitのコミット対象に追加（ステージング）しました。
+- `live_config.py`、`.env`、秘密鍵、トークン、認証情報、本番設定ファイルはgitに含めない。
+- `*_bot_state.json` / `s*_bot_state.json` はgitに含めない。必要なstate JSONはCentOS側へ手動で配置する。
+- `state/` のような空ディレクトリをgitで作りたい場合は、`state/.gitkeep` などのplaceholderだけをcommitする。
+- `logs/`、`__pycache__/`、`.pyc`、実行ログ、取引CSVはgitに含めない。
+- push前に `git status --short` と `git diff --cached --name-only` で、意図しないbotや機密ファイルが混ざっていないか確認する。
 
-bash
+## 今回のbot18でgitに含めるもの
 
+- `AGENTS.md`
+- `bot18/base_interfaces.py`
+- `bot18/ea_bridge.py`
+- `bot18/live_data_fetcher.py`
+- `bot18/live_executor.py`
+- `bot18/live_s18_bot.py`
+- `bot18/macro_events_2026.json`
+- `bot18/README.md`
+- `bot18/s18_params.json`
+- `bot18/state/.gitkeep`
+- `docker-compose.yml`
+- `githubへのpush.txt`
 
-git add bot8/live_s8_bot.py
-② ローカルにコミットを作成する
-変更内容の説明（コミットメッセージ）を添えて、ローカルリポジトリに保存しました。
+## 今回のbot18で手動配置するもの
 
-bash
+- `bot18/live_config.py`
+- `bot18/state/s18_bot_state.json`
 
+## 新規bot追加と既存bot更新の違い
 
-git commit -m "Fix bot8: Restrict entry after Sat 02:00 JST and trigger force close at Sat 02:30 JST"
-③ 他のボットの作業中ファイルを一時退避する (Stash)
-ここで git push を試みたところ、GitHub側（リモート）に他者（または別環境）がプッシュした最新の変更が含まれていたため、一度拒否されました。 そこで、リモートの最新状態を取り込む（pullする）にあたり、ローカルで書きかけのまま放置されていた他のボット（bot9, bot14等）の未コミット変更が上書きされて消えないように、一時的に別の場所に退避させました。
+- 新規bot追加: 対象botディレクトリ一式、`docker-compose.yml`、`AGENTS.md`、必要な運用メモをstageする。ただし `live_config.py` と実state JSONは含めない。
+- 既存bot更新: 対象botディレクトリ丸ごとではなく、変更した実ファイルだけをstageする。`docker-compose.yml` や `AGENTS.md` は変更した場合だけstageする。
+- どちらの場合も、stage後に `git diff --cached --name-only` を見て、意図しないbot、削除、機密ファイル、state JSONが混ざっていないことを確認する。
 
-bash
+## 汚れた作業ツリーを避けるpush例
 
+既存repoの作業ツリーに大量の未commit変更や削除がある場合は、そこを直接触らず、一時ディレクトリへクリーンcloneして必要ファイルだけ反映する。
 
-git stash -u -m "Temporary stash before git pull and push"
-④ リモートの最新情報をローカルに取り込んで合流する (Pull)
-安全に同期を取るため、GitHubから最新のコミットをローカルに引っ張ってきて、先ほどコミットしたBot8の修正と自動マージ（結合）させました。
+```bash
+git clone https://github.com/muman84g/anti-exness.git /tmp/anti-exness-push
+cd /tmp/anti-exness-push
 
-bash
+# 必要ファイルだけコピーしてから確認
+git status --short
+git add AGENTS.md docker-compose.yml githubへのpush.txt bot18
+git status --short
+git diff --cached --name-only
 
+# live_config.py や state JSON が含まれていないことを確認してからcommit/push
+git commit -m "Add bot18 live bot files"
+git push origin main
+```
 
-git pull
-⑤ GitHubへ送信する (Push)
-ローカルでのマージが完了し、最新かつ競合のない状態になったので、GitHub上のリポジトリに送信しました。
+## 通常のpush例
 
-bash
+作業ツリーがきれいな場合だけ、通常repo上で以下を行う。
 
+```bash
+git status --short
+git add AGENTS.md docker-compose.yml githubへのpush.txt bot18
+git diff --cached --name-only
+git commit -m "Add bot18 live bot files"
+git push origin main
+```
 
-git push
-(GitHubのアドレス https://github.com/muman84g/anti-exness.git の main ブランチへプッシュされました)
-
-⑥ 退避させていたファイルを元に戻す (Stash Pop)
-最後に、手順③で一時的に退避させていた他ボットの書きかけのファイルを、元の場所に復元しました。
-
-bash
-
-
-git stash pop
-💡 AIがどうやってこれを動かしているの？
-私は裏側で、あなたのWindows PC上で動作するコマンド実行用のシステムツールを使って、PowerShellを経由して直接 git コマンドを実行しています。 そのため、開発者の方がターミナルに手動で打ち込む手順と全く同じことを、自動で実行してGitHubへ送っています。
+`git add bot18` を使う場合も、`.gitignore` により `bot18/live_config.py` と `bot18/state/s18_bot_state.json` は通常はstageされない。念のため `git diff --cached --name-only` で必ず確認する。
