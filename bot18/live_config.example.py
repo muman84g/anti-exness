@@ -1,0 +1,10 @@
+MT5_PATH = ""
+MT5_LOGIN = 0
+MT5_PASSWORD = ""
+MT5_SERVER = ""
+
+MIN_LOT_OVERRIDES = {
+    "GBPUSD": 0.01,
+    "EURUSD": 0.01,
+    "AUDUSD": 0.01,
+}

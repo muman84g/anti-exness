@@ -1,47 +1,49 @@
-# bot18 / S18 GBPUSD Snowball Anti-Grid
+﻿# bot18 / S18 basket replacement
 
-## 目的
+`bot18` は、従来の単一GBPUSD bot18を今回のS18 basket実装へ置き換えた運用フォルダです。
+サービス名・コンテナ名は既存と同じ `exness-bot-18` のまま使います。
 
-`bot18` は GBPUSD 専用の Snowball / Anti-Grid virtual-entry bot。
-EA bridge / executor などの共通部品は `bot14` 系の構成に合わせ、このディレクトリ内へコピーして自己完結させる。
+## 現在の稼働設定
 
-## 固定方針
+- service/container: `exness-bot-18`
+- folder: `bot18`
+- runner: `live_s18_bot.py`
+- params: `s18_params.json`
+- live trading: `true`
+- shadow forward: `false`
+- artifacts: `artifacts/`
 
-- symbol: `GBPUSD`
-- lot: `0.01`
-- grid distance: `5.0 pips`
-- autoTP: `1 level`
-- base additional entry distance from same-side average: `20.0 pips`
-- inactive additional entry distance: `23.5 pips`
-- inactive mode: `gate_false`
-- H1 trend gate: fresh signal and `TrendAllowed=true` only starts a new cycle
-- active cycle中は H1 gate false でもSL / autoTP / virtual level管理を継続する
-- fresh H1 signal かつ `TrendAllowed=false` の間だけ追加entry距離を `23.5 pips` に広げる
-- stale signal では追加距離を広げない
-- weekend position hold: on
-- Monday re-anchor: on
-- SHORT autoTP reference: Ask
-- max entry spread: `9 points`
-- exact-net autoTP: off
-- loss carry: off
-- inactive basket close: off
-- rollover block: off
-- new-extreme filter: off
+## 対象銘柄
 
-## 運用メモ
+- GBPUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0
+- EURUSD: LightGBM / allow_rate=0.50 / spread_add_points=2.0
+- AUDUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0
 
-現在の `s18_params.json` は `live_trading_enabled=true`。
-無効化する場合は `live_trading_enabled=false` に変更してから起動する。
+USDJPY、USDCHF、NZDUSD、CHFJPY、USDCAD は今回の固定basketには入れていません。
 
-state は `state/s18_bot_state.json`、ログは `logs/s18_bot.log`。
-Dockerでは `state/` ディレクトリをmountするため、`state/.gitkeep` でディレクトリ作成を保証し、実state JSONはCentOS側へ手動配置する。
+## 出力
 
-`live_config.py` は認証情報を含むためgitに含めない。
+- bot log: `logs/s18_bot.log`
+- trades: `logs/s18_trades.csv`
+- policy decisions: `logs/s18_policy_decisions.csv`
+- state: `state/s18_<symbol>_bot_state.json`
 
-## 安全確認
+## 起動
 
-ライブ発注テストは行わない。
-構文確認と `--self-test` の純ロジック確認だけを使う。
+Git pull後の反映は既存bot18と同じサービス名で行います。
 
-`live_trading_enabled=true` でbridge/MT5接続へ進む前に、runnerはstate保存可否を検証する。
-保存できない場合はfail-closedで起動停止する。
+```bash
+sudo docker compose up -d --no-deps --force-recreate exness-bot-18
+```
+
+## 確認コマンド
+
+```powershell
+python .\live_s18_bot.py --self-test
+python .\live_s18_bot.py --self-test --policy-self-test
+```
+## 旧stateについて
+
+旧単一GBPUSD版の `state/s18_bot_state.json` は、このbasket実装では参照しません。
+新しいstateは `state/s18_<symbol>_bot_state.json` として銘柄別に作成されます。
+旧bot18の未決済ポジションがMT5上に残っている場合、新実装はmagicが異なるため管理しません。

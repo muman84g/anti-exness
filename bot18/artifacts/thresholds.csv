@@ -1,0 +1,4 @@
+﻿candidate_id,symbol,model,allow_rate,threshold
+bot18_catboost_gbpusd_allow050_spreadplus2_devfixed_20260704,GBPUSD,event_filter_catboost,0.5,0.9536775351807297
+bot18_lgbm_eurusd_allow050_spreadplus2_devfixed_20260704,EURUSD,event_filter_lgbm,0.5,0.9486861654060984
+bot18_catboost_audusd_allow050_spreadplus2_devfixed_20260704,AUDUSD,event_filter_catboost,0.5,0.9536775351807296

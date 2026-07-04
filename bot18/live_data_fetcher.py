@@ -1,7 +1,5 @@
 import pandas as pd
-from datetime import datetime, timezone
-import pytz
-from live_config import MT5_PATH, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
+from live_config import MT5_PATH
 from base_interfaces import BaseDataManager
 from ea_bridge import ea_bridge
 

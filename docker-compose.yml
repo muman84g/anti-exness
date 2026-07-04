@@ -240,7 +240,7 @@ services:
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot17
 
-  # ---- Bot 18 (S18 GBPUSD Snowball anti-grid) ----
+  # ---- Bot 18 (S18 basket replacement) ----
   exness-bot-18:
     image: exness-bot:latest
     container_name: exness-bot-18
@@ -260,6 +260,7 @@ services:
       - ./bot18/base_interfaces.py:/app/bot18/base_interfaces.py:ro
       - ./bot18/ea_bridge.py:/app/bot18/ea_bridge.py:ro
       - ./bot18/s18_params.json:/app/bot18/s18_params.json:ro
+      - ./bot18/artifacts:/app/bot18/artifacts:ro
       - ./bot18/macro_events_2026.json:/app/bot18/macro_events_2026.json:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"

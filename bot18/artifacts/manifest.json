@@ -1,0 +1,53 @@
+{
+  "status": "completed",
+  "stage": "report",
+  "label": "bot18_v2_forward_artifacts",
+  "run_dir": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts",
+  "created_at": "2026-07-04T21:28:52.974649+09:00",
+  "data_classification": "dev_data only for training artifacts; reusable eval metrics copied from fixed summaries",
+  "candidate_json": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\BOT18_V2_FORWARD_CANDIDATES_20260704.json",
+  "candidate_json_sha256": "690fb326dca535354d4db58631f4e16594d19d175e16ad9cf9f8194cb25e0640",
+  "event_features_csv": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_1225_sanity_bot18_fx26_export_accounting_fix_combined\\dev_event_features.csv",
+  "event_features_csv_sha256": "bdc3b1698371375063d59bf91f6e0fb78de4c68454b6c77e21650b88598b3400",
+  "idea_config": "C:\\botter\\backtest\\lightGBM\\template_event_filter\\ideas\\bot_cycle_event_filter_starter.json",
+  "idea_config_sha256": "84342809f041cba19e797499ffbac3712c32d0e8be94018813646e164379bb7a",
+  "selected_feature_count": 20,
+  "candidate_count": 3,
+  "models": {
+    "event_filter_catboost": {
+      "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_catboost.cbm",
+      "model_sha256": "d8320900ff81a85f590fec31c834b785333016a32cba818cf71d9e3cbf9571b9",
+      "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_catboost.csv",
+      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "model_info": {
+        "model_name": "event_filter_catboost",
+        "objective": "Logloss",
+        "depth": 2,
+        "random_state": 42,
+        "catboost_thread_count": 4,
+        "train_rows": 11089,
+        "train_positive_rate": 0.792947966453242,
+        "selected_feature_count": 20
+      }
+    },
+    "event_filter_lgbm": {
+      "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_lgbm.txt",
+      "model_sha256": "33b30fb83ebea9294768c080094f3cfb94eedf9d2106069f164601467ad5019d",
+      "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_lgbm.csv",
+      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "model_info": {
+        "model_name": "event_filter_lgbm",
+        "objective": "binary",
+        "max_depth": 2,
+        "random_state": 42,
+        "lgbm_n_jobs": 4,
+        "train_rows": 11089,
+        "train_positive_rate": 0.792947966453242,
+        "selected_feature_count": 20
+      }
+    }
+  },
+  "self_test_rows": 15,
+  "self_test_max_abs_diff": 0.0,
+  "self_test_pass": true
+}

@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
-"""S18 GBPUSD Snowball anti-grid live bot.
+"""S18 basket Snowball anti-grid live/shadow bot.
 
-This bot uses the copied EA bridge/executor stack and implements the fixed
-GBPUSD policy saved from backtest24:
-- virtual entries with spread gate
-- H1 trend-gated cycle start
-- inactive gate_false add-distance throttling
-- weekend hold with Monday re-anchor
+This runner keeps the bot18 execution model and adds a frozen cycle-start
+event filter for the forward-test basket:
+- GBPUSD CatBoost
+- EURUSD LightGBM
+- AUDUSD CatBoost
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
 import logging
 import math
@@ -36,19 +37,24 @@ ORDER_TYPE_SELL = 1
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "s18_bot.log")
+TRADE_LOG_FILE = os.path.join(LOG_DIR, "s18_trades.csv")
+POLICY_LOG_FILE = os.path.join(LOG_DIR, "s18_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
-STATE_FILE = os.path.join(STATE_DIR, "s18_bot_state.json")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
+ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
     "live_trading_enabled": False,
+    "shadow_forward_enabled": True,
     "symbol": "GBPUSD",
-    "magic": 180018,
-    "comment_prefix": "s18_snowball",
+    "magic": 180218,
+    "comment_prefix": "s18_snow",
+    "strategy_id": "bot18_snowball_fixed_cycle_start_v1",
     "lot": 0.01,
     "distance_pips": 5.0,
     "auto_tp_levels": 1,
+    "min_auto_tp_cycle_profit_usd": 1.00,
     "base_add_distance_pips": 20.0,
     "inactive_add_distance_pips": 23.5,
     "inactive_distance_mode": "gate_false",
@@ -66,6 +72,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "regime_bars": 240,
     "regime_refresh_seconds": 60,
     "drop_latest_h1_bar": True,
+    "m1_timeframe": 1,
+    "m1_bars": 80,
+    "drop_latest_m1_bar": True,
     "efficiency_lookback": 24,
     "min_efficiency_ratio": 0.30,
     "adx_period": 14,
@@ -91,6 +100,30 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "repair_missing_sl_on_sync": True,
     "sl_mismatch_tolerance_pips": 0.2,
     "assume_missing_state_position_is_sl": True,
+    "policy_enabled": True,
+    "policy_fail_closed": True,
+    "policy_artifacts_dir": ARTIFACTS_DIR,
+    "policy_spread_add_points": 2.0,
+    "policy_max_entry_spread_points": 9.0,
+    "policy_registry_file": "candidate_registry.json",
+    "policy_selected_features_file": "selected_features.csv",
+    "profiles": [
+        {
+            "symbol": "GBPUSD",
+            "magic": 180218,
+            "comment_prefix": "s18_gbp",
+        },
+        {
+            "symbol": "EURUSD",
+            "magic": 180219,
+            "comment_prefix": "s18_eur",
+        },
+        {
+            "symbol": "AUDUSD",
+            "magic": 180220,
+            "comment_prefix": "s18_aud",
+        },
+    ],
 }
 
 
@@ -121,6 +154,32 @@ def load_params() -> dict[str, Any]:
     return params
 
 
+def build_profile_params(raw_params: dict[str, Any]) -> list[dict[str, Any]]:
+    profiles = raw_params.get("profiles")
+    if not profiles:
+        return [raw_params.copy()]
+    if not isinstance(profiles, list):
+        raise ValueError("profiles must be a list")
+    profile_params: list[dict[str, Any]] = []
+    base = raw_params.copy()
+    base.pop("profiles", None)
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise ValueError("each profile must be a JSON object")
+        merged = base.copy()
+        merged.update(profile)
+        profile_params.append(merged)
+    return profile_params
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = path + ".tmp"
@@ -128,6 +187,22 @@ def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2, ensure_ascii=True, sort_keys=True)
         handle.write("\n")
     os.replace(tmp_path, path)
+
+
+def append_csv_row(path: str, header: list[str], row: list[Any]) -> bool:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        file_exists = os.path.isfile(path) and os.path.getsize(path) > 0
+        encoding = "utf-8" if file_exists else "utf-8-sig"
+        with open(path, "a", newline="", encoding=encoding) as handle:
+            writer = csv.writer(handle)
+            if not file_exists:
+                writer.writerow(header)
+            writer.writerow(row)
+        return True
+    except Exception as exc:
+        logging.error(f"Failed to append CSV row to {path}: {exc}")
+        return False
 
 
 def direction_name(direction: int) -> str:
@@ -162,6 +237,53 @@ def is_in_weekly_window(
     if start <= end:
         return start <= current < end
     return current >= start or current < end
+
+
+def session_features(decision_time_utc: datetime) -> dict[str, int]:
+    ts = decision_time_utc.astimezone(JST)
+    minutes = ts.hour * 60 + ts.minute
+
+    def minutes_since(start_hour: int) -> int:
+        start = start_hour * 60
+        return int((minutes - start) % (24 * 60))
+
+    return {
+        "session_tokyo_core_jst": int(9 * 60 <= minutes < 15 * 60),
+        "session_london_core_jst": int(16 * 60 <= minutes < 24 * 60),
+        "session_newyork_core_jst": int(minutes < 6 * 60 or minutes >= 21 * 60),
+        "minutes_since_tokyo_open_jst": minutes_since(9),
+        "minutes_since_london_open_jst": minutes_since(16),
+        "minutes_since_newyork_open_jst": minutes_since(21),
+        "day_of_week_jst": int(ts.weekday()),
+        "hour_jst": int(ts.hour),
+        "minute_of_day_jst": int(minutes),
+    }
+
+
+def build_m1_feature_row(m1: pd.DataFrame, pip_size: float) -> dict[str, float]:
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    missing = sorted(required.difference(m1.columns))
+    if missing:
+        raise ValueError(f"M1 bars missing columns: {missing}")
+    if len(m1) < 16:
+        raise ValueError("not enough M1 bars")
+    high = m1["High"].astype(float)
+    low = m1["Low"].astype(float)
+    close = m1["Close"].astype(float)
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    last = m1.iloc[-1]
+    atr = true_range.rolling(14, min_periods=14).mean().div(float(pip_size)).iloc[-1]
+    ret_1 = close.diff().div(float(pip_size)).iloc[-1]
+    return {
+        "m1_atr_pips": float(atr),
+        "m1_range_pips": float((float(last["High"]) - float(last["Low"])) / float(pip_size)),
+        "m1_ret_1_pips": float(ret_1),
+        "m1_tick_volume": float(last["Volume"]),
+    }
 
 
 def build_trend_regime_from_h1(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
@@ -235,18 +357,130 @@ def build_trend_regime_from_h1(bars: pd.DataFrame, params: dict[str, Any]) -> pd
     )
 
 
+class EventFilterPolicy:
+    def __init__(self, params: dict[str, Any]) -> None:
+        self.artifacts_dir = os.path.abspath(str(params.get("policy_artifacts_dir", ARTIFACTS_DIR)))
+        registry_path = os.path.join(self.artifacts_dir, str(params["policy_registry_file"]))
+        features_path = os.path.join(self.artifacts_dir, str(params["policy_selected_features_file"]))
+        with open(registry_path, "r", encoding="utf-8") as handle:
+            self.registry = json.load(handle)
+        self.selected_features = pd.read_csv(features_path, encoding="utf-8-sig")["feature"].astype(str).tolist()
+        self.candidates_by_symbol = {
+            str(candidate["symbol"]).upper(): candidate
+            for candidate in self.registry.get("candidates", [])
+        }
+        self.models: dict[str, Any] = {}
+        self.medians: dict[str, pd.Series] = {}
+        self._load_model_assets("event_filter_catboost")
+        self._load_model_assets("event_filter_lgbm")
+
+    def _asset_path(self, relative_path: str) -> str:
+        return os.path.join(self.artifacts_dir, relative_path)
+
+    def _load_model_assets(self, model_name: str) -> None:
+        model_meta = self.registry.get("models", {}).get(model_name)
+        if not isinstance(model_meta, dict):
+            return
+        if model_name == "event_filter_catboost":
+            model_path = self._asset_path(os.path.join("models", "event_filter_catboost.cbm"))
+            medians_path = self._asset_path("feature_medians_event_filter_catboost.csv")
+            from catboost import CatBoostClassifier  # type: ignore
+
+            model = CatBoostClassifier()
+            model.load_model(model_path)
+        elif model_name == "event_filter_lgbm":
+            model_path = self._asset_path(os.path.join("models", "event_filter_lgbm.txt"))
+            medians_path = self._asset_path("feature_medians_event_filter_lgbm.csv")
+            import lightgbm as lgb  # type: ignore
+
+            model = lgb.Booster(model_file=model_path)
+        else:
+            return
+
+        expected_model_sha = str(model_meta.get("model_sha256", ""))
+        expected_medians_sha = str(model_meta.get("medians_sha256", ""))
+        if expected_model_sha and file_sha256(model_path) != expected_model_sha:
+            raise ValueError(f"{model_name} model sha256 mismatch")
+        if expected_medians_sha and file_sha256(medians_path) != expected_medians_sha:
+            raise ValueError(f"{model_name} medians sha256 mismatch")
+
+        medians_df = pd.read_csv(medians_path, encoding="utf-8-sig")
+        medians = pd.Series(
+            pd.to_numeric(medians_df["median"], errors="coerce").to_numpy(dtype="float64"),
+            index=medians_df["feature"].astype(str),
+        )
+        self.models[model_name] = model
+        self.medians[model_name] = medians
+
+    def candidate_for_symbol(self, symbol: str) -> dict[str, Any] | None:
+        return self.candidates_by_symbol.get(str(symbol).upper())
+
+    def predict(self, symbol: str, features: dict[str, Any]) -> dict[str, Any]:
+        candidate = self.candidate_for_symbol(symbol)
+        if candidate is None:
+            raise ValueError(f"policy candidate missing for symbol={symbol}")
+        model_name = str(candidate["model"])
+        if model_name not in self.models:
+            raise ValueError(f"policy model not loaded: {model_name}")
+        medians = self.medians[model_name]
+        values: list[float] = []
+        missing: list[str] = []
+        for feature in self.selected_features:
+            raw_value = features.get(feature, np.nan)
+            value = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
+            if pd.isna(value):
+                missing.append(feature)
+                value = medians.get(feature, 0.0)
+            values.append(float(value))
+        matrix = pd.DataFrame([values], columns=self.selected_features)
+        if model_name == "event_filter_catboost":
+            pred_proba = float(self.models[model_name].predict_proba(matrix)[:, 1][0])
+        elif model_name == "event_filter_lgbm":
+            pred_proba = float(self.models[model_name].predict(matrix)[0])
+        else:
+            raise ValueError(f"unsupported policy model: {model_name}")
+        threshold = float(candidate["threshold"])
+        return {
+            "allow": bool(pred_proba >= threshold),
+            "candidate_id": str(candidate["candidate_id"]),
+            "model": model_name,
+            "threshold": threshold,
+            "pred_proba": pred_proba,
+            "missing_features": "|".join(missing),
+        }
+
+    def self_test(self) -> None:
+        for symbol, candidate in sorted(self.candidates_by_symbol.items()):
+            model_name = str(candidate["model"])
+            medians = self.medians[model_name]
+            features = {feature: float(medians.get(feature, 0.0)) for feature in self.selected_features}
+            result = self.predict(symbol, features)
+            assert "pred_proba" in result
+
+
 class S18SnowballBot:
-    def __init__(self, params: dict[str, Any] | None = None) -> None:
+    def __init__(self, params: dict[str, Any] | None = None, policy: EventFilterPolicy | None = None) -> None:
         self.params = DEFAULT_PARAMS.copy()
         self.params.update(params or load_params())
-        self.symbol = str(self.params["symbol"])
+        self.symbol = str(self.params["symbol"]).upper()
         self.magic = int(self.params["magic"])
+        safe_symbol = "".join(ch.lower() for ch in self.symbol if ch.isalnum())
+        self.state_file = str(
+            self.params.get(
+                "state_file",
+                os.path.join(STATE_DIR, f"s18_{safe_symbol}_bot_state.json"),
+            )
+        )
+        self.trade_log_file = str(self.params.get("trade_log_file", TRADE_LOG_FILE))
+        self.policy_log_file = str(self.params.get("policy_log_file", POLICY_LOG_FILE))
+        self.policy = policy
         self.dm = None
         self.executor = None
         self.state = self.load_state()
         self.last_regime_fetch_epoch = 0.0
         self.cached_regime = self.default_regime()
         self.last_status_log_epoch = 0.0
+        self.last_auto_tp_profit_guard_log_epoch = 0.0
         self.sync_closed_count = 0
 
     @property
@@ -268,7 +502,12 @@ class S18SnowballBot:
         return {
             "entry_allowed": False,
             "signal_fresh": False,
+            "trend_allowed_raw": False,
             "trend_direction": 0,
+            "efficiency_ratio": 0.0,
+            "adx": 0.0,
+            "displacement_atr": 0.0,
+            "signal_age_minutes": 999999.0,
             "reason": "not_loaded",
             "signal_time": None,
         }
@@ -276,7 +515,7 @@ class S18SnowballBot:
     def default_state(self) -> dict[str, Any]:
         return {
             "version": 1,
-            "strategy": "s18_snowball_antigrid_inactiveadd23p5_gatefalse",
+            "strategy": "s18_snowball_cycle_start_event_filter",
             "symbol": self.symbol,
             "magic": self.magic,
             "cycle_id": 0,
@@ -293,13 +532,14 @@ class S18SnowballBot:
             "sync_block_new_entries": False,
             "sync_block_reason": None,
             "last_regime": self.default_regime(),
+            "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
         }
 
     def load_state(self) -> dict[str, Any]:
-        if not os.path.exists(STATE_FILE):
+        if not os.path.exists(self.state_file):
             return self.default_state()
-        with open(STATE_FILE, "r", encoding="utf-8") as handle:
+        with open(self.state_file, "r", encoding="utf-8") as handle:
             state = json.load(handle)
         if state.get("symbol") != self.symbol or int(state.get("magic", 0)) != self.magic:
             raise ValueError("State symbol/magic does not match s18_params.json")
@@ -310,7 +550,7 @@ class S18SnowballBot:
     def save_state(self) -> None:
         self.recalculate_position_counts()
         self.state["updated_at_jst"] = jst_now().isoformat()
-        atomic_write_json(STATE_FILE, self.state)
+        atomic_write_json(self.state_file, self.state)
 
     def recalculate_position_counts(self) -> None:
         long_positions = [p for p in self.state["positions"] if p["direction"] == "LONG"]
@@ -319,6 +559,68 @@ class S18SnowballBot:
         self.state["short_count"] = len(short_positions)
         self.state["long_entry_sum"] = sum(float(p["entry"]) for p in long_positions)
         self.state["short_entry_sum"] = sum(float(p["entry"]) for p in short_positions)
+
+    def log_trade_csv(
+        self,
+        action: str,
+        ticket: int,
+        direction: str = "",
+        lot_size: float | str = "",
+        price: float | str | None = "",
+        stop_loss: float | str | None = "",
+        pnl: float | str | None = "",
+        reason: str = "",
+        source_order_id: int | str | None = "",
+        comment: str = "",
+    ) -> bool:
+        header = [
+            "Timestamp_JST",
+            "Action",
+            "Ticket",
+            "Symbol",
+            "Direction",
+            "LotSize",
+            "Price",
+            "StopLoss",
+            "PnL",
+            "Reason",
+            "CycleId",
+            "SourceOrderId",
+            "Comment",
+        ]
+
+        def clean(value: Any) -> Any:
+            return "" if value is None else value
+
+        row = [
+            jst_now().strftime("%Y-%m-%d %H:%M:%S"),
+            action,
+            int(ticket),
+            self.symbol,
+            direction,
+            clean(lot_size),
+            clean(price),
+            clean(stop_loss),
+            clean(pnl),
+            reason,
+            int(self.state.get("cycle_id", 0)),
+            clean(source_order_id),
+            comment,
+        ]
+
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            file_exists = os.path.isfile(self.trade_log_file) and os.path.getsize(self.trade_log_file) > 0
+            encoding = "utf-8" if file_exists else "utf-8-sig"
+            with open(self.trade_log_file, mode="a", newline="", encoding=encoding) as handle:
+                writer = csv.writer(handle)
+                if not file_exists:
+                    writer.writerow(header)
+                writer.writerow(row)
+            return True
+        except Exception as exc:
+            logging.error(f"Failed to write trade log to CSV: {exc}")
+            return False
 
     def ensure_bridge(self) -> None:
         if self.dm is not None and self.executor is not None:
@@ -385,6 +687,7 @@ class S18SnowballBot:
             else:
                 closed = h1.copy()
                 signal_time = h1.index[-1]
+                age_minutes = 0.0
                 signal_fresh = True
             regime = build_trend_regime_from_h1(closed, self.params)
             if regime.empty:
@@ -399,6 +702,7 @@ class S18SnowballBot:
                 "efficiency_ratio": float(last.get("EfficiencyRatio", 0.0) or 0.0),
                 "adx": float(last.get("ADX", 0.0) or 0.0),
                 "displacement_atr": float(last.get("DisplacementATR", 0.0) or 0.0),
+                "signal_age_minutes": float(age_minutes),
                 "signal_time": str(signal_time),
                 "reason": "ok",
             }
@@ -408,6 +712,117 @@ class S18SnowballBot:
             result["reason"] = str(exc)
         self.cached_regime = result
         self.state["last_regime"] = result
+        return result
+
+    def get_m1_policy_features(self) -> dict[str, float]:
+        self.ensure_bridge()
+        m1 = self.dm.get_historical_data(
+            self.symbol,
+            int(self.params["m1_timeframe"]),
+            int(self.params["m1_bars"]),
+        )
+        if m1 is None or len(m1) < 16:
+            raise ValueError("not enough M1 bars")
+        m1 = m1.sort_index()
+        if bool(self.params.get("drop_latest_m1_bar", True)):
+            if len(m1) < 17:
+                raise ValueError("not enough M1 bars after dropping current bar")
+            m1 = m1.iloc[:-1].copy()
+        return build_m1_feature_row(m1, self.pip_size)
+
+    def build_cycle_start_event_features(
+        self,
+        tick: dict[str, Any],
+        regime: dict[str, Any],
+    ) -> dict[str, Any]:
+        decision_time_utc = datetime.now(timezone.utc)
+        effective_spread_points = float(tick["spread_points"]) + float(self.params["policy_spread_add_points"])
+        features: dict[str, Any] = {
+            "spread_gate_pass": int(
+                effective_spread_points <= float(self.params["policy_max_entry_spread_points"]) + 1e-9
+            ),
+            "spread_points_decision": effective_spread_points,
+            "h1_signal_age_minutes": float(regime.get("signal_age_minutes", 999999.0) or 999999.0),
+            "h1_adx": float(regime.get("adx", 0.0) or 0.0),
+            "h1_efficiency_ratio": float(regime.get("efficiency_ratio", 0.0) or 0.0),
+            "h1_displacement_atr": float(regime.get("displacement_atr", 0.0) or 0.0),
+            "h1_trend_direction": int(regime.get("trend_direction", 0) or 0),
+            "bid_decision": float(tick["bid"]),
+        }
+        features.update(self.get_m1_policy_features())
+        features.update(session_features(decision_time_utc))
+        return features
+
+    def log_policy_decision(self, decision: dict[str, Any]) -> None:
+        header = [
+            "Timestamp_JST",
+            "Symbol",
+            "CandidateId",
+            "Model",
+            "Allowed",
+            "PredProba",
+            "Threshold",
+            "Reason",
+            "ActualSpreadPoints",
+            "EffectiveSpreadPoints",
+            "H1ADX",
+            "H1AgeMinutes",
+            "M1ATRPips",
+        ]
+        row = [
+            jst_now().strftime("%Y-%m-%d %H:%M:%S"),
+            self.symbol,
+            decision.get("candidate_id", ""),
+            decision.get("model", ""),
+            int(bool(decision.get("allow", False))),
+            decision.get("pred_proba", ""),
+            decision.get("threshold", ""),
+            decision.get("reason", ""),
+            decision.get("actual_spread_points", ""),
+            decision.get("spread_points_decision", ""),
+            decision.get("h1_adx", ""),
+            decision.get("h1_signal_age_minutes", ""),
+            decision.get("m1_atr_pips", ""),
+        ]
+        append_csv_row(self.policy_log_file, header, row)
+
+    def evaluate_cycle_start_policy(
+        self,
+        tick: dict[str, Any],
+        regime: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not bool(self.params.get("policy_enabled", True)):
+            return {"allow": True, "reason": "policy_disabled"}
+        if self.policy is None:
+            reason = "policy_not_loaded"
+            return {"allow": not bool(self.params.get("policy_fail_closed", True)), "reason": reason}
+        try:
+            features = self.build_cycle_start_event_features(tick, regime)
+            result = self.policy.predict(self.symbol, features)
+            result.update(features)
+            result["reason"] = "threshold_pass" if bool(result["allow"]) else "threshold_block"
+            result["actual_spread_points"] = float(tick["spread_points"])
+        except Exception as exc:
+            result = {
+                "allow": not bool(self.params.get("policy_fail_closed", True)),
+                "reason": f"policy_error:{exc}",
+                "actual_spread_points": float(tick.get("spread_points", 0.0)),
+            }
+        self.state["last_policy_decision"] = {
+            key: (float(value) if isinstance(value, np.floating) else value)
+            for key, value in result.items()
+            if key in {
+                "allow",
+                "candidate_id",
+                "model",
+                "threshold",
+                "pred_proba",
+                "reason",
+                "actual_spread_points",
+                "spread_points_decision",
+            }
+        }
+        self.log_policy_decision(result)
         return result
 
     def is_weekend_entry_blocked(self) -> bool:
@@ -481,8 +896,21 @@ class S18SnowballBot:
         self.state["sync_block_reason"] = reason
         logging.error(f"New entries blocked: {reason}")
 
+    def clear_new_entry_block_if_reason(self, reason: str) -> None:
+        if not self.state.get("sync_block_new_entries"):
+            return
+        if self.state.get("sync_block_reason") != reason:
+            return
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        logging.warning(f"New-entry block cleared after recovery: {reason}")
+
     def clear_virtual_orders(self) -> None:
         self.state["virtual_orders"] = []
+
+    def clear_auto_tp(self) -> None:
+        self.state["auto_tp_price"] = None
+        self.state["estimated_auto_tp_profit_usd"] = 0.0
 
     def remove_position_by_ticket(self, ticket: int) -> dict[str, Any] | None:
         for index, position in enumerate(list(self.state["positions"])):
@@ -521,6 +949,18 @@ class S18SnowballBot:
                     exit_price = float(position["stop_loss"])
                     pnl = self.estimate_position_pnl(position, exit_price, tick["info"])
                     self.state["cycle_realized_usd"] = float(self.state["cycle_realized_usd"]) + pnl
+                    self.log_trade_csv(
+                        "EXIT_ASSUMED_SERVER_SL",
+                        ticket,
+                        direction=str(position.get("direction", "")),
+                        lot_size=float(position.get("volume", self.params["lot"])),
+                        price=self.price(exit_price),
+                        stop_loss=self.price(exit_price),
+                        pnl=pnl,
+                        reason="position_missing_on_mt5_assumed_server_sl",
+                        source_order_id=position.get("source_order_id", ""),
+                        comment=str(position.get("comment", "")),
+                    )
                     self.remove_position_by_ticket(ticket)
                     self.sync_closed_count += 1
                     logging.warning(
@@ -539,6 +979,9 @@ class S18SnowballBot:
                     self.block_new_entries(f"failed to repair SL for ticket {ticket}")
                     return False
         self.recalculate_position_counts()
+        if not self.state["positions"]:
+            self.clear_auto_tp()
+        self.clear_new_entry_block_if_reason("position sync failed")
         return True
 
     def process_stops(self, bid: float, ask: float, info: Any) -> int:
@@ -555,15 +998,43 @@ class S18SnowballBot:
             ticket = int(position["ticket"])
             result = self.executor.close_position(ticket, deviation=int(self.params["deviation_points"]))
             if result:
+                close_price = float(getattr(result, "close_price", 0.0) or stop_loss)
                 self.remove_position_by_ticket(ticket)
                 pnl = float(getattr(result, "profit", 0.0) or 0.0)
                 self.state["cycle_realized_usd"] = float(self.state["cycle_realized_usd"]) + pnl
+                self.log_trade_csv(
+                    "EXIT_SL",
+                    ticket,
+                    direction=str(position.get("direction", "")),
+                    lot_size=float(getattr(result, "lot", 0.0) or position.get("volume", self.params["lot"])),
+                    price=self.price(close_price),
+                    stop_loss=self.price(stop_loss),
+                    pnl=pnl,
+                    reason="local_stop_crossed",
+                    source_order_id=position.get("source_order_id", ""),
+                    comment=str(position.get("comment", "")),
+                )
                 logging.info(f"SL close ticket={ticket} pnl={pnl:.2f}")
                 closed += 1
             else:
+                status = getattr(result, "status", "UNKNOWN")
+                self.log_trade_csv(
+                    "EXIT_FAIL_SL",
+                    ticket,
+                    direction=str(position.get("direction", "")),
+                    lot_size=float(position.get("volume", self.params["lot"])),
+                    price="",
+                    stop_loss=self.price(stop_loss),
+                    pnl="",
+                    reason=f"SL close failed: {status}",
+                    source_order_id=position.get("source_order_id", ""),
+                    comment=str(position.get("comment", "")),
+                )
                 self.block_new_entries(f"SL close failed for ticket {ticket}: {getattr(result, 'status', 'UNKNOWN')}")
                 break
         self.recalculate_position_counts()
+        if not self.state["positions"]:
+            self.clear_auto_tp()
         return closed
 
     def inactive_distance_applies(self, regime: dict[str, Any]) -> bool:
@@ -595,6 +1066,8 @@ class S18SnowballBot:
         return True
 
     def fill_virtual_orders(self, tick: dict[str, Any], regime: dict[str, Any]) -> int:
+        if not bool(self.params.get("live_trading_enabled", False)):
+            return 0
         if self.state.get("sync_block_new_entries"):
             return 0
         if tick["spread_points"] > float(self.params["max_entry_spread_points"]) + 1e-9:
@@ -674,6 +1147,18 @@ class S18SnowballBot:
             }
         )
         self.recalculate_position_counts()
+        self.log_trade_csv(
+            "ENTRY",
+            int(ticket),
+            direction=direction_name(direction),
+            lot_size=lot,
+            price=self.price(entry),
+            stop_loss=self.price(float(order["stop_loss"])),
+            pnl="",
+            reason="virtual_order_fill",
+            source_order_id=int(order["order_id"]),
+            comment=comment,
+        )
         logging.info(
             f"Opened {direction_name(direction)} ticket={int(ticket)} entry={self.price(entry)} sl={self.price(float(order['stop_loss']))}"
         )
@@ -787,16 +1272,65 @@ class S18SnowballBot:
             level < 0 and reference_price <= float(auto_tp)
         )
 
-    def complete_cycle(self, bid: float, ask: float) -> bool:
+    def auto_tp_profit_guard_passed(self, bid: float, ask: float, info: Any | None = None) -> bool:
+        minimum_profit = float(self.params.get("min_auto_tp_cycle_profit_usd", 0.0) or 0.0)
+        if minimum_profit <= 0.0:
+            return True
+        cycle_equity = self.cycle_equity_usd(bid, ask, info)
+        if cycle_equity + 1e-9 >= minimum_profit:
+            return True
+        now = time.time()
+        if now - self.last_auto_tp_profit_guard_log_epoch >= float(self.params["status_log_interval_seconds"]):
+            logging.info(
+                "autoTP crossed but cycle equity %.2f USD is below minimum %.2f USD; hold positions",
+                cycle_equity,
+                minimum_profit,
+            )
+            self.last_auto_tp_profit_guard_log_epoch = now
+        return False
+
+    def complete_cycle(self, bid: float, ask: float, info: Any | None = None) -> bool:
+        if not self.auto_tp_profit_guard_passed(bid, ask, info):
+            return False
         failures = []
         for position in list(self.state["positions"]):
             ticket = int(position["ticket"])
             result = self.executor.close_position(ticket, deviation=int(self.params["deviation_points"]))
             if result:
+                close_price = float(
+                    getattr(result, "close_price", 0.0)
+                    or (bid if position["direction"] == "LONG" else ask)
+                )
+                pnl = float(getattr(result, "profit", 0.0) or 0.0)
+                self.log_trade_csv(
+                    "EXIT_AUTO_TP",
+                    ticket,
+                    direction=str(position.get("direction", "")),
+                    lot_size=float(getattr(result, "lot", 0.0) or position.get("volume", self.params["lot"])),
+                    price=self.price(close_price),
+                    stop_loss=self.price(float(position.get("stop_loss", 0.0) or 0.0)),
+                    pnl=pnl,
+                    reason="auto_tp",
+                    source_order_id=position.get("source_order_id", ""),
+                    comment=str(position.get("comment", "")),
+                )
                 self.remove_position_by_ticket(ticket)
-                self.state["cycle_realized_usd"] = float(self.state["cycle_realized_usd"]) + float(getattr(result, "profit", 0.0) or 0.0)
+                self.state["cycle_realized_usd"] = float(self.state["cycle_realized_usd"]) + pnl
             else:
-                failures.append((ticket, getattr(result, "status", "UNKNOWN")))
+                status = getattr(result, "status", "UNKNOWN")
+                self.log_trade_csv(
+                    "EXIT_FAIL_AUTO_TP",
+                    ticket,
+                    direction=str(position.get("direction", "")),
+                    lot_size=float(position.get("volume", self.params["lot"])),
+                    price="",
+                    stop_loss=self.price(float(position.get("stop_loss", 0.0) or 0.0)),
+                    pnl="",
+                    reason=f"autoTP close failed: {status}",
+                    source_order_id=position.get("source_order_id", ""),
+                    comment=str(position.get("comment", "")),
+                )
+                failures.append((ticket, status))
         if failures:
             self.block_new_entries(f"autoTP close failures: {failures}")
             return False
@@ -821,7 +1355,7 @@ class S18SnowballBot:
             if due:
                 self.refresh_auto_tp(tick["bid"], tick["ask"], tick["info"])
             if self.auto_tp_crossed(tick["bid"], tick["ask"]):
-                self.complete_cycle(tick["bid"], tick["ask"])
+                self.complete_cycle(tick["bid"], tick["ask"], tick["info"])
 
     def auto_tp_refresh_due(self) -> bool:
         last = self.state.get("last_break_even_refresh_epoch")
@@ -835,6 +1369,12 @@ class S18SnowballBot:
             return
         regime = self.get_regime()
         if not self.sync_live_positions(tick):
+            self.save_state()
+            return
+        if not bool(self.params.get("live_trading_enabled", False)) and (
+            self.state["positions"] or self.state["virtual_orders"]
+        ):
+            logging.critical("S18 shadow mode requires flat state; refusing to manage positions or virtual orders")
             self.save_state()
             return
 
@@ -869,9 +1409,29 @@ class S18SnowballBot:
                 self.log_status(tick, regime)
                 self.save_state()
                 return
+            policy_decision = self.evaluate_cycle_start_policy(tick, regime)
+            if not bool(policy_decision.get("allow", False)):
+                logging.info(
+                    "S18 policy blocked cycle start: "
+                    f"symbol={self.symbol} reason={policy_decision.get('reason')} "
+                    f"proba={policy_decision.get('pred_proba')} threshold={policy_decision.get('threshold')}"
+                )
+                self.log_status(tick, regime)
+                self.save_state()
+                return
+            if not bool(self.params.get("live_trading_enabled", False)):
+                logging.info(
+                    "S18 shadow policy allowed cycle start but live_trading_enabled=false; "
+                    f"symbol={self.symbol} proba={policy_decision.get('pred_proba')} "
+                    f"threshold={policy_decision.get('threshold')}"
+                )
+                self.log_status(tick, regime)
+                self.save_state()
+                return
             self.start_cycle(tick["bid"])
 
-        stop_count = self.process_stops(tick["bid"], tick["ask"], tick["info"])
+        stop_count = int(self.sync_closed_count)
+        stop_count += self.process_stops(tick["bid"], tick["ask"], tick["info"])
         self.fill_virtual_orders(tick, regime)
         immediate_stops = self.process_stops(tick["bid"], tick["ask"], tick["info"])
         stop_count += immediate_stops
@@ -879,7 +1439,7 @@ class S18SnowballBot:
         if self.state["positions"] and (stop_count or self.auto_tp_refresh_due() or self.state.get("auto_tp_price") is None):
             self.refresh_auto_tp(tick["bid"], tick["ask"], tick["info"])
         if self.state["positions"] and self.auto_tp_crossed(tick["bid"], tick["ask"]):
-            self.complete_cycle(tick["bid"], tick["ask"])
+            self.complete_cycle(tick["bid"], tick["ask"], tick["info"])
         self.log_status(tick, regime)
         self.save_state()
 
@@ -888,20 +1448,24 @@ class S18SnowballBot:
         if now - self.last_status_log_epoch < float(self.params["status_log_interval_seconds"]):
             return
         self.last_status_log_epoch = now
+        last_policy = self.state.get("last_policy_decision") or {}
         logging.info(
             "S18 status: "
             f"bid={tick['bid']:.5f} ask={tick['ask']:.5f} spread_points={tick['spread_points']:.1f} "
             f"cycle={self.state['cycle_id']} pos={len(self.state['positions'])} orders={len(self.state['virtual_orders'])} "
             f"auto_tp={self.state.get('auto_tp_price')} regime_allowed={regime.get('entry_allowed')} "
-            f"fresh={regime.get('signal_fresh')} block={self.state.get('sync_block_new_entries')}"
+            f"fresh={regime.get('signal_fresh')} block={self.state.get('sync_block_new_entries')} "
+            f"policy_allowed={last_policy.get('allow')} policy_reason={last_policy.get('reason')}"
         )
 
     def run_forever(self) -> None:
         if not bool(self.params.get("enabled", True)):
             logging.warning("s18 is disabled by params enabled=false")
             return
-        if not bool(self.params.get("live_trading_enabled", False)):
-            logging.warning("s18 live_trading_enabled=false; idle loop only, no bridge connection and no orders")
+        live_trading_enabled = bool(self.params.get("live_trading_enabled", False))
+        shadow_forward_enabled = bool(self.params.get("shadow_forward_enabled", False))
+        if not live_trading_enabled and not shadow_forward_enabled:
+            logging.warning("s18 live_trading_enabled=false and shadow_forward_enabled=false; idle loop only")
             while True:
                 time.sleep(max(10.0, float(self.params["status_log_interval_seconds"])))
         try:
@@ -914,6 +1478,8 @@ class S18SnowballBot:
             raise RuntimeError("State persistence is unavailable") from exc
         if not self.connect():
             raise RuntimeError("Failed to connect to MT5 EA bridge")
+        if not live_trading_enabled:
+            logging.warning("S18 shadow forward mode: bridge connected, policy decisions logged, no orders")
         logging.info(
             "S18 started: "
             f"symbol={self.symbol} magic={self.magic} lot={self.params['lot']} "
@@ -961,19 +1527,84 @@ class S18SnowballBot:
             1.25285,
             {"entry_allowed": False, "signal_fresh": True},
         )
+        assert not self.auto_tp_profit_guard_passed(1.25099, 1.25108)
+        assert self.auto_tp_profit_guard_passed(1.26000, 1.26009)
         logging.info("s18 self-test passed")
 
 
+class S18BasketRunner:
+    def __init__(self, raw_params: dict[str, Any] | None = None) -> None:
+        self.raw_params = raw_params or load_params()
+        self.policy = EventFilterPolicy(self.raw_params) if bool(self.raw_params.get("policy_enabled", True)) else None
+        self.bots = [
+            S18SnowballBot(profile_params, policy=self.policy)
+            for profile_params in build_profile_params(self.raw_params)
+        ]
+
+    def self_test(self, include_policy: bool = False) -> None:
+        for bot in self.bots:
+            bot.self_test()
+        if include_policy and self.policy is not None:
+            self.policy.self_test()
+        logging.info("s18 basket self-test passed symbols=%s", [bot.symbol for bot in self.bots])
+
+    def run_forever(self) -> None:
+        if not bool(self.raw_params.get("enabled", True)):
+            logging.warning("s18 basket is disabled by params enabled=false")
+            return
+        live_trading_enabled = bool(self.raw_params.get("live_trading_enabled", False))
+        shadow_forward_enabled = bool(self.raw_params.get("shadow_forward_enabled", False))
+        if not live_trading_enabled and not shadow_forward_enabled:
+            logging.warning("s18 basket live_trading_enabled=false and shadow_forward_enabled=false; idle loop only")
+            while True:
+                time.sleep(max(10.0, float(self.raw_params["status_log_interval_seconds"])))
+        for bot in self.bots:
+            try:
+                bot.save_state()
+            except Exception as exc:
+                logging.critical(
+                    "State persistence is unavailable for %s. Refusing to connect to bridge: %s",
+                    bot.symbol,
+                    exc,
+                )
+                raise RuntimeError(f"State persistence is unavailable for {bot.symbol}") from exc
+            if not bot.connect():
+                raise RuntimeError(f"Failed to connect to MT5 EA bridge for {bot.symbol}")
+        if not live_trading_enabled:
+            logging.warning("S18 basket shadow forward mode: policy decisions logged, no orders")
+        logging.info(
+            "S18 basket started: symbols=%s live_trading_enabled=%s shadow_forward_enabled=%s",
+            [bot.symbol for bot in self.bots],
+            live_trading_enabled,
+            shadow_forward_enabled,
+        )
+        sleep_seconds = min(float(bot.params["poll_interval_seconds"]) for bot in self.bots)
+        while True:
+            for bot in self.bots:
+                try:
+                    bot.run_once()
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    logging.exception("Unhandled s18 basket loop error for %s", bot.symbol)
+            time.sleep(sleep_seconds)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="S18 GBPUSD Snowball anti-grid live bot")
+    parser = argparse.ArgumentParser(description="S18 basket Snowball event-filter live/shadow bot")
     parser.add_argument("--self-test", action="store_true", help="run pure logic checks without bridge connection")
+    parser.add_argument("--policy-self-test", action="store_true", help="also load frozen ML artifacts and test predict")
     args = parser.parse_args()
     configure_logging()
-    bot = S18SnowballBot()
+    raw_params = load_params()
+    if args.self_test and not args.policy_self_test:
+        raw_params = raw_params.copy()
+        raw_params["policy_enabled"] = False
+    runner = S18BasketRunner(raw_params)
     if args.self_test:
-        bot.self_test()
+        runner.self_test(include_policy=bool(args.policy_self_test))
         return 0
-    bot.run_forever()
+    runner.run_forever()
     return 0
 
 
