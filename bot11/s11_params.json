@@ -18,6 +18,8 @@
     "use_sl": false,
     "use_tp": false,
     "use_be": false,
+    "use_entry_pct_limit_close": true,
+    "entry_pct_limit_close_pct": 0.01,
     "multiplier": 50.0,
     "use_symbol_trade_value": true,
     "max_lot_limit": 2.0,

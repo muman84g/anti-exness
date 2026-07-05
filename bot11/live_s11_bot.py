@@ -77,6 +77,8 @@ DEFAULT_PARAMS = {
     'use_sl': False,
     'use_tp': False,
     'use_be': False,               # 建値移動 (BE) の有無
+    'use_entry_pct_limit_close': True,
+    'entry_pct_limit_close_pct': 0.01,
     'multiplier': 50.0,            # US500m コントラクトサイズ
     'use_symbol_trade_value': True, # Prefer broker tick value/tick size for risk sizing
     'max_lot_limit': 2.0,           # Hard cap for live lot sizing
@@ -120,6 +122,16 @@ PARAMS = load_params()
 # ============================================================
 # 時間判定ヘルパー
 # ============================================================
+def get_lot_multiplier_usd(symbol, price, usdjpy_rate=150.0):
+    if symbol == 'JP225m':
+        return 1.0 / usdjpy_rate
+    if symbol in ['USTECm', 'US500m', 'US30m']:
+        return 1.0
+    if symbol == 'USOILm':
+        return 100.0
+    return 100000.0
+
+
 def is_at_or_after_time(dt_jst, hour, minute):
     return dt_jst.hour > hour or (dt_jst.hour == hour and dt_jst.minute >= minute)
 
@@ -202,6 +214,7 @@ class s11TradingBot:
             "exit_type", "mean_reversion_mode", "corr_window", "history_bars",
             "max_hold_bars", "sl_mult", "tp_mult", "tp_atr_mult",
             "use_protective_exits", "use_time_exit", "use_sl", "use_tp", "use_be",
+            "use_entry_pct_limit_close", "entry_pct_limit_close_pct",
             "spread_pct", "max_lot_limit", "sync_on_start_without_entry",
             "max_completed_bar_age_minutes", "max_completed_bar_future_minutes",
             "weekend_entry_block_hour", "weekend_entry_block_minute",
@@ -277,6 +290,44 @@ class s11TradingBot:
             self.write_trade_log_row(csv_file, header, row)
         except Exception as e:
             logging.error(f"Failed to write trade log to CSV: {e}")
+
+    def calculate_entry_pct_limit_close_price(self, direction, entry_price, digits=None):
+        if not PARAMS.get("use_entry_pct_limit_close", False):
+            return 0.0
+        pct = float(PARAMS.get("entry_pct_limit_close_pct", 0.0) or 0.0)
+        if pct <= 0 or entry_price <= 0:
+            return 0.0
+        price = entry_price * (1.0 + pct) if direction == "LONG" else entry_price * (1.0 - pct)
+        if digits is not None:
+            return round(price, int(digits))
+        return price
+
+    def ensure_entry_pct_limit_close(self, symbol, ticket, pos, info):
+        target_tp = self.calculate_entry_pct_limit_close_price(
+            pos.get("direction", ""),
+            float(pos.get("entry_price", 0.0) or 0.0),
+            getattr(info, "digits", 5),
+        )
+        if target_tp <= 0:
+            return False
+
+        point = float(getattr(info, "point", 0.0) or 0.0)
+        current_tp = float(pos.get("entry_pct_limit_close_price") or pos.get("tp_price") or 0.0)
+        if current_tp and abs(current_tp - target_tp) <= max(point, 1e-8):
+            return True
+
+        sl_price = float(pos.get("sl_price", 0.0) or 0.0)
+        if self.executor.modify_position_sl_tp(ticket, sl_price, target_tp):
+            pos["tp_price"] = float(target_tp)
+            pos["entry_pct_limit_close_price"] = float(target_tp)
+            pos["entry_pct_limit_close_pct"] = float(PARAMS.get("entry_pct_limit_close_pct", 0.0) or 0.0)
+            pos["entry_pct_limit_close_applied"] = True
+            self.save_state()
+            logging.info(f"[{symbol}] Entry-percent limit close TP set to {target_tp}.")
+            return True
+
+        logging.warning(f"[{symbol}] Failed to set entry-percent limit close TP for ticket {ticket}.")
+        return False
 
     def record_close_failure(self, symbol, ticket, reason, direction, lot_size):
         signature = f"{ticket}:{reason}"
@@ -470,6 +521,16 @@ class s11TradingBot:
         entry_time_str = pos["entry_time"]
         entry_time = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
 
+        entry_pct_limit_tp = 0.0
+        if PARAMS.get("use_entry_pct_limit_close", False):
+            if not self.ensure_entry_pct_limit_close(symbol, ticket, pos, info):
+                if self.executor.confirm_position_absent(ticket) is True:
+                    self.close_and_cleanup(symbol, ticket, "ENTRY_PCT_LIMIT_ABSENT")
+                    return
+            entry_pct_limit_tp = float(pos.get("entry_pct_limit_close_price") or pos.get("tp_price") or 0.0)
+            sl_price = pos["sl_price"]
+            tp_price = pos["tp_price"]
+
         # A. 週末強制決済
         if is_weekend_force_close_jst(now_jst):
             logging.info(f"[{symbol}] Weekend close triggered JST={now_jst.strftime('%Y-%m-%d %H:%M:%S')}. Closing ticket {ticket}.")
@@ -483,6 +544,16 @@ class s11TradingBot:
             logging.info(f"[{symbol}] Time close triggered. Closing ticket {ticket}.")
             self.close_and_cleanup(symbol, ticket, "TIME")
             return
+
+        if entry_pct_limit_tp:
+            if direction == "LONG" and current_bid >= entry_pct_limit_tp:
+                logging.info(f"[{symbol}] Entry-percent limit close reached for LONG. Closing ticket {ticket}.")
+                self.close_and_cleanup(symbol, ticket, "ENTRY_PCT_LIMIT")
+                return
+            if direction == "SHORT" and current_ask <= entry_pct_limit_tp:
+                logging.info(f"[{symbol}] Entry-percent limit close reached for SHORT. Closing ticket {ticket}.")
+                self.close_and_cleanup(symbol, ticket, "ENTRY_PCT_LIMIT")
+                return
 
         # C. リアルタイム SL/TP 監視 & 建値移動 (FIXED_RR)
         use_protective = PARAMS.get('use_protective_exits', True) or PARAMS.get('exit_type') == "FIXED_RR"
@@ -646,6 +717,8 @@ class s11TradingBot:
 
         current_ask = info.ask
         current_bid = info.bid
+        expected_entry_price = current_ask if direction == "LONG" else current_bid
+        digits = getattr(info, "digits", 5)
 
         # ロット計算用損切り幅 sl_d (標準 1.0 ATR)
         sl_d = max(PARAMS['sl_mult'] * atr, 0.0001)
@@ -656,7 +729,7 @@ class s11TradingBot:
         # ロット計算
         price_unit_value = getattr(info, "price_unit_value", 0.0)
         if not PARAMS.get('use_symbol_trade_value', True) or price_unit_value <= 0:
-            price_unit_value = PARAMS['multiplier']
+            price_unit_value = get_lot_multiplier_usd(symbol, expected_entry_price)
 
         sl_usd_per_lot = sl_d * price_unit_value
         if sl_usd_per_lot > 0:
@@ -671,7 +744,6 @@ class s11TradingBot:
 
         order_type = ORDER_TYPE_BUY if direction == "LONG" else ORDER_TYPE_SELL
 
-        expected_entry_price = current_ask if direction == "LONG" else current_bid
         use_sl = PARAMS.get('use_sl', True)
         use_tp = PARAMS.get('use_tp', True)
         tp_atr_mult = float(PARAMS.get('tp_atr_mult', PARAMS.get('tp_mult', 1.5)))
@@ -684,6 +756,9 @@ class s11TradingBot:
             raw_tp_px = expected_entry_price - tp_d
         sl_px = raw_sl_px if use_sl else 0.0
         tp_px = raw_tp_px if use_tp else 0.0
+        entry_pct_limit_tp_px = self.calculate_entry_pct_limit_close_price(direction, expected_entry_price, digits)
+        if entry_pct_limit_tp_px:
+            tp_px = entry_pct_limit_tp_px
 
         ticket = self.executor.open_position(
             symbol,
@@ -691,13 +766,27 @@ class s11TradingBot:
             target_lot,
             sl=sl_px,
             tp=tp_px,
-            digits=getattr(info, "digits", 5),
+            digits=digits,
         )
 
         if ticket:
             actual_entry_price = float(ticket.price)
             if actual_entry_price <= 0:
                 actual_entry_price = expected_entry_price
+
+            entry_pct_limit_tp_px = self.calculate_entry_pct_limit_close_price(direction, actual_entry_price, digits)
+            if entry_pct_limit_tp_px:
+                point = float(getattr(info, "point", 0.0) or 0.0)
+                if not tp_px or abs(entry_pct_limit_tp_px - tp_px) > max(point, 1e-8):
+                    if self.executor.modify_position_sl_tp(ticket, sl_px, entry_pct_limit_tp_px):
+                        tp_px = entry_pct_limit_tp_px
+                    else:
+                        logging.warning(
+                            f"[{symbol}] Initial entry-percent limit close TP modify failed. "
+                            f"Keeping existing TP={tp_px}."
+                        )
+                else:
+                    tp_px = entry_pct_limit_tp_px
                 
             # 状態更新
             now_jst = datetime.now(JST)
@@ -735,6 +824,10 @@ class s11TradingBot:
                 "use_protective_exits": bool(PARAMS.get('use_protective_exits', True)),
                 "raw_sl_price": float(raw_sl_px),
                 "raw_tp_price": float(raw_tp_px),
+                "entry_pct_limit_close_price": float(entry_pct_limit_tp_px) if entry_pct_limit_tp_px else 0.0,
+                "entry_pct_limit_close_pct": float(PARAMS.get("entry_pct_limit_close_pct", 0.0) or 0.0),
+                "entry_pct_limit_close_applied": bool(entry_pct_limit_tp_px and tp_px),
+                "lot_price_unit_value_source": "broker" if getattr(info, "price_unit_value", 0.0) > 0 and PARAMS.get('use_symbol_trade_value', True) else "bot9_fallback",
             }
             self.save_state()
             
