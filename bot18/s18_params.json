@@ -51,6 +51,7 @@
                          "symbol":  "GBPUSD",
                          "magic":  180218,
                          "comment_prefix":  "s18v2_gbp",
+                         "lot":  0.05,
                          "pip_size":  0.0001,
                          "point_size":  0.00001,
                          "price_digits":  5
@@ -59,6 +60,7 @@
                          "symbol":  "EURUSD",
                          "magic":  180219,
                          "comment_prefix":  "s18v2_eur",
+                         "lot":  0.04,
                          "pip_size":  0.0001,
                          "point_size":  0.00001,
                          "price_digits":  5
@@ -67,6 +69,7 @@
                          "symbol":  "AUDUSD",
                          "magic":  180220,
                          "comment_prefix":  "s18v2_aud",
+                         "lot":  0.04,
                          "pip_size":  0.0001,
                          "point_size":  0.00001,
                          "price_digits":  5

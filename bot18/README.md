@@ -15,11 +15,21 @@
 
 ## 対象銘柄
 
-- GBPUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0
-- EURUSD: LightGBM / allow_rate=0.50 / spread_add_points=2.0
-- AUDUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0
+- GBPUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.05
+- EURUSD: LightGBM / allow_rate=0.50 / spread_add_points=2.0 / lot=0.04
+- AUDUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.04
 
 USDJPY、USDCHF、NZDUSD、CHFJPY、USDCAD は今回の固定basketには入れていません。
+
+## lot配分
+
+entry threshold / allow_rate は変更せず、固定3戦略のportfolio診断に基づいてlotだけを銘柄別に変えています。
+
+- GBPUSD: `0.05`
+- EURUSD: `0.04`
+- AUDUSD: `0.04`
+
+top-level `lot` はfallback用の `0.01` として残し、実運用では各profileの `lot` が優先されます。
 
 ## 出力
 
