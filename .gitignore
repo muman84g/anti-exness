@@ -17,6 +17,8 @@ live_config.py
 **/live_config.local.py
 *_bot_state.json
 s*_bot_state.json
+*_bot_state.json.bak
+s*_bot_state.json.bak
 bot8/cache/*.sqlite
 bot8/cache/*.sqlite-*
 *.sqlite

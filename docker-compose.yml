@@ -270,3 +270,34 @@ services:
       - NOVNC_PORT=6092
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot18
+
+  # ---- Bot 19 (S19 GBPUSD pending-stop shadow/live) ----
+  exness-bot-19:
+    image: exness-bot:latest
+    container_name: exness-bot-19
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot19/state:/app/bot19/state
+      - ./bot19/logs:/app/bot19/logs
+      - ./bot19/live_config.py:/app/bot19/live_config.py:ro
+      - ./bot19/live_s19_bot.py:/app/bot19/live_s19_bot.py:ro
+      - ./bot19/live_data_fetcher.py:/app/bot19/live_data_fetcher.py:ro
+      - ./bot19/live_executor.py:/app/bot19/live_executor.py:ro
+      - ./bot19/base_interfaces.py:/app/bot19/base_interfaces.py:ro
+      - ./bot19/ea_bridge.py:/app/bot19/ea_bridge.py:ro
+      - ./bot19/s19_params.json:/app/bot19/s19_params.json:ro
+      - ./bot19/artifacts:/app/bot19/artifacts:ro
+      - ./bot19/macro_events_2026.json:/app/bot19/macro_events_2026.json:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:112
+      - VNC_PORT=5913
+      - NOVNC_PORT=6093
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot19

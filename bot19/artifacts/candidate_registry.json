@@ -1,0 +1,109 @@
+{
+  "plan_id": "bot18_v2_basket_forward_20260704",
+  "data_classification_note": "forward plan based on dev_data and observed reusable evaluation data; not adoption proof",
+  "forward_required": true,
+  "strategy_family": "bot18_snowball_cycle_start_event_filter",
+  "base_strategy_id": "bot18_snowball_fixed_cycle_start_v1",
+  "event_type": "cycle_start",
+  "allow_rate": 0.5,
+  "spread_add_points": 2.0,
+  "max_entry_spread_points": 9.0,
+  "price_path_mode": "close",
+  "lot": 0.01,
+  "event_features_source_run": "20260704_1225_sanity_bot18_fx26_export_accounting_fix_combined",
+  "candidate_source_summary": "BOT18_V2_BASKET_VALIDATION_20260704_ja.md",
+  "candidates": [
+    {
+      "candidate_id": "bot18_catboost_gbpusd_allow050_spreadplus2_devfixed_20260704",
+      "symbol": "GBPUSD",
+      "model": "event_filter_catboost",
+      "threshold": 0.9536775351807297,
+      "reusable_eval_status": "passed_reusable_eval",
+      "reusable_eval_trades": 863,
+      "reusable_eval_pnl_usd": 407.77,
+      "reusable_eval_pf": 2.664,
+      "reusable_eval_mdd_usd": 16.63
+    },
+    {
+      "candidate_id": "bot18_lgbm_eurusd_allow050_spreadplus2_devfixed_20260704",
+      "symbol": "EURUSD",
+      "model": "event_filter_lgbm",
+      "threshold": 0.9486861654060984,
+      "reusable_eval_status": "passed_reusable_eval",
+      "reusable_eval_trades": 762,
+      "reusable_eval_pnl_usd": 343.97,
+      "reusable_eval_pf": 2.476,
+      "reusable_eval_mdd_usd": 14.82
+    },
+    {
+      "candidate_id": "bot18_catboost_audusd_allow050_spreadplus2_devfixed_20260704",
+      "symbol": "AUDUSD",
+      "model": "event_filter_catboost",
+      "threshold": 0.9536775351807296,
+      "reusable_eval_status": "passed_reusable_eval",
+      "reusable_eval_trades": 533,
+      "reusable_eval_pnl_usd": 268.79,
+      "reusable_eval_pf": 2.751,
+      "reusable_eval_mdd_usd": 12.58
+    }
+  ],
+  "excluded": [
+    {
+      "symbol": "USDJPY",
+      "reason": "LGBM reusable eval inconclusive due trades below 300; CatBoost alternative not added after observing same reusable period"
+    },
+    {
+      "symbol": "USDCHF",
+      "reason": "invalid_reusable_eval force-close audit fail"
+    },
+    {
+      "symbol": "NZDUSD",
+      "reason": "invalid_reusable_eval force-close audit fail"
+    },
+    {
+      "symbol": "CHFJPY",
+      "reason": "park due high MDD and missing 2025 rolling 3M diagnostics"
+    },
+    {
+      "symbol": "USDCAD",
+      "reason": "park due missing 2025 rolling 3M diagnostics"
+    }
+  ],
+  "artifact_schema": "bot18_v2_forward_artifacts_v1",
+  "created_at": "2026-07-04T21:28:52.974649+09:00",
+  "selected_features_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\selected_features.csv",
+  "models": {
+    "event_filter_catboost": {
+      "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_catboost.cbm",
+      "model_sha256": "d8320900ff81a85f590fec31c834b785333016a32cba818cf71d9e3cbf9571b9",
+      "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_catboost.csv",
+      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "model_info": {
+        "model_name": "event_filter_catboost",
+        "objective": "Logloss",
+        "depth": 2,
+        "random_state": 42,
+        "catboost_thread_count": 4,
+        "train_rows": 11089,
+        "train_positive_rate": 0.792947966453242,
+        "selected_feature_count": 20
+      }
+    },
+    "event_filter_lgbm": {
+      "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_lgbm.txt",
+      "model_sha256": "33b30fb83ebea9294768c080094f3cfb94eedf9d2106069f164601467ad5019d",
+      "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_lgbm.csv",
+      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "model_info": {
+        "model_name": "event_filter_lgbm",
+        "objective": "binary",
+        "max_depth": 2,
+        "random_state": 42,
+        "lgbm_n_jobs": 4,
+        "train_rows": 11089,
+        "train_positive_rate": 0.792947966453242,
+        "selected_feature_count": 20
+      }
+    }
+  }
+}
