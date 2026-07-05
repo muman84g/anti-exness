@@ -23,7 +23,7 @@ RUN dpkg --add-architecture i386 && \
 
 # ── Linux側 Python3 用の依存関係のインストール ─────────────────
 RUN pip3 install --break-system-packages --no-cache-dir \
-    "numpy<2" pandas pytz scikit-learn lightgbm yfinance
+    "numpy<2" pandas pytz scikit-learn lightgbm catboost yfinance
 
 
 # ── 安定版 Wine 9.0 (Ubuntu標準) の利用 ──────────────────
