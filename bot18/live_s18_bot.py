@@ -49,7 +49,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "shadow_forward_enabled": True,
     "symbol": "GBPUSD",
     "magic": 180218,
-    "comment_prefix": "s18_snow",
+    "comment_prefix": "s18v2_snow",
     "strategy_id": "bot18_snowball_fixed_cycle_start_v1",
     "lot": 0.01,
     "distance_pips": 5.0,
@@ -111,17 +111,17 @@ DEFAULT_PARAMS: dict[str, Any] = {
         {
             "symbol": "GBPUSD",
             "magic": 180218,
-            "comment_prefix": "s18_gbp",
+            "comment_prefix": "s18v2_gbp",
         },
         {
             "symbol": "EURUSD",
             "magic": 180219,
-            "comment_prefix": "s18_eur",
+            "comment_prefix": "s18v2_eur",
         },
         {
             "symbol": "AUDUSD",
             "magic": 180220,
-            "comment_prefix": "s18_aud",
+            "comment_prefix": "s18v2_aud",
         },
     ],
 }
@@ -889,7 +889,7 @@ class S18SnowballBot:
         self.state["restart_next_tick"] = False
         self.ensure_orders(LONG)
         self.ensure_orders(SHORT)
-        logging.info(f"Started s18 cycle {self.state['cycle_id']} anchor={self.state['grid_anchor']}")
+        logging.info(f"Started s18 v2 cycle {self.state['cycle_id']} anchor={self.state['grid_anchor']}")
 
     def block_new_entries(self, reason: str) -> None:
         self.state["sync_block_new_entries"] = True
@@ -1460,7 +1460,7 @@ class S18SnowballBot:
 
     def run_forever(self) -> None:
         if not bool(self.params.get("enabled", True)):
-            logging.warning("s18 is disabled by params enabled=false")
+            logging.warning("s18 v2 is disabled by params enabled=false")
             return
         live_trading_enabled = bool(self.params.get("live_trading_enabled", False))
         shadow_forward_enabled = bool(self.params.get("shadow_forward_enabled", False))
@@ -1491,7 +1491,7 @@ class S18SnowballBot:
             except KeyboardInterrupt:
                 raise
             except Exception:
-                logging.exception("Unhandled s18 loop error")
+                logging.exception("Unhandled s18 v2 loop error")
             time.sleep(float(self.params["poll_interval_seconds"]))
 
     def self_test(self) -> None:
@@ -1532,7 +1532,7 @@ class S18SnowballBot:
         logging.info("s18 self-test passed")
 
 
-class S18BasketRunner:
+class S18V2BasketRunner:
     def __init__(self, raw_params: dict[str, Any] | None = None) -> None:
         self.raw_params = raw_params or load_params()
         self.policy = EventFilterPolicy(self.raw_params) if bool(self.raw_params.get("policy_enabled", True)) else None
@@ -1550,7 +1550,7 @@ class S18BasketRunner:
 
     def run_forever(self) -> None:
         if not bool(self.raw_params.get("enabled", True)):
-            logging.warning("s18 basket is disabled by params enabled=false")
+            logging.warning("s18 v2 basket is disabled by params enabled=false")
             return
         live_trading_enabled = bool(self.raw_params.get("live_trading_enabled", False))
         shadow_forward_enabled = bool(self.raw_params.get("shadow_forward_enabled", False))
@@ -1586,7 +1586,7 @@ class S18BasketRunner:
                 except KeyboardInterrupt:
                     raise
                 except Exception:
-                    logging.exception("Unhandled s18 basket loop error for %s", bot.symbol)
+                    logging.exception("Unhandled s18 v2 basket loop error for %s", bot.symbol)
             time.sleep(sleep_seconds)
 
 
@@ -1600,7 +1600,7 @@ def main() -> int:
     if args.self_test and not args.policy_self_test:
         raw_params = raw_params.copy()
         raw_params["policy_enabled"] = False
-    runner = S18BasketRunner(raw_params)
+    runner = S18V2BasketRunner(raw_params)
     if args.self_test:
         runner.self_test(include_policy=bool(args.policy_self_test))
         return 0
