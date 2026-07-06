@@ -82,7 +82,7 @@ class EABridgeServer:
         self.command_timeout_seconds = float(os.environ.get("EA_BRIDGE_COMMAND_TIMEOUT_SECONDS", "10"))
         self.command_retries = max(0, int(os.environ.get("EA_BRIDGE_COMMAND_RETRIES", "0")))
         self.retry_sleep_seconds = float(os.environ.get("EA_BRIDGE_RETRY_SLEEP_SECONDS", "0.2"))
-        self.slow_command_log_seconds = float(os.environ.get("EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS", "1.0"))
+        self.slow_command_log_seconds = float(os.environ.get("EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS", "3.0"))
         self.lock_stale_seconds = float(os.environ.get("EA_BRIDGE_LOCK_STALE_SECONDS", "30"))
         self._command_lock = threading.Lock()
         
