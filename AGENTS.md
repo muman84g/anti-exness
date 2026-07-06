@@ -52,6 +52,18 @@
 - stateファイル名がbotごとに異なる場合は、コード上の `STATE_FILE`、`docker-compose.yml`、README/運用手順の記載が同じ実ファイルを指すことを確認する。
 - 新規botのlive runnerでは、`live_trading_enabled=true` でbridge/MT5接続へ進む前にstate保存可否を検証し、保存失敗時はfail-closedで起動停止する安全措置を入れる。
 
+## MT5 Bridge Selection
+
+- Live bot bridge sources must be committed under `MetaTrader 5/MQL5/Experts/` using the bot-specific name, for example `BotBridge_s19.mq5` for bot19 and `BotBridge_s20.mq5` for bot20.
+- Do not rely on files manually copied into a running container. `docker compose up -d --force-recreate` can discard manual MT5 `MQL5/Experts` changes.
+- Each bot service that uses a bot-specific bridge must select it in `docker-compose.yml` with `EA_BRIDGE_EXPERT_NAME=BotBridge_sNN`.
+- The selected bridge source should be bind-mounted from `./MetaTrader 5/MQL5/Experts/BotBridge_sNN.mq5` to a simple container path such as `/app/selected_bridge/BotBridge_sNN.mq5`, then referenced with `EA_BRIDGE_SOURCE_FILE=/app/selected_bridge/BotBridge_sNN.mq5`.
+- If the startup chart symbol matters, set `EA_BRIDGE_STARTUP_SYMBOL` for that service. The entrypoint must generate a minimal temporary startup config for the selected expert and must not copy account login, password, or server settings into that generated config.
+- The entrypoint copies the selected bridge into the Wine MT5 `MQL5/Experts` directory and compiles it on startup. The compiled `.ex5` must exist so the bridge appears in noVNC under MT5 `Navigator -> Expert Advisors`. If compilation fails or the `.ex5` is missing, fail startup instead of running with an invisible or stale bridge.
+- If multiple bots run against the same MT5 Files directory, use bot-specific IPC names in both Python and MQL inputs, for example `cmd_s19.txt`, `res_s19.txt`, and `ea_bridge_s19.lock`.
+- Treat `.mq5` as the source of truth. Commit `.ex5` only when the user explicitly wants a compiled binary tracked for that bridge.
+- When adding a new bot with a new bridge, update `AGENTS.md`, `docker-compose.yml`, and the bot README in the same change so future Codex runs preserve the bridge-selection convention.
+
 ## Position Sync Safety
 
 - live botでは、MT5/EA Bridgeのposition一覧取得失敗（例: `ERR|TIMEOUT`、`position sync failed`、`MT5 position list unavailable`）は一時的な同期失敗として扱い、そのcycleの新規entryはfail-closedで止める。

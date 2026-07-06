@@ -41,7 +41,6 @@ mt5setup.exe
 mt5setup_cache/
 mt5_extracted/
 *.ex5
-!bot19/BotBridge_s19.ex5
 
 # Exclude MQL5 standard library dumps
 MQL5_dump/
@@ -55,6 +54,7 @@ MetaTrader 5/**
 !MetaTrader 5/MQL5/
 !MetaTrader 5/MQL5/Experts/
 !MetaTrader 5/MQL5/Experts/BotBridge.mq5
+!MetaTrader 5/MQL5/Experts/BotBridge_s*.mq5
 
 # Explicitly ignore system subfolders inside MT5 even if they are in whitelisted paths
 MetaTrader 5/Bases/

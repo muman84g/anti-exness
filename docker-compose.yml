@@ -275,6 +275,7 @@ services:
   exness-bot-19:
     image: exness-bot:latest
     container_name: exness-bot-19
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
     restart: always
     logging:
       driver: "json-file"
@@ -282,6 +283,7 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot19/state:/app/bot19/state
       - ./bot19/logs:/app/bot19/logs
       - ./bot19/live_config.py:/app/bot19/live_config.py:ro
@@ -290,6 +292,7 @@ services:
       - ./bot19/live_executor.py:/app/bot19/live_executor.py:ro
       - ./bot19/base_interfaces.py:/app/bot19/base_interfaces.py:ro
       - ./bot19/ea_bridge.py:/app/bot19/ea_bridge.py:ro
+      - ./MetaTrader 5/MQL5/Experts/BotBridge_s19.mq5:/app/selected_bridge/BotBridge_s19.mq5:ro
       - ./bot19/s19_params.json:/app/bot19/s19_params.json:ro
       - ./bot19/artifacts:/app/bot19/artifacts:ro
       - ./bot19/macro_events_2026.json:/app/bot19/macro_events_2026.json:ro
@@ -301,6 +304,9 @@ services:
       - NOVNC_PORT=6093
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot19
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s19
+      - EA_BRIDGE_SOURCE_FILE=/app/selected_bridge/BotBridge_s19.mq5
+      - EA_BRIDGE_STARTUP_SYMBOL=GBPUSD
       - EA_BRIDGE_COMMAND_FILE=cmd_s19.txt
       - EA_BRIDGE_RESPONSE_FILE=res_s19.txt
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s19.txt
