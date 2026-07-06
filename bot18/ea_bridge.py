@@ -20,6 +20,10 @@ class EABridgeServer:
         self.cmd_file = os.path.join(self.bridge_dir, "cmd.txt")
         self.res_file = os.path.join(self.bridge_dir, "res.txt")
         self.heartbeat_file = os.path.join(self.bridge_dir, "heartbeat.txt")
+        self.command_timeout_seconds = float(os.environ.get("EA_BRIDGE_COMMAND_TIMEOUT_SECONDS", "10"))
+        self.command_retries = max(0, int(os.environ.get("EA_BRIDGE_COMMAND_RETRIES", "0")))
+        self.retry_sleep_seconds = float(os.environ.get("EA_BRIDGE_RETRY_SLEEP_SECONDS", "0.2"))
+        self.slow_command_log_seconds = float(os.environ.get("EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS", "1.0"))
         self._command_lock = threading.Lock()
         
         logger.info(f"File IPC Bridge initialized at {self.bridge_dir}")
@@ -32,7 +36,43 @@ class EABridgeServer:
         """Alias for start() to match some modules' expectations"""
         self.start()
 
-    def send_command(self, cmd_str, timeout=10):
+    def _clear_command_file(self):
+        try:
+            with open(self.cmd_file, "w") as f:
+                f.write("")
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as exc:
+            logger.warning("Could not clear EA bridge command file: %s", exc)
+
+    def send_command(self, cmd_str, timeout=None):
+        op = str(cmd_str).split("|", 1)[0].upper()
+        read_only_ops = {"CAPS", "ECHO", "INFO", "HIST", "POSITION", "POSITIONS", "ORDERS"}
+        effective_timeout = self.command_timeout_seconds if timeout is None else float(timeout)
+        attempts = 1 + (self.command_retries if op in read_only_ops else 0)
+        last_res = "ERR|TIMEOUT"
+
+        for attempt in range(1, attempts + 1):
+            start = time.monotonic()
+            res = self._send_command_once(cmd_str, timeout=effective_timeout)
+            elapsed = time.monotonic() - start
+            if elapsed >= self.slow_command_log_seconds:
+                logger.warning(
+                    "EA bridge slow command op=%s attempt=%d elapsed=%.2fs res=%s",
+                    op,
+                    attempt,
+                    elapsed,
+                    res,
+                )
+            if res != "ERR|TIMEOUT":
+                return res
+            last_res = res
+            if attempt < attempts:
+                logger.warning("EA bridge retrying read-only command op=%s after %s", op, res)
+                time.sleep(max(0.0, self.retry_sleep_seconds))
+        return last_res
+
+    def _send_command_once(self, cmd_str, timeout):
         # cmd.txt/res.txt are a single shared IPC lane. Keep calls strictly
         # serialized and ignore response files that pre-date this command.
         with self._command_lock:
@@ -71,6 +111,7 @@ class EABridgeServer:
                         continue
                 time.sleep(0.1)
 
+            self._clear_command_file()
             return "ERR|TIMEOUT"
 
     def stop(self):

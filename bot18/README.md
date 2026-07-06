@@ -46,6 +46,12 @@ Git pull後の反映は既存bot18と同じサービス名で行います。
 sudo docker compose up -d --no-deps --force-recreate exness-bot-18
 ```
 
+## bridge timeout対策
+
+S18のentry threshold / allow_rate / lot配分は変えず、MT5の一時的な応答遅延だけ運用側で吸収します。
+`INFO` / `HIST` / `POSITIONS` などの読み取りコマンドは1回だけ再試行し、`OPEN` / `MODIFY` / `CLOSE` は重複発注を避けるため再試行しません。
+flat状態ではポジション同期を5秒間隔に抑えますが、cycle start直前は必ず強制同期します。
+
 ## 確認コマンド
 
 ```powershell
