@@ -41,6 +41,7 @@ mt5setup.exe
 mt5setup_cache/
 mt5_extracted/
 *.ex5
+!bot19/BotBridge_s19.ex5
 
 # Exclude MQL5 standard library dumps
 MQL5_dump/

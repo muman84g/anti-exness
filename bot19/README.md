@@ -25,7 +25,7 @@ MT5 側 bridge は `CAPS` で `BotBridge_s19` を返し、少なくとも `ECHO`
 
 MT5側bridgeはPython側の `ea_bridge.py` と同じ `cmd.txt` / `res.txt` を使う必要があります。`BotBridge_s19.mq5` はこの名前に合わせています。Python側は `ea_bridge.lock` で複数botプロセス間の同時アクセスを直列化します。
 Windowsでは `BotBridge_s19` が置かれた MT5 terminal data folder の `MQL5/Files` を優先検出します。環境差がある場合は `EA_BRIDGE_FILES_DIR` または `MT5_FILES_DIR` で明示してください。
-`.ex5` は `.gitignore` 対象なので、pushだけではCentOS側に配置されません。CentOSでは `BotBridge_s19.mq5` をMetaEditorでcompileするか、別途 `BotBridge_s19.ex5` を配置してください。
+`BotBridge_s19.ex5` はbot19用の実行bridgeとしてgit管理対象です。CentOS側は `git pull` で `.mq5` と `.ex5` の両方を更新できます。MT5が別の `MQL5/Experts` 配下を見ている場合だけ、その実配置先へコピーしてください。
 
 server-side pending stop を使うため、発注応答が未確認になった場合は `pending_open` / `reconciliation_required` を state に残し、新規entryを止めます。手動解除前に MT5 上の建玉・未約定注文・ticket・comment が state と一致することを確認してください。
 
