@@ -301,3 +301,7 @@ services:
       - NOVNC_PORT=6093
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot19
+      - EA_BRIDGE_COMMAND_FILE=cmd_s19.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s19.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s19.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s19.lock

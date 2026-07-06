@@ -67,14 +67,28 @@ class EABridgeServer:
             files_dir = resolve_files_dir()
         
         self.bridge_dir = files_dir
-        self.cmd_file = os.path.join(self.bridge_dir, "cmd.txt")
-        self.res_file = os.path.join(self.bridge_dir, "res.txt")
-        self.heartbeat_file = os.path.join(self.bridge_dir, "heartbeat.txt")
-        self.lock_file = os.path.join(self.bridge_dir, "ea_bridge.lock")
+        self.cmd_file = os.path.join(
+            self.bridge_dir, os.environ.get("EA_BRIDGE_COMMAND_FILE", "cmd_s19.txt")
+        )
+        self.res_file = os.path.join(
+            self.bridge_dir, os.environ.get("EA_BRIDGE_RESPONSE_FILE", "res_s19.txt")
+        )
+        self.heartbeat_file = os.path.join(
+            self.bridge_dir, os.environ.get("EA_BRIDGE_HEARTBEAT_FILE", "heartbeat_s19.txt")
+        )
+        self.lock_file = os.path.join(
+            self.bridge_dir, os.environ.get("EA_BRIDGE_LOCK_FILE", "ea_bridge_s19.lock")
+        )
         self.lock_stale_seconds = float(os.environ.get("EA_BRIDGE_LOCK_STALE_SECONDS", "30"))
         self._command_lock = threading.Lock()
         
         logger.info(f"File IPC Bridge initialized at {self.bridge_dir}")
+        logger.info(
+            "File IPC Bridge files cmd=%s res=%s lock=%s",
+            self.cmd_file,
+            self.res_file,
+            self.lock_file,
+        )
 
     def _acquire_ipc_lock(self, timeout):
         """Serialize cmd/res access across separate bot processes."""
