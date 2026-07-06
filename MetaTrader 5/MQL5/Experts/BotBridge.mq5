@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Antigravity"
 #property link      ""
-#property version   "2.22"
+#property version   "2.23"
 
 #include <Trade\Trade.mqh>
 
@@ -15,7 +15,7 @@ string RES_FILE = "res.txt";
 string HEARTBEAT_FILE = "heartbeat.txt";
 
 int OnInit() {
-    Print("BotBridge v2.22 (File IPC + Trading + History + Positions) starting...");
+    Print("BotBridge v2.23 (File IPC + Trading + History + Positions + Pending Orders) starting...");
     EventSetTimer(1);
     
     // Clean up
@@ -106,6 +106,34 @@ string FormatPositionRecord(ulong ticket) {
            DoubleToString(profit, 2) + "," +
            IntegerToString(magic) + "," +
            TimeToString(open_time, TIME_DATE|TIME_SECONDS) + "," +
+           comment;
+}
+
+string FormatOrderRecord(ulong ticket) {
+    if(!OrderSelect(ticket)) {
+        return "";
+    }
+
+    string sym = OrderGetString(ORDER_SYMBOL);
+    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+    long type = OrderGetInteger(ORDER_TYPE);
+    double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
+    double price_open = OrderGetDouble(ORDER_PRICE_OPEN);
+    double sl = OrderGetDouble(ORDER_SL);
+    double tp = OrderGetDouble(ORDER_TP);
+    long magic = OrderGetInteger(ORDER_MAGIC);
+    string comment = OrderGetString(ORDER_COMMENT);
+    StringReplace(comment, "|", "_");
+    StringReplace(comment, ",", "_");
+
+    return IntegerToString((long)ticket) + "," +
+           sym + "," +
+           IntegerToString((int)type) + "," +
+           DoubleToString(volume, 2) + "," +
+           DoubleToString(price_open, digits) + "," +
+           DoubleToString(sl, digits) + "," +
+           DoubleToString(tp, digits) + "," +
+           IntegerToString(magic) + "," +
            comment;
 }
 
@@ -204,6 +232,43 @@ string ProcessRequest(string raw_req) {
         }
         return out;
     }
+
+    // Command: ORDERS|SYMBOL|MAGIC_FILTER
+    // MAGIC_FILTER is optional. Use -1 to return all pending orders for the symbol.
+    if(cmd == "ORDERS" && k >= 2) {
+        string sym_filter = fields[1];
+        long magic_filter = -1;
+        if(k >= 3) {
+            magic_filter = StringToInteger(fields[2]);
+        }
+
+        string out = "OK";
+        int total = OrdersTotal();
+        for(int i = 0; i < total; i++) {
+            ulong ticket = OrderGetTicket(i);
+            if(ticket == 0) {
+                continue;
+            }
+            if(!OrderSelect(ticket)) {
+                continue;
+            }
+
+            string sym = OrderGetString(ORDER_SYMBOL);
+            long magic = OrderGetInteger(ORDER_MAGIC);
+            if(sym_filter != "" && sym != sym_filter) {
+                continue;
+            }
+            if(magic_filter >= 0 && magic != magic_filter) {
+                continue;
+            }
+
+            string rec = FormatOrderRecord(ticket);
+            if(rec != "") {
+                out += "|" + rec;
+            }
+        }
+        return out;
+    }
     
     // Command: OPEN|SYMBOL|TYPE|LOT|SL|TP
     if(cmd == "OPEN" && k >= 4) {
@@ -241,6 +306,39 @@ string ProcessRequest(string raw_req) {
         }
     }
 
+    // Command: PENDING|SYMBOL|TYPE|LOT|PRICE|SL|TP|MAGIC|COMMENT
+    if(cmd == "PENDING" && k >= 9) {
+        string sym = fields[1];
+        int order_type = (int)StringToInteger(fields[2]);
+        double lot = StringToDouble(fields[3]);
+        int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+        double price = NormalizeDouble(StringToDouble(fields[4]), digits);
+        double sl = NormalizeDouble(StringToDouble(fields[5]), digits);
+        double tp = NormalizeDouble(StringToDouble(fields[6]), digits);
+        long magic = StringToInteger(fields[7]);
+        string comment = fields[8];
+        StringReplace(comment, "|", "_");
+        StringReplace(comment, ",", "_");
+
+        trade.SetExpertMagicNumber(magic);
+
+        bool ok = false;
+        if(order_type == ORDER_TYPE_BUY_STOP) {
+            ok = trade.BuyStop(lot, price, sym, sl, tp, ORDER_TIME_GTC, 0, comment);
+        } else if(order_type == ORDER_TYPE_SELL_STOP) {
+            ok = trade.SellStop(lot, price, sym, sl, tp, ORDER_TIME_GTC, 0, comment);
+        } else {
+            return "ERR|BAD_PENDING_TYPE";
+        }
+
+        if(ok) {
+            ulong ticket = trade.ResultOrder();
+            return "OK|" + IntegerToString((long)ticket) + "|" + DoubleToString(price, digits);
+        } else {
+            return "ERR|" + IntegerToString(trade.ResultRetcode());
+        }
+    }
+
     // Command: MODIFY|TICKET|SL|TP
     if(cmd == "MODIFY" && k >= 4) {
         ulong ticket = (ulong)StringToInteger(fields[1]);
@@ -256,6 +354,19 @@ string ProcessRequest(string raw_req) {
 
         if(trade.PositionModify(ticket, sl, tp)) {
             return "OK|Modified|" + DoubleToString(sl, 5) + "|" + DoubleToString(tp, 5);
+        } else {
+            return "ERR|" + IntegerToString(trade.ResultRetcode());
+        }
+    }
+
+    // Command: CANCEL|TICKET
+    if(cmd == "CANCEL" && k >= 2) {
+        ulong ticket = (ulong)StringToInteger(fields[1]);
+        if(!OrderSelect(ticket)) {
+            return "ERR|ORDER_NOT_FOUND";
+        }
+        if(trade.OrderDelete(ticket)) {
+            return "OK|CANCELED";
         } else {
             return "ERR|" + IntegerToString(trade.ResultRetcode());
         }
