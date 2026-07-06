@@ -79,6 +79,10 @@ class EABridgeServer:
         self.lock_file = os.path.join(
             self.bridge_dir, os.environ.get("EA_BRIDGE_LOCK_FILE", "ea_bridge_s19.lock")
         )
+        self.command_timeout_seconds = float(os.environ.get("EA_BRIDGE_COMMAND_TIMEOUT_SECONDS", "10"))
+        self.command_retries = max(0, int(os.environ.get("EA_BRIDGE_COMMAND_RETRIES", "0")))
+        self.retry_sleep_seconds = float(os.environ.get("EA_BRIDGE_RETRY_SLEEP_SECONDS", "0.2"))
+        self.slow_command_log_seconds = float(os.environ.get("EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS", "1.0"))
         self.lock_stale_seconds = float(os.environ.get("EA_BRIDGE_LOCK_STALE_SECONDS", "30"))
         self._command_lock = threading.Lock()
         
@@ -149,7 +153,28 @@ class EABridgeServer:
         """Alias for start() to match some modules' expectations"""
         self.start()
 
-    def send_command(self, cmd_str, timeout=10):
+    def send_command(self, cmd_str, timeout=None):
+        op = str(cmd_str).split("|", 1)[0].upper()
+        read_only_ops = {"CAPS", "ECHO", "INFO", "HIST", "POSITION", "POSITIONS", "ORDERS"}
+        effective_timeout = self.command_timeout_seconds if timeout is None else float(timeout)
+        attempts = 1 + (self.command_retries if op in read_only_ops else 0)
+        last_res = "ERR|TIMEOUT"
+
+        for attempt in range(1, attempts + 1):
+            start = time.monotonic()
+            res = self._send_command_once(cmd_str, timeout=effective_timeout)
+            elapsed = time.monotonic() - start
+            if elapsed >= self.slow_command_log_seconds:
+                logger.warning("EA bridge slow command op=%s attempt=%d elapsed=%.2fs res=%s", op, attempt, elapsed, res)
+            if res not in {"ERR|TIMEOUT", "ERR|LOCK_TIMEOUT"}:
+                return res
+            last_res = res
+            if attempt < attempts:
+                logger.warning("EA bridge retrying read-only command op=%s after %s", op, res)
+                time.sleep(max(0.0, self.retry_sleep_seconds))
+        return last_res
+
+    def _send_command_once(self, cmd_str, timeout):
         # cmd.txt/res.txt are a single shared IPC lane. Keep calls strictly
         # serialized across threads and processes, and ignore response files
         # that pre-date this command.

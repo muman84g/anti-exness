@@ -58,3 +58,9 @@ copies the selected bridge source into MT5 `MQL5/Experts` and compiles it so `Bo
 The MT5 startup config remains `Z:\app\startup.ini`; this bridge deployment does not rewrite account login, password, or server settings.
 If manually attaching from noVNC, choose `BotBridge_s19` for bot19 and confirm the inputs above.
 The startup log should show `2026-07-06-pending-stop-v3-dedicated-ipc` in the CAPS preflight.
+
+Runtime bridge hardening:
+
+- Read-only bridge commands (`INFO`, `POSITIONS`, `ORDERS`, `HIST`, etc.) use one short retry after timeout.
+- Side-effect commands (`PENDING`, `OPEN`, `MODIFY`, `CANCEL`, `CLOSE`) are not retried automatically to avoid duplicate orders.
+- While locally flat, live position sync is throttled by `flat_position_sync_interval_seconds`; bot19 still forces a fresh position sync immediately before starting a new cycle.

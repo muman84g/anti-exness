@@ -78,5 +78,6 @@
     "max_virtual_orders": 80,
     "break_even_refresh_seconds": 300,
     "poll_interval_seconds": 1,
+    "flat_position_sync_interval_seconds": 5,
     "status_log_interval_seconds": 60
 }

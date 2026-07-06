@@ -68,6 +68,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "max_virtual_orders": 80,
     "break_even_refresh_seconds": 300,
     "poll_interval_seconds": 1.0,
+    "flat_position_sync_interval_seconds": 5.0,
     "status_log_interval_seconds": 60,
     "regime_timeframe": 16385,
     "regime_bars": 240,
@@ -496,6 +497,7 @@ class S19SnowballBot:
         self.cached_regime = self.default_regime()
         self.last_status_log_epoch = 0.0
         self.last_auto_tp_profit_guard_log_epoch = 0.0
+        self.last_position_sync_epoch = 0.0
         self.sync_closed_count = 0
 
     @property
@@ -1211,12 +1213,18 @@ class S19SnowballBot:
             pips = (entry - float(exit_price)) / self.pip_size
         return pips * usd_per_pip
 
-    def sync_live_positions(self, tick: dict[str, Any]) -> bool:
+    def sync_live_positions(self, tick: dict[str, Any], force: bool = False) -> bool:
         self.sync_closed_count = 0
+        flat_local_state = not self.state["positions"] and not self.state["virtual_orders"]
+        if flat_local_state and not force:
+            interval = float(self.params.get("flat_position_sync_interval_seconds", 0.0) or 0.0)
+            if interval > 0.0 and time.time() - self.last_position_sync_epoch < interval:
+                return True
         live_positions = self.executor.get_positions(self.symbol, self.magic)
         if live_positions is None:
             self.block_new_entries("position sync failed")
             return False
+        self.last_position_sync_epoch = time.time()
         live_by_ticket = {int(p.ticket): p for p in live_positions}
         state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
 
@@ -1892,6 +1900,9 @@ class S19SnowballBot:
                 return
             if tick["spread_points"] > float(self.params["max_entry_spread_points"]) + 1e-9:
                 self.log_status(tick, regime)
+                self.save_state()
+                return
+            if not self.sync_live_positions(tick, force=True):
                 self.save_state()
                 return
             if not self.start_cycle(tick["bid"], tick["info"], tick["ask"], regime):
