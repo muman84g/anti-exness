@@ -77,7 +77,7 @@
       "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_catboost.cbm",
       "model_sha256": "d8320900ff81a85f590fec31c834b785333016a32cba818cf71d9e3cbf9571b9",
       "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_catboost.csv",
-      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "medians_sha256": "f3e75fdeb26b824a2398df5b7e1f77106cdc2c1d08b086f82cd38aabf1d52adc",
       "model_info": {
         "model_name": "event_filter_catboost",
         "objective": "Logloss",
@@ -91,9 +91,9 @@
     },
     "event_filter_lgbm": {
       "model_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\models\\event_filter_lgbm.txt",
-      "model_sha256": "33b30fb83ebea9294768c080094f3cfb94eedf9d2106069f164601467ad5019d",
+      "model_sha256": "2813d7b7d6832b7d41ee30d0a96885a5f79759749b2942a1b1f7082f4bc63590",
       "medians_path": "C:\\botter\\backtest\\output\\backtest33_lightGBM_template_audit\\candidates\\event_filter_template\\runs\\20260704_2005_report_bot18_v2_forward_artifacts\\feature_medians_event_filter_lgbm.csv",
-      "medians_sha256": "c24428dde5586c51cc959764a6d52131cbcbec21d2e92be3e3c74c48676b0d91",
+      "medians_sha256": "f3e75fdeb26b824a2398df5b7e1f77106cdc2c1d08b086f82cd38aabf1d52adc",
       "model_info": {
         "model_name": "event_filter_lgbm",
         "objective": "binary",
