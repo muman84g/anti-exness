@@ -658,6 +658,27 @@ class S19SnowballBot:
 
     def verify_bridge_capabilities(self) -> None:
         self.ensure_bridge()
+        if bool(self.params.get("use_server_pending_entry", False)):
+            from live_executor import REQUIRED_S19_PENDING_COMMANDS, S19_BRIDGE_NAME
+
+            caps = self.executor.get_bridge_capabilities()
+            if caps is None:
+                raise RuntimeError(
+                    "Bridge CAPS preflight failed. Update/attach BotBridge_s19.ex5 and confirm Files directory."
+                )
+            bridge_name = str(caps.get("name", ""))
+            commands = set(caps.get("commands", set()))
+            missing = sorted(REQUIRED_S19_PENDING_COMMANDS.difference(commands))
+            if bridge_name != S19_BRIDGE_NAME:
+                raise RuntimeError(f"Unexpected EA bridge name: {bridge_name}")
+            if missing:
+                raise RuntimeError(f"EA bridge missing required commands: {missing}")
+            logging.info(
+                "EA bridge capabilities verified: name=%s version=%s commands=%s",
+                bridge_name,
+                caps.get("version"),
+                ",".join(sorted(commands)),
+            )
         tick = self.get_tick()
         if tick is None:
             raise RuntimeError(f"Bridge INFO preflight failed for {self.symbol}")
@@ -674,6 +695,11 @@ class S19SnowballBot:
         if bool(self.params.get("use_server_pending_entry", False)):
             if self.executor.get_orders(self.symbol, self.magic) is None:
                 raise RuntimeError(f"Bridge ORDERS preflight failed for {self.symbol}")
+
+    def live_server_pending_enabled(self) -> bool:
+        return bool(self.params.get("use_server_pending_entry", False)) and bool(
+            self.params.get("live_trading_enabled", False)
+        )
 
     def normalize_lot(self, info: Any) -> float:
         lot = float(self.params["lot"])
@@ -915,9 +941,7 @@ class S19SnowballBot:
             "created_at_jst": jst_now().isoformat(),
             "pending_ticket": None,
         }
-        if bool(self.params.get("use_server_pending_entry", False)) and bool(
-            self.params.get("live_trading_enabled", False)
-        ):
+        if self.live_server_pending_enabled():
             if info is None or bid is None or ask is None or regime is None:
                 self.block_new_entries("pending entry requires tick/regime context")
                 return False
@@ -1003,9 +1027,7 @@ class S19SnowballBot:
             )
         self.state["next_order_id"] = int(self.state["next_order_id"]) + 1
         self.state["virtual_orders"].append(order)
-        if bool(self.params.get("use_server_pending_entry", False)) and bool(
-            self.params.get("live_trading_enabled", False)
-        ):
+        if self.live_server_pending_enabled():
             self.save_state()
         return True
 
@@ -1036,6 +1058,11 @@ class S19SnowballBot:
     ) -> bool:
         if self.state["positions"] or self.state["virtual_orders"]:
             raise RuntimeError("cycle start requires flat state")
+        if self.live_server_pending_enabled() and (
+            info is None or bid is None or ask is None or regime is None
+        ):
+            self.block_new_entries("pending cycle start requires tick/regime context")
+            return False
         self.state["cycle_id"] = int(self.state["cycle_id"]) + 1
         self.state["cycle_realized_usd"] = 0.0
         self.state["grid_anchor"] = self.price(bid)

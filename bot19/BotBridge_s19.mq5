@@ -7,6 +7,10 @@
 
 CTrade trade;
 
+#define BRIDGE_NAME "BotBridge_s19"
+#define BRIDGE_VERSION "2026-07-06-pending-stop-v2"
+#define BRIDGE_COMMANDS "ECHO,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,MODIFY,CANCEL,CLOSE"
+
 input string InpCommandFile = "cmd.txt";
 input string InpResponseFile = "res.txt";
 input int InpTimerMs = 250;
@@ -79,6 +83,9 @@ string HandleCommand(const string command)
 
    if(op == "ECHO")
       return "OK|Alive";
+
+   if(op == "CAPS")
+      return "OK|CAPS|" + BRIDGE_NAME + "|" + BRIDGE_VERSION + "|" + BRIDGE_COMMANDS;
 
    if(op == "INFO" && n >= 2)
    {

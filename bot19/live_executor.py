@@ -7,6 +7,19 @@ ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
 ORDER_TYPE_BUY_STOP = 4
 ORDER_TYPE_SELL_STOP = 5
+S19_BRIDGE_NAME = "BotBridge_s19"
+REQUIRED_S19_PENDING_COMMANDS = {
+    "ECHO",
+    "INFO",
+    "HIST",
+    "PENDING",
+    "POSITIONS",
+    "POSITION",
+    "ORDERS",
+    "MODIFY",
+    "CANCEL",
+    "CLOSE",
+}
 
 class Ticket(int):
     """
@@ -104,6 +117,27 @@ class PendingOrderInfo:
 class MT5Executor(BaseExecutor):
     def __init__(self, data_manager):
         self.dm = data_manager
+
+    def get_bridge_capabilities(self):
+        """Return bridge identity/capability info, or None on stale/unknown EA."""
+        res = ea_bridge.send_command("CAPS|")
+        if not res or not res.startswith("OK|CAPS|"):
+            logging.critical(
+                "EA bridge CAPS preflight failed: %s. "
+                "BotBridge_s19.ex5 is likely stale, not attached, or not using the same Files directory.",
+                res,
+            )
+            return None
+        parts = res.split("|", 4)
+        if len(parts) < 5:
+            logging.critical("EA bridge returned malformed CAPS response: %s", res)
+            return None
+        commands = {item.strip().upper() for item in parts[4].split(",") if item.strip()}
+        return {
+            "name": parts[2],
+            "version": parts[3],
+            "commands": commands,
+        }
         
     def get_symbol_info(self, symbol):
         """Retrieves and checks symbol info via EA Bridge."""
@@ -316,6 +350,10 @@ class MT5Executor(BaseExecutor):
         )
         if not res or not res.startswith("OK|"):
             self.last_order_error = res or "NO_RESPONSE"
+            if res and res.upper() in {"ERR|UNKNOWN_COMMAND", "ERR|UNKNOWNCOMMAND"}:
+                logging.critical(
+                    "EA bridge does not support PENDING. Update/attach BotBridge_s19.ex5 before live trading."
+                )
             logging.error(f"EA pending order failed for {symbol}: {res}")
             return None
         parts = res.split("|")
@@ -328,6 +366,10 @@ class MT5Executor(BaseExecutor):
         magic_filter = -1 if magic is None else int(magic)
         res = ea_bridge.send_command(f"ORDERS|{symbol}|{magic_filter}")
         if not res or not res.startswith("OK"):
+            if res and res.upper() in {"ERR|UNKNOWN_COMMAND", "ERR|UNKNOWNCOMMAND"}:
+                logging.critical(
+                    "EA bridge does not support ORDERS. Update/attach BotBridge_s19.ex5 before live trading."
+                )
             logging.error(f"EA failed to get orders for symbol {symbol}: {res}")
             return None
         orders = []

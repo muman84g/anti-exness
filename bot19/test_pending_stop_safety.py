@@ -109,6 +109,18 @@ class PendingStopSafetyTests(unittest.TestCase):
         self.assertEqual(bot.state["pending_open"]["status"], "OPEN_RESPONSE_UNCONFIRMED")
         self.assertEqual(bot.state["reconciliation_required"]["type"], "pending_open")
 
+    def test_cycle_start_without_live_context_does_not_increment_or_place_orders(self):
+        executor = FakeExecutor()
+        bot = make_bot("s19_missing_context", executor)
+
+        self.assertFalse(bot.start_cycle(1.25000))
+
+        self.assertEqual(bot.state["cycle_id"], 0)
+        self.assertEqual(bot.state["virtual_orders"], [])
+        self.assertEqual(executor.calls, [])
+        self.assertTrue(bot.state["sync_block_new_entries"])
+        self.assertEqual(bot.state["sync_block_reason"], "pending cycle start requires tick/regime context")
+
     def test_untracked_live_pending_order_blocks_new_entries(self):
         extra_order = SimpleNamespace(ticket=9999, symbol="GBPUSD", magic=190019, direction="LONG")
         executor = FakeExecutor(live_orders=[extra_order])
@@ -124,6 +136,20 @@ class PendingStopSafetyTests(unittest.TestCase):
             self.assertFalse(executor.cancel_order(12345))
         with patch.object(live_executor.ea_bridge, "send_command", return_value="ERR|ORDER_NOT_FOUND"):
             self.assertTrue(executor.cancel_order(12345))
+
+    def test_bridge_capabilities_parse_and_reject_stale_bridge(self):
+        executor = live_executor.MT5Executor.__new__(live_executor.MT5Executor)
+        caps_response = (
+            "OK|CAPS|BotBridge_s19|test|"
+            "ECHO,INFO,HIST,PENDING,POSITIONS,POSITION,ORDERS,MODIFY,CANCEL,CLOSE"
+        )
+        with patch.object(live_executor.ea_bridge, "send_command", return_value=caps_response):
+            caps = executor.get_bridge_capabilities()
+        self.assertEqual(caps["name"], "BotBridge_s19")
+        self.assertIn("ORDERS", caps["commands"])
+
+        with patch.object(live_executor.ea_bridge, "send_command", return_value="ERR|UNKNOWN_COMMAND"):
+            self.assertIsNone(executor.get_bridge_capabilities())
 
 
 if __name__ == "__main__":
