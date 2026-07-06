@@ -58,7 +58,8 @@
 - Do not rely on files manually copied into a running container. `docker compose up -d --force-recreate` can discard manual MT5 `MQL5/Experts` changes.
 - Each bot service that uses a bot-specific bridge must select it in `docker-compose.yml` with `EA_BRIDGE_EXPERT_NAME=BotBridge_sNN`.
 - The selected bridge source should be bind-mounted from `./MetaTrader 5/MQL5/Experts/BotBridge_sNN.mq5` to a simple container path such as `/app/selected_bridge/BotBridge_sNN.mq5`, then referenced with `EA_BRIDGE_SOURCE_FILE=/app/selected_bridge/BotBridge_sNN.mq5`.
-- If the startup chart symbol matters, set `EA_BRIDGE_STARTUP_SYMBOL` for that service. The entrypoint must generate a minimal temporary startup config for the selected expert and must not copy account login, password, or server settings into that generated config.
+- Bridge deployment must not replace the MT5 `/config` file or rewrite account login, password, or server settings. Keep MT5 authentication on the existing user-managed `startup.ini` path unless the user explicitly asks to change it.
+- Bot-specific bridge selection is primarily for deployment and visibility: the compiled `.ex5` must appear in noVNC under MT5 `Navigator -> Expert Advisors`. Manual attachment should choose the bridge matching the bot number, for example bot19 uses `BotBridge_s19`.
 - The entrypoint copies the selected bridge into the Wine MT5 `MQL5/Experts` directory and compiles it on startup. The compiled `.ex5` must exist so the bridge appears in noVNC under MT5 `Navigator -> Expert Advisors`. If compilation fails or the `.ex5` is missing, fail startup instead of running with an invisible or stale bridge.
 - If multiple bots run against the same MT5 Files directory, use bot-specific IPC names in both Python and MQL inputs, for example `cmd_s19.txt`, `res_s19.txt`, and `ea_bridge_s19.lock`.
 - Treat `.mq5` as the source of truth. Commit `.ex5` only when the user explicitly wants a compiled binary tracked for that bridge.

@@ -67,7 +67,6 @@ echo "[2/3] MT5 ターミナルを Wine で起動中 (EA自動セット)..."
 # アップデートダイアログを物理的に無効化
 rm -rf "${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/WebInstall"
 EXPERTS_DIR="${MT5_DIR}/MQL5/Experts"
-STARTUP_CONFIG_WINE="Z:\\app\\startup.ini"
 BRIDGE_EXPERT_NAME="${EA_BRIDGE_EXPERT_NAME:-BotBridge}"
 BRIDGE_SOURCE_FILE="${EA_BRIDGE_SOURCE_FILE:-}"
 
@@ -82,23 +81,6 @@ elif [ "$BRIDGE_EXPERT_NAME" != "BotBridge" ]; then
     echo "WARNING: selected bridge source not found for ${BRIDGE_EXPERT_NAME}: ${BRIDGE_SOURCE_FILE}"
 fi
 
-if [ "$BRIDGE_EXPERT_NAME" != "BotBridge" ]; then
-    STARTUP_SYMBOL="${EA_BRIDGE_STARTUP_SYMBOL:-GBPUSD}"
-    STARTUP_PERIOD="${EA_BRIDGE_STARTUP_PERIOD:-H1}"
-    cat > /tmp/startup_selected_bridge.ini <<EOF
-[Experts]
-Enabled=1
-AllowLiveTrading=1
-AllowDllImport=1
-
-[StartUp]
-Symbol=${STARTUP_SYMBOL}
-Period=${STARTUP_PERIOD}
-Expert=${BRIDGE_EXPERT_NAME}
-ExpertParameters=
-EOF
-    STARTUP_CONFIG_WINE="Z:\\tmp\\startup_selected_bridge.ini"
-fi
 echo "[2/3] Compiling BotBridge EA..."
 METAEDITOR="${WINEPREFIX}/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe"
 if [ -f "$METAEDITOR" ]; then
@@ -119,7 +101,7 @@ if [ "$BRIDGE_EXPERT_NAME" != "BotBridge" ] && [ ! -f "$EXPERTS_DIR/${BRIDGE_EXP
 fi
 echo "      BotBridge compile step finished"
 
-DISPLAY=${DISPLAY:-:99} wine "$MT5_TERMINAL" /portable /experts /config:"${STARTUP_CONFIG_WINE}" &
+DISPLAY=${DISPLAY:-:99} wine "$MT5_TERMINAL" /portable /experts /config:Z:\\app\\startup.ini &
 MT5_PID=$!
 echo "      MT5 起動完了 (PID: $MT5_PID)"
 # MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機

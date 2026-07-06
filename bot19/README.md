@@ -54,7 +54,7 @@ bot19 must not share the default MT5 file IPC lane with bot18.
 - MT5 EA input `InpResponseFile`: `res_s19.txt`
 
 After pulling this change, `docker compose up -d --no-deps --force-recreate exness-bot-19`
-copies the selected bridge source into MT5 `MQL5/Experts`, compiles it, and starts MT5 with `BotBridge_s19`.
-The generated startup config only selects the expert and chart symbol; it does not rewrite account login, password, or server settings.
+copies the selected bridge source into MT5 `MQL5/Experts` and compiles it so `BotBridge_s19` appears in noVNC under `Navigator -> Expert Advisors`.
+The MT5 startup config remains `Z:\app\startup.ini`; this bridge deployment does not rewrite account login, password, or server settings.
 If manually attaching from noVNC, choose `BotBridge_s19` for bot19 and confirm the inputs above.
 The startup log should show `2026-07-06-pending-stop-v3-dedicated-ipc` in the CAPS preflight.
