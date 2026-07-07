@@ -1,68 +1,81 @@
-GitHubへのpush手順メモ
+GitHub push memo
 
-## 基本方針
+Purpose: push live bot source files quickly without leaking local runtime files.
 
-- `live_config.py`、`.env`、秘密鍵、トークン、認証情報、本番設定ファイルはgitに含めない。
-- `*_bot_state.json` / `s*_bot_state.json` はgitに含めない。必要なstate JSONはCentOS側へ手動で配置する。
-- `state/` のような空ディレクトリをgitで作りたい場合は、`state/.gitkeep` などのplaceholderだけをcommitする。
-- `logs/`、`__pycache__/`、`.pyc`、実行ログ、取引CSVはgitに含めない。
-- push前に `git status --short` と `git diff --cached --name-only` で、意図しないbotや機密ファイルが混ざっていないか確認する。
+## Always Exclude
 
-## 今回のbot18でgitに含めるもの
+- `live_config.py`
+- `.env` and credential files
+- `*_bot_state.json` / `s*_bot_state.json`
+- `logs/`, `*.log`, `*_trades.csv`
+- `__pycache__/`, `*.pyc`
+- temporary screenshots, artifacts, and local MT5 runtime files
 
-- `AGENTS.md`
-- `bot18/base_interfaces.py`
-- `bot18/ea_bridge.py`
-- `bot18/live_data_fetcher.py`
-- `bot18/live_executor.py`
-- `bot18/live_s18_bot.py`
-- `bot18/macro_events_2026.json`
-- `bot18/README.md`
-- `bot18/s18_params.json`
-- `bot18/state/.gitkeep`
-- `docker-compose.yml`
-- `githubへのpush.txt`
+Before every commit:
 
-## 今回のbot18で手動配置するもの
-
-- `bot18/live_config.py`
-- `bot18/state/s18_bot_state.json`
-
-## 新規bot追加と既存bot更新の違い
-
-- 新規bot追加: 対象botディレクトリ一式、`docker-compose.yml`、`AGENTS.md`、必要な運用メモをstageする。ただし `live_config.py` と実state JSONは含めない。
-- 既存bot更新: 対象botディレクトリ丸ごとではなく、変更した実ファイルだけをstageする。`docker-compose.yml` や `AGENTS.md` は変更した場合だけstageする。
-- どちらの場合も、stage後に `git diff --cached --name-only` を見て、意図しないbot、削除、機密ファイル、state JSONが混ざっていないことを確認する。
-
-## 汚れた作業ツリーを避けるpush例
-
-既存repoの作業ツリーに大量の未commit変更や削除がある場合は、そこを直接触らず、一時ディレクトリへクリーンcloneして必要ファイルだけ反映する。
-
-```bash
-git clone https://github.com/muman84g/anti-exness.git /tmp/anti-exness-push
-cd /tmp/anti-exness-push
-
-# 必要ファイルだけコピーしてから確認
-git status --short
-git add AGENTS.md docker-compose.yml githubへのpush.txt bot18
+```powershell
 git status --short
 git diff --cached --name-only
+```
 
-# live_config.py や state JSON が含まれていないことを確認してからcommit/push
-git commit -m "Add bot18 live bot files"
+Confirm that no `live_config.py`, state JSON, logs, trade CSV, or unrelated bot files are staged.
+
+## Fast Route For bot20
+
+The local `C:\botter` tree may not be usable as a normal Git repo. If `git rev-parse --show-toplevel` fails, use a clean clone under `C:\botter\_push_*` and copy only the required files. This avoids unrelated local repo state.
+
+Clone:
+
+```powershell
+$STAMP = Get-Date -Format yyyyMMdd_HHmmss
+$CLONE = "C:\botter\_push_anti-exness-$STAMP"
+git clone https://github.com/muman84g/anti-exness.git $CLONE
+```
+
+Copy from `C:\botter\bot` into the clone. Do not copy the whole `docker-compose.yml` if it contains unrelated local changes; add only the target bot service block.
+
+```powershell
+$SRC = 'C:\botter\bot'
+$DST = $CLONE
+Copy-Item -LiteralPath "$SRC\BOT_BACKTEST_MAP_ja.md" -Destination "$DST\BOT_BACKTEST_MAP_ja.md" -Force
+Copy-Item -LiteralPath "$SRC\githubへのpush.txt" -Destination "$DST\githubへのpush.txt" -Force
+New-Item -ItemType Directory -Force -Path "$DST\bot20" | Out-Null
+Copy-Item -LiteralPath "$SRC\bot20\base_interfaces.py" -Destination "$DST\bot20\base_interfaces.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\BotBridge_s20.mq5" -Destination "$DST\bot20\BotBridge_s20.mq5" -Force
+Copy-Item -LiteralPath "$SRC\bot20\ea_bridge.py" -Destination "$DST\bot20\ea_bridge.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\live_config.example.py" -Destination "$DST\bot20\live_config.example.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\live_data_fetcher.py" -Destination "$DST\bot20\live_data_fetcher.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\live_executor.py" -Destination "$DST\bot20\live_executor.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\live_s20_bot.py" -Destination "$DST\bot20\live_s20_bot.py" -Force
+Copy-Item -LiteralPath "$SRC\bot20\macro_events_2026.json" -Destination "$DST\bot20\macro_events_2026.json" -Force
+Copy-Item -LiteralPath "$SRC\bot20\README.md" -Destination "$DST\bot20\README.md" -Force
+Copy-Item -LiteralPath "$SRC\bot20\s20_params.json" -Destination "$DST\bot20\s20_params.json" -Force
+Copy-Item -LiteralPath "$SRC\bot20\SOURCE_BACKTEST.md" -Destination "$DST\bot20\SOURCE_BACKTEST.md" -Force
+New-Item -ItemType Directory -Force -Path "$DST\bot20\state" | Out-Null
+Copy-Item -LiteralPath "$SRC\bot20\state\.gitkeep" -Destination "$DST\bot20\state\.gitkeep" -Force
+```
+
+Then add the `exness-bot-20` service block to the clone's `docker-compose.yml` only. Preserve existing bot18/bot19 settings.
+
+Stage only these files:
+
+```powershell
+Set-Location $CLONE
+git add BOT_BACKTEST_MAP_ja.md docker-compose.yml githubへのpush.txt
+git add bot20/base_interfaces.py bot20/BotBridge_s20.mq5 bot20/ea_bridge.py bot20/live_config.example.py
+git add bot20/live_data_fetcher.py bot20/live_executor.py bot20/live_s20_bot.py
+git add bot20/macro_events_2026.json bot20/README.md bot20/s20_params.json bot20/SOURCE_BACKTEST.md
+git add bot20/state/.gitkeep
+git diff --cached --name-only
+```
+
+Commit and push:
+
+```powershell
+git commit -m "Add bot20 live bot files"
 git push origin main
 ```
 
-## 通常のpush例
+## Existing Bot Updates
 
-作業ツリーがきれいな場合だけ、通常repo上で以下を行う。
-
-```bash
-git status --short
-git add AGENTS.md docker-compose.yml githubへのpush.txt bot18
-git diff --cached --name-only
-git commit -m "Add bot18 live bot files"
-git push origin main
-```
-
-`git add bot18` を使う場合も、`.gitignore` により `bot18/live_config.py` と `bot18/state/s18_bot_state.json` は通常はstageされない。念のため `git diff --cached --name-only` で必ず確認する。
+For an existing bot, do not stage the whole bot directory by habit. Stage only changed source/docs/params files, then inspect `git diff --cached --name-only`.
