@@ -1,30 +1,24 @@
 GitHub push memo
 
-Purpose: push live bot source files quickly without leaking local runtime files.
+Purpose: push live bot source files quickly while keeping live_config out of GitHub.
 
-## Always Exclude
+## Rule
+
+For a first-time bot push, include the generated target bot folder as-is.
+
+Exclude only:
 
 - `live_config.py`
-- `.env` and credential files
-- `*_bot_state.json` / `s*_bot_state.json`
-- `logs/`, `*.log`, `*_trades.csv`
-- `__pycache__/`, `*.pyc`
-- temporary screenshots, artifacts, and local MT5 runtime files
+- direct live_config derivatives, especially `__pycache__/live_config*.pyc`
+- `.env`, credential files, secrets, tokens, and account credentials
 
-Before every commit:
+This means initial `logs/`, `state/`, `sNN_bot_state.json`, other `__pycache__/*.pyc`, and generated placeholder files can be committed on the first push.
 
-```powershell
-git status --short
-git diff --cached --name-only
-```
-
-Confirm that no `live_config.py`, state JSON, logs, trade CSV, or unrelated bot files are staged.
+For an existing bot update, stage only changed files unless the user asks to refresh the whole folder.
 
 ## Fast Route For bot20
 
-The local `C:\botter` tree may not be usable as a normal Git repo. If `git rev-parse --show-toplevel` fails, use a clean clone under `C:\botter\_push_*` and copy only the required files. This avoids unrelated local repo state.
-
-Clone:
+Use a clean clone under `C:\botter\_push_*` if the local `C:\botter` tree is not usable as a normal Git repo.
 
 ```powershell
 $STAMP = Get-Date -Format yyyyMMdd_HHmmss
@@ -32,42 +26,31 @@ $CLONE = "C:\botter\_push_anti-exness-$STAMP"
 git clone https://github.com/muman84g/anti-exness.git $CLONE
 ```
 
-Copy from `C:\botter\bot` into the clone. Do not copy the whole `docker-compose.yml` if it contains unrelated local changes; add only the target bot service block.
+Copy bot20 as a folder, then remove only live_config artifacts:
 
 ```powershell
 $SRC = 'C:\botter\bot'
 $DST = $CLONE
 Copy-Item -LiteralPath "$SRC\BOT_BACKTEST_MAP_ja.md" -Destination "$DST\BOT_BACKTEST_MAP_ja.md" -Force
-Copy-Item -LiteralPath "$SRC\githubへのpush.txt" -Destination "$DST\githubへのpush.txt" -Force
-New-Item -ItemType Directory -Force -Path "$DST\bot20" | Out-Null
-Copy-Item -LiteralPath "$SRC\bot20\base_interfaces.py" -Destination "$DST\bot20\base_interfaces.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\BotBridge_s20.mq5" -Destination "$DST\bot20\BotBridge_s20.mq5" -Force
-Copy-Item -LiteralPath "$SRC\bot20\ea_bridge.py" -Destination "$DST\bot20\ea_bridge.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\live_config.example.py" -Destination "$DST\bot20\live_config.example.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\live_data_fetcher.py" -Destination "$DST\bot20\live_data_fetcher.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\live_executor.py" -Destination "$DST\bot20\live_executor.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\live_s20_bot.py" -Destination "$DST\bot20\live_s20_bot.py" -Force
-Copy-Item -LiteralPath "$SRC\bot20\macro_events_2026.json" -Destination "$DST\bot20\macro_events_2026.json" -Force
-Copy-Item -LiteralPath "$SRC\bot20\README.md" -Destination "$DST\bot20\README.md" -Force
-Copy-Item -LiteralPath "$SRC\bot20\s20_params.json" -Destination "$DST\bot20\s20_params.json" -Force
-Copy-Item -LiteralPath "$SRC\bot20\SOURCE_BACKTEST.md" -Destination "$DST\bot20\SOURCE_BACKTEST.md" -Force
-New-Item -ItemType Directory -Force -Path "$DST\bot20\state" | Out-Null
-Copy-Item -LiteralPath "$SRC\bot20\state\.gitkeep" -Destination "$DST\bot20\state\.gitkeep" -Force
+Get-ChildItem -LiteralPath $SRC -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination "$DST\githubへのpush.txt" -Force
+Copy-Item -LiteralPath "$SRC\bot20" -Destination "$DST\bot20" -Recurse -Force
+Remove-Item -LiteralPath "$DST\bot20\live_config.py" -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$DST\bot20\__pycache__\live_config.cpython-312.pyc" -Force -ErrorAction SilentlyContinue
 ```
 
-Then add the `exness-bot-20` service block to the clone's `docker-compose.yml` only. Preserve existing bot18/bot19 settings.
+Then add only the `exness-bot-20` service block to the clone's `docker-compose.yml`. Preserve existing bot18/bot19 settings.
 
-Stage only these files:
+Stage and verify:
 
 ```powershell
 Set-Location $CLONE
 git add BOT_BACKTEST_MAP_ja.md docker-compose.yml githubへのpush.txt
-git add bot20/base_interfaces.py bot20/BotBridge_s20.mq5 bot20/ea_bridge.py bot20/live_config.example.py
-git add bot20/live_data_fetcher.py bot20/live_executor.py bot20/live_s20_bot.py
-git add bot20/macro_events_2026.json bot20/README.md bot20/s20_params.json bot20/SOURCE_BACKTEST.md
-git add bot20/state/.gitkeep
+git add -f bot20
 git diff --cached --name-only
+git diff --cached --name-only | Select-String -Pattern 'live_config\.py|__pycache__/live_config|\.env'
 ```
+
+The final command must return no matches.
 
 Commit and push:
 
@@ -75,7 +58,3 @@ Commit and push:
 git commit -m "Add bot20 live bot files"
 git push origin main
 ```
-
-## Existing Bot Updates
-
-For an existing bot, do not stage the whole bot directory by habit. Stage only changed source/docs/params files, then inspect `git diff --cached --name-only`.

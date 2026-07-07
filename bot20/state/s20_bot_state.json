@@ -1,0 +1,15 @@
+{
+  "basket": null,
+  "last_signal_h1_time": null,
+  "magic": 200020,
+  "pending_entry_signal": null,
+  "positions": [],
+  "reconciliation_required": false,
+  "shadow_ticket_seq": -200020000,
+  "strategy_id": "bot20_xau_h1_large_candle_short_confirm_refine_top_45_04",
+  "symbol": "XAUUSD",
+  "sync_block_new_entries": false,
+  "sync_block_reason": null,
+  "updated_at": "2026-07-08T00:00:00+00:00",
+  "version": 1
+}
