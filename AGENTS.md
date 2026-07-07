@@ -64,6 +64,7 @@
 - Never stage or commit `live_config.py`, direct `live_config` derivatives such as `__pycache__/live_config*.pyc`, `.env`, secrets, tokens, or account credentials.
 - When pushing a new bot, stage only the target bot source/docs, required compose or AGENTS changes, and necessary operational notes.
 - On first-time bot push, include the generated bot folder contents except the sensitive exclusions above.
+- After a successful push, include the next CentOS-side commands in the final response: `cd /home/muu/python_program/anti-exness`, `git pull`, any required `live_config.py` placement note, a no-order check such as `sudo docker compose run --rm --no-deps exness-bot-NN python3 /app/botNN/live_sNN_bot.py --self-test` when safe, and the compose recreate command if the user wants to start/update that bot.
 
 ## Maintenance Hygiene
 

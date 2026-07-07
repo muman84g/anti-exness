@@ -1,8 +1,8 @@
 GitHub push memo
 
-Purpose: push live bot source files quickly while keeping live_config out of GitHub.
+Purpose: push live bot files quickly while keeping live_config out of GitHub, then tell the user the CentOS-side next steps.
 
-## Rule
+## First-Time Bot Push Rule
 
 For a first-time bot push, include the generated target bot folder as-is.
 
@@ -32,22 +32,22 @@ Copy bot20 as a folder, then remove only live_config artifacts:
 $SRC = 'C:\botter\bot'
 $DST = $CLONE
 Copy-Item -LiteralPath "$SRC\BOT_BACKTEST_MAP_ja.md" -Destination "$DST\BOT_BACKTEST_MAP_ja.md" -Force
-Get-ChildItem -LiteralPath $SRC -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination "$DST\githubへのpush.txt" -Force
+Get-ChildItem -LiteralPath $SRC -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination $DST -Force
 Copy-Item -LiteralPath "$SRC\bot20" -Destination "$DST\bot20" -Recurse -Force
 Remove-Item -LiteralPath "$DST\bot20\live_config.py" -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath "$DST\bot20\__pycache__\live_config.cpython-312.pyc" -Force -ErrorAction SilentlyContinue
 ```
 
-Then add only the `exness-bot-20` service block to the clone's `docker-compose.yml`. Preserve existing bot18/bot19 settings.
+Add only the `exness-bot-20` service block to the clone's `docker-compose.yml`. Preserve existing bot18/bot19 settings unless the user asked to change them.
 
 Stage and verify:
 
 ```powershell
 Set-Location $CLONE
-git add BOT_BACKTEST_MAP_ja.md docker-compose.yml githubへのpush.txt
+git add -- BOT_BACKTEST_MAP_ja.md docker-compose.yml github*push.txt
 git add -f bot20
 git diff --cached --name-only
-git diff --cached --name-only | Select-String -Pattern 'live_config\.py|__pycache__/live_config|\.env'
+git diff --cached --name-only | Select-String -Pattern '(^|/)live_config\.py$|__pycache__/live_config|\.env'
 ```
 
 The final command must return no matches.
@@ -57,4 +57,42 @@ Commit and push:
 ```powershell
 git commit -m "Add bot20 live bot files"
 git push origin main
+```
+
+## Final Response After Push
+
+After a successful push, always include the CentOS-side next steps. For bot20:
+
+```bash
+cd /home/muu/python_program/anti-exness
+git pull
+```
+
+If this is the first CentOS deployment for the bot, place local `bot20/live_config.py` on CentOS manually before starting. Do not commit it.
+
+No-order check, if the Docker image has the needed Python dependencies:
+
+```bash
+sudo docker compose run --rm --no-deps exness-bot-20 python3 /app/bot20/live_s20_bot.py --self-test
+```
+
+Start or refresh only bot20 when the user is ready:
+
+```bash
+sudo docker compose up -d --no-deps --force-recreate exness-bot-20
+```
+
+Then check:
+
+```bash
+sudo docker ps --filter name=exness-bot-20
+sudo docker compose logs --tail=80 exness-bot-20
+tail -n 80 bot20/logs/s20_bot.log
+```
+
+For shadow-forward, confirm `bot20/s20_params.json` remains:
+
+```json
+"live_trading_enabled": false,
+"shadow_forward_enabled": true
 ```
