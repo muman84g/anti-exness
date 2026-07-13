@@ -17,6 +17,7 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -103,6 +104,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "sl_mismatch_tolerance_pips": 0.2,
     "assume_missing_state_position_is_sl": True,
     "use_server_pending_entry": True,
+    "flat_pending_grid_repair_enabled": True,
     "dynamic_recovery_close_enabled": True,
     "dynamic_recovery_sl_streak": 6,
     "dynamic_recovery_min_cycle_loss_usd": -10.0,
@@ -497,6 +499,7 @@ class S19SnowballBot:
         self.cached_regime = self.default_regime()
         self.last_status_log_epoch = 0.0
         self.last_auto_tp_profit_guard_log_epoch = 0.0
+        self.last_flat_pending_grid_repair_log_epoch = 0.0
         self.last_position_sync_epoch = 0.0
         self.sync_closed_count = 0
 
@@ -554,6 +557,7 @@ class S19SnowballBot:
             "sync_block_reason": None,
             "pending_open": None,
             "reconciliation_required": None,
+            "pending_grid_repair_wait": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -1193,6 +1197,233 @@ class S19SnowballBot:
         self.state["virtual_orders"] = remaining_orders
         return not remaining_orders
 
+    def expected_flat_pending_grid_tuples(self) -> list[tuple[str, float, float]]:
+        anchor = self.price(float(self.state["grid_anchor"]))
+        distance = self.distance_price
+        return sorted(
+            [
+                ("LONG", self.price(anchor + distance), anchor),
+                ("LONG", self.price(anchor + 2.0 * distance), self.price(anchor + distance)),
+                ("SHORT", self.price(anchor - distance), anchor),
+                ("SHORT", self.price(anchor - 2.0 * distance), self.price(anchor - distance)),
+            ]
+        )
+
+    def state_pending_grid_tuples(self) -> list[tuple[str, float, float]]:
+        return sorted(
+            [
+                (
+                    str(order.get("direction", "")),
+                    self.price(float(order.get("entry", 0.0))),
+                    self.price(float(order.get("stop_loss", 0.0))),
+                )
+                for order in self.state["virtual_orders"]
+            ]
+        )
+
+    def live_pending_grid_tuples(self, live_orders: list[Any]) -> list[tuple[str, float, float]]:
+        rows: list[tuple[str, float, float]] = []
+        for order in live_orders:
+            order_type = int(getattr(order, "type", -1))
+            if order_type == ORDER_TYPE_BUY_STOP:
+                direction = "LONG"
+            elif order_type == ORDER_TYPE_SELL_STOP:
+                direction = "SHORT"
+            else:
+                direction = f"TYPE_{order_type}"
+            rows.append(
+                (
+                    direction,
+                    self.price(float(getattr(order, "price_open", 0.0))),
+                    self.price(float(getattr(order, "sl", 0.0) or 0.0)),
+                )
+            )
+        return sorted(rows)
+
+    def state_pending_snapshot(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "order_id": order.get("order_id"),
+                "ticket": order.get("pending_ticket"),
+                "direction": order.get("direction"),
+                "entry": order.get("entry"),
+                "stop_loss": order.get("stop_loss"),
+                "comment": order.get("comment"),
+            }
+            for order in self.state["virtual_orders"]
+        ]
+
+    def live_pending_snapshot(self, live_orders: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "ticket": int(getattr(order, "ticket", 0)),
+                "type": int(getattr(order, "type", -1)),
+                "direction": str(getattr(order, "direction", "")),
+                "entry": self.price(float(getattr(order, "price_open", 0.0))),
+                "stop_loss": self.price(float(getattr(order, "sl", 0.0) or 0.0)),
+                "comment": str(getattr(order, "comment", "")),
+            }
+            for order in live_orders
+        ]
+
+    def flat_pending_grid_expected(self) -> bool:
+        return (
+            bool(self.params.get("flat_pending_grid_repair_enabled", True))
+            and self.live_server_pending_enabled()
+            and int(self.state.get("cycle_id", 0)) > 0
+            and self.state.get("grid_anchor") is not None
+            and not bool(self.state.get("restart_next_tick"))
+            and not self.state.get("positions")
+            and not isinstance(self.state.get("pending_open"), dict)
+            and not isinstance(self.state.get("reconciliation_required"), dict)
+        )
+
+    def flat_pending_grid_anomaly(self, live_orders: list[Any]) -> dict[str, Any] | None:
+        if not self.flat_pending_grid_expected():
+            return None
+
+        state_orders = list(self.state["virtual_orders"])
+        pending_tickets = {
+            int(order["pending_ticket"])
+            for order in state_orders
+            if order.get("pending_ticket")
+        }
+        live_order_tickets = {int(order.ticket) for order in live_orders}
+        expected_tuples = self.expected_flat_pending_grid_tuples()
+        state_tuples = self.state_pending_grid_tuples()
+        live_tuples = self.live_pending_grid_tuples(live_orders)
+        details = {
+            "reason": "flat_pending_grid_integrity_failed",
+            "expected": expected_tuples,
+            "state": self.state_pending_snapshot(),
+            "live": self.live_pending_snapshot(live_orders),
+            "missing_tickets": sorted(pending_tickets.difference(live_order_tickets)),
+            "extra_tickets": sorted(live_order_tickets.difference(pending_tickets)),
+            "state_count": len(state_orders),
+            "live_count": len(live_orders),
+            "state_tuples": state_tuples,
+            "live_tuples": live_tuples,
+        }
+        state_ok = state_tuples == expected_tuples
+        live_ok = live_tuples == expected_tuples
+        tickets_ok = not details["missing_tickets"] and not details["extra_tickets"]
+        if state_ok and live_ok and tickets_ok:
+            return None
+        return details
+
+    def flat_pending_grid_reissue_block_reason(self, tick: dict[str, Any], regime: dict[str, Any]) -> str | None:
+        if not bool(self.params.get("live_trading_enabled", False)):
+            return "live_trading_disabled"
+        if self.is_weekend_entry_blocked():
+            return "weekend_entry_blocked"
+        if float(tick["spread_points"]) > float(self.params["max_entry_spread_points"]) + 1e-9:
+            return (
+                f"spread_block spread_points={float(tick['spread_points']):.1f} "
+                f"max={float(self.params['max_entry_spread_points']):.1f}"
+            )
+        if not bool(regime.get("signal_fresh", False)):
+            return f"regime_stale reason={regime.get('reason')}"
+        if not bool(regime.get("entry_allowed", False)):
+            return f"regime_block reason={regime.get('reason')}"
+        return None
+
+    def cancel_live_pending_orders(self, live_orders: list[Any], reason: str) -> bool:
+        for live_order in list(live_orders):
+            ticket = int(getattr(live_order, "ticket", 0))
+            if not ticket:
+                continue
+            if not self.executor.cancel_order(ticket):
+                self.block_new_entries(f"failed to cancel pending order {ticket}")
+                return False
+            self.log_trade_csv(
+                "PENDING_CANCEL",
+                ticket,
+                direction=str(getattr(live_order, "direction", "")),
+                lot_size=float(getattr(live_order, "volume", self.params["lot"])),
+                price=self.price(float(getattr(live_order, "price_open", 0.0))),
+                stop_loss=self.price(float(getattr(live_order, "sl", 0.0) or 0.0)),
+                pnl="",
+                reason=reason,
+                source_order_id="",
+                comment=str(getattr(live_order, "comment", "")),
+            )
+        return True
+
+    def set_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
+        self.state["reconciliation_required"] = {
+            "type": "flat_pending_grid_repair",
+            "symbol": self.symbol,
+            "magic": self.magic,
+            "cycle_id": int(self.state.get("cycle_id", 0)),
+            "grid_anchor": self.state.get("grid_anchor"),
+            "reason": reason,
+            "details": details,
+            "created_at_jst": jst_now().isoformat(),
+        }
+        self.block_new_entries(reason)
+
+    def repair_flat_pending_grid(
+        self,
+        tick: dict[str, Any],
+        regime: dict[str, Any],
+        live_orders: list[Any],
+        anomaly: dict[str, Any],
+    ) -> bool:
+        already_waiting = isinstance(self.state.get("pending_grid_repair_wait"), dict)
+        now = time.time()
+        should_log = (
+            not already_waiting
+            or now - self.last_flat_pending_grid_repair_log_epoch
+            >= float(self.params["status_log_interval_seconds"])
+        )
+        if should_log:
+            logging.warning(
+                "S19 flat pending grid anomaly detected; repairing: %s",
+                json.dumps(anomaly, ensure_ascii=True, sort_keys=True),
+            )
+            self.last_flat_pending_grid_repair_log_epoch = now
+        if self.state.get("positions"):
+            self.set_reconciliation_required("flat pending grid repair found state positions", anomaly)
+            return False
+        if not self.cancel_live_pending_orders(live_orders, "flat_pending_grid_repair"):
+            self.set_reconciliation_required("flat pending grid live pending cancel failed", anomaly)
+            return False
+
+        self.state["virtual_orders"] = []
+        self.state["pending_open"] = None
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        self.state["pending_grid_repair_wait"] = {
+            "reason": anomaly.get("reason", "flat_pending_grid_integrity_failed"),
+            "details": anomaly,
+            "created_at_jst": jst_now().isoformat(),
+        }
+
+        wait_reason = self.flat_pending_grid_reissue_block_reason(tick, regime)
+        if wait_reason is not None:
+            self.state["pending_grid_repair_wait"]["wait_reason"] = wait_reason
+            if should_log:
+                logging.warning("S19 flat pending grid canceled residual orders; waiting to reissue: %s", wait_reason)
+            return False
+
+        ok = self.ensure_orders(LONG, tick["info"], tick["bid"], tick["ask"], regime)
+        ok = self.ensure_orders(SHORT, tick["info"], tick["bid"], tick["ask"], regime) and ok
+        if ok and self.state_pending_grid_tuples() == self.expected_flat_pending_grid_tuples():
+            self.state["pending_grid_repair_wait"] = None
+            self.state["sync_block_new_entries"] = False
+            self.state["sync_block_reason"] = None
+            logging.warning(
+                "S19 flat pending grid repaired and reissued at anchor=%s",
+                self.state.get("grid_anchor"),
+            )
+            return True
+
+        failure_details = anomaly.copy()
+        failure_details["state_after_reissue"] = self.state_pending_snapshot()
+        self.clear_virtual_orders()
+        self.set_reconciliation_required("flat pending grid reissue failed", failure_details)
+        return False
+
     def clear_auto_tp(self) -> None:
         self.state["auto_tp_price"] = None
         self.state["estimated_auto_tp_profit_usd"] = 0.0
@@ -1213,10 +1444,13 @@ class S19SnowballBot:
             pips = (entry - float(exit_price)) / self.pip_size
         return pips * usd_per_pip
 
-    def sync_live_positions(self, tick: dict[str, Any], force: bool = False) -> bool:
+    def sync_live_positions(self, tick: dict[str, Any], regime: dict[str, Any], force: bool = False) -> bool:
         self.sync_closed_count = 0
         flat_local_state = not self.state["positions"] and not self.state["virtual_orders"]
-        if flat_local_state and not force:
+        active_flat_cycle = self.flat_pending_grid_expected() or isinstance(
+            self.state.get("pending_grid_repair_wait"), dict
+        )
+        if flat_local_state and not force and not active_flat_cycle:
             interval = float(self.params.get("flat_position_sync_interval_seconds", 0.0) or 0.0)
             if interval > 0.0 and time.time() - self.last_position_sync_epoch < interval:
                 return True
@@ -1288,12 +1522,16 @@ class S19SnowballBot:
             for order in self.state["virtual_orders"]
             if order.get("pending_ticket")
         ]
+        live_orders: list[Any] = []
         if bool(self.params.get("use_server_pending_entry", False)):
             live_orders = self.executor.get_orders(self.symbol, self.magic)
             if live_orders is None:
                 self.block_new_entries("pending order sync failed")
                 return False
             live_order_tickets = {int(order.ticket) for order in live_orders}
+            flat_grid_anomaly = self.flat_pending_grid_anomaly(live_orders)
+            if flat_grid_anomaly is not None:
+                return self.repair_flat_pending_grid(tick, regime, live_orders, flat_grid_anomaly)
             extra_order_tickets = sorted(live_order_tickets.difference(set(pending_tickets)))
             if extra_order_tickets:
                 self.block_new_entries(f"untracked live pending orders exist: {extra_order_tickets}")
@@ -1311,6 +1549,8 @@ class S19SnowballBot:
         reason = self.state.get("sync_block_reason")
         if isinstance(reason, str) and reason.startswith("pending order missing on MT5:"):
             self.clear_new_entry_block_if_reason(reason)
+        if self.state.get("pending_grid_repair_wait") and not self.flat_pending_grid_anomaly(live_orders):
+            self.state["pending_grid_repair_wait"] = None
         return True
 
     def process_stops(self, bid: float, ask: float, info: Any) -> int:
@@ -1833,7 +2073,7 @@ class S19SnowballBot:
         if tick is None:
             return
         regime = self.get_regime()
-        if not self.sync_live_positions(tick):
+        if not self.sync_live_positions(tick, regime):
             self.save_state()
             return
         reconciliation_reason = self.reconciliation_block_reason()
@@ -1902,7 +2142,7 @@ class S19SnowballBot:
                 self.log_status(tick, regime)
                 self.save_state()
                 return
-            if not self.sync_live_positions(tick, force=True):
+            if not self.sync_live_positions(tick, regime, force=True):
                 self.save_state()
                 return
             if not self.start_cycle(tick["bid"], tick["info"], tick["ask"], regime):
@@ -1981,9 +2221,16 @@ class S19SnowballBot:
 
     def self_test(self) -> None:
         original_params = self.params
+        original_state = self.state
+        original_state_file = self.state_file
+        original_trade_log_file = self.trade_log_file
+        original_executor = self.executor
+        temp_dir = tempfile.mkdtemp(prefix="s19_selftest_")
         self.params = self.params.copy()
         self.params["live_trading_enabled"] = False
         self.params["use_server_pending_entry"] = False
+        self.state_file = os.path.join(temp_dir, "state.json")
+        self.trade_log_file = os.path.join(temp_dir, "trades.csv")
         try:
             self.state = self.default_state()
             assert self.start_cycle(1.25000)
@@ -2019,8 +2266,191 @@ class S19SnowballBot:
             )
             assert not self.auto_tp_profit_guard_passed(1.25099, 1.25108)
             assert self.auto_tp_profit_guard_passed(1.26000, 1.26009)
+
+            class FakeInfo:
+                volume_min = 0.01
+                volume_max = 100.0
+                volume_step = 0.01
+                contract_size = 100000.0
+
+            class FakePendingOrder:
+                def __init__(self, ticket: int, type_int: int, price_open: float, sl: float, comment: str) -> None:
+                    self.ticket = ticket
+                    self.symbol = "GBPUSD"
+                    self.type = type_int
+                    self.direction = "LONG" if type_int == ORDER_TYPE_BUY_STOP else "SHORT"
+                    self.volume = 0.01
+                    self.price_open = price_open
+                    self.sl = sl
+                    self.tp = 0.0
+                    self.magic = 190019
+                    self.comment = comment
+
+            class FakeExecutor:
+                def __init__(self) -> None:
+                    self.cancelled: list[int] = []
+                    self.placed: list[tuple[int, float, float]] = []
+                    self.last_order_error = None
+
+                def cancel_order(self, ticket: int) -> bool:
+                    self.cancelled.append(int(ticket))
+                    return True
+
+                def place_stop_order(
+                    self,
+                    symbol: str,
+                    order_type: int,
+                    lot_size: float,
+                    price: float,
+                    sl: float = 0.0,
+                    tp: float = 0.0,
+                    magic: int = 0,
+                    comment: str = "",
+                    digits: int | None = None,
+                ) -> int:
+                    ticket = 9001 + len(self.placed)
+                    self.placed.append((int(order_type), self.price(price), self.price(sl)))
+                    return ticket
+
+                @staticmethod
+                def price(value: float) -> float:
+                    return round(float(value), 5)
+
+            self.params["live_trading_enabled"] = True
+            self.params["use_server_pending_entry"] = True
+            self.state = self.default_state()
+            self.state["cycle_id"] = 1
+            self.state["grid_anchor"] = 1.25000
+            self.state["next_order_id"] = 5
+            self.state["virtual_orders"] = [
+                {
+                    "order_id": 1,
+                    "direction": "LONG",
+                    "entry": 1.25100,
+                    "stop_loss": 1.25000,
+                    "pending_ticket": 1001,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_1",
+                },
+                {
+                    "order_id": 2,
+                    "direction": "LONG",
+                    "entry": 1.25200,
+                    "stop_loss": 1.25100,
+                    "pending_ticket": 1002,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_2",
+                },
+                {
+                    "order_id": 3,
+                    "direction": "SHORT",
+                    "entry": 1.24900,
+                    "stop_loss": 1.25000,
+                    "pending_ticket": 1003,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_3",
+                },
+                {
+                    "order_id": 4,
+                    "direction": "SHORT",
+                    "entry": 1.24800,
+                    "stop_loss": 1.24900,
+                    "pending_ticket": 1004,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_4",
+                },
+            ]
+            self.executor = FakeExecutor()
+            live_orders = [
+                FakePendingOrder(1002, ORDER_TYPE_BUY_STOP, 1.25200, 1.25100, "s19_gbp_1_2"),
+                FakePendingOrder(1003, ORDER_TYPE_SELL_STOP, 1.24900, 1.25000, "s19_gbp_1_3"),
+                FakePendingOrder(1004, ORDER_TYPE_SELL_STOP, 1.24800, 1.24900, "s19_gbp_1_4"),
+            ]
+            anomaly = self.flat_pending_grid_anomaly(live_orders)
+            assert anomaly is not None
+            tick = {
+                "bid": 1.25000,
+                "ask": 1.25009,
+                "spread_points": 9.0,
+                "info": FakeInfo(),
+            }
+            regime = {"entry_allowed": True, "signal_fresh": True, "reason": "ok"}
+            assert self.repair_flat_pending_grid(tick, regime, live_orders, anomaly)
+            assert self.executor.cancelled == [1002, 1003, 1004]
+            assert len(self.state["virtual_orders"]) == 4
+            assert self.state_pending_grid_tuples() == self.expected_flat_pending_grid_tuples()
+            assert self.state["pending_grid_repair_wait"] is None
+
+            self.state = self.default_state()
+            self.state["cycle_id"] = 1
+            self.state["grid_anchor"] = 1.25000
+            self.state["next_order_id"] = 5
+            self.state["virtual_orders"] = [
+                {
+                    "order_id": 1,
+                    "direction": "LONG",
+                    "entry": 1.25100,
+                    "stop_loss": 1.25000,
+                    "pending_ticket": 1001,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_1",
+                },
+                {
+                    "order_id": 2,
+                    "direction": "LONG",
+                    "entry": 1.25200,
+                    "stop_loss": 1.25100,
+                    "pending_ticket": 1002,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_2",
+                },
+                {
+                    "order_id": 3,
+                    "direction": "SHORT",
+                    "entry": 1.24900,
+                    "stop_loss": 1.25000,
+                    "pending_ticket": 1003,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_3",
+                },
+                {
+                    "order_id": 4,
+                    "direction": "SHORT",
+                    "entry": 1.24800,
+                    "stop_loss": 1.24900,
+                    "pending_ticket": 1004,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_1_4",
+                },
+            ]
+            self.executor = FakeExecutor()
+            anomaly = self.flat_pending_grid_anomaly(live_orders)
+            assert anomaly is not None
+            wide_tick = {
+                "bid": 1.25000,
+                "ask": 1.25012,
+                "spread_points": 12.0,
+                "info": FakeInfo(),
+            }
+            assert not self.repair_flat_pending_grid(wide_tick, regime, live_orders, anomaly)
+            assert self.executor.cancelled == [1002, 1003, 1004]
+            assert self.executor.placed == []
+            assert self.state["virtual_orders"] == []
+            assert self.state["grid_anchor"] == 1.25000
+            assert str(self.state["pending_grid_repair_wait"]["wait_reason"]).startswith("spread_block")
+            anomaly = self.flat_pending_grid_anomaly([])
+            assert anomaly is not None
+            assert self.repair_flat_pending_grid(tick, regime, [], anomaly)
+            assert len(self.state["virtual_orders"]) == 4
+            assert self.state_pending_grid_tuples() == self.expected_flat_pending_grid_tuples()
+            assert self.state["pending_grid_repair_wait"] is None
         finally:
             self.params = original_params
+            self.state = original_state
+            self.state_file = original_state_file
+            self.trade_log_file = original_trade_log_file
+            self.executor = original_executor
+            shutil.rmtree(temp_dir, ignore_errors=True)
         logging.info("s19 self-test passed")
 
 

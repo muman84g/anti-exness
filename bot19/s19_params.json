@@ -13,6 +13,7 @@
     "inactive_distance_mode": "gate_false",
     "max_entry_spread_points": 9.0,
     "use_server_pending_entry": true,
+    "flat_pending_grid_repair_enabled": true,
     "use_server_sl": true,
     "repair_missing_sl_on_sync": true,
     "sl_mismatch_tolerance_pips": 0.2,

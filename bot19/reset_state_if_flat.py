@@ -79,6 +79,7 @@ def default_state(symbol: str, magic: int) -> dict[str, Any]:
         "sync_block_reason": None,
         "pending_open": None,
         "reconciliation_required": None,
+        "pending_grid_repair_wait": None,
         "last_regime": default_regime(),
         "last_policy_decision": None,
         "updated_at_jst": jst_now_iso(),
