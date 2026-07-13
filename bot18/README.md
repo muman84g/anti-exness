@@ -38,6 +38,19 @@ top-level `lot` はfallback用の `0.01` として残し、実運用では各pro
 - policy decisions: `logs/s18_policy_decisions.csv`
 - state: `state/s18_<symbol>_bot_state.json`
 
+## Bridge
+
+- Bridge source: `BotBridge_s18.mq5`
+- MT5 Expert name: `BotBridge_s18`
+- Python command file: `cmd_s18.txt`
+- Python response file: `res_s18.txt`
+- Python heartbeat file: `heartbeat_s18.txt`
+- Python lock file: `ea_bridge_s18.lock`
+- MT5 EA input `InpCommandFile`: `cmd_s18.txt`
+- MT5 EA input `InpResponseFile`: `res_s18.txt`
+
+`live_s18_bot.py` は起動時に `CAPS` を確認し、attached bridge が `BotBridge_s18` でない場合は起動を止めます。
+
 ## 起動
 
 Git pull後の反映は既存bot18と同じサービス名で行います。

@@ -5,6 +5,17 @@ from ea_bridge import ea_bridge
 # Define constants here since we removed mt5 import
 ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
+S18_BRIDGE_NAME = "BotBridge_s18"
+REQUIRED_S18_COMMANDS = {
+    "ECHO",
+    "INFO",
+    "HIST",
+    "OPEN",
+    "POSITIONS",
+    "POSITION",
+    "MODIFY",
+    "CLOSE",
+}
 
 class Ticket(int):
     """
@@ -81,6 +92,27 @@ class PositionInfo:
 class MT5Executor(BaseExecutor):
     def __init__(self, data_manager):
         self.dm = data_manager
+
+    def get_bridge_capabilities(self):
+        """Return bridge identity/capability info, or None on stale/unknown EA."""
+        res = ea_bridge.send_command("CAPS|")
+        if not res or not res.startswith("OK|CAPS|"):
+            logging.critical(
+                "EA bridge CAPS preflight failed: %s. "
+                "BotBridge_s18.ex5 is likely stale, not attached, or not using the same Files directory.",
+                res,
+            )
+            return None
+        parts = res.split("|", 4)
+        if len(parts) < 5:
+            logging.critical("EA bridge returned malformed CAPS response: %s", res)
+            return None
+        commands = {item.strip().upper() for item in parts[4].split(",") if item.strip()}
+        return {
+            "name": parts[2],
+            "version": parts[3],
+            "commands": commands,
+        }
         
     def get_symbol_info(self, symbol):
         """Retrieves and checks symbol info via EA Bridge."""

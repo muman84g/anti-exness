@@ -262,6 +262,8 @@ services:
       - ./bot18/s18_params.json:/app/bot18/s18_params.json:ro
       - ./bot18/artifacts:/app/bot18/artifacts:ro
       - ./bot18/macro_events_2026.json:/app/bot18/macro_events_2026.json:ro
+      - ./bot18/BotBridge_s18.mq5:/app/bot18/BotBridge_s18.mq5:ro
+      - "./bot18/BotBridge_s18.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s18.mq5:ro"
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
@@ -270,6 +272,10 @@ services:
       - NOVNC_PORT=6092
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot18
+      - EA_BRIDGE_COMMAND_FILE=cmd_s18.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s18.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s18.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s18.lock
       - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2

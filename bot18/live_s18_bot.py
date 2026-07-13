@@ -635,7 +635,29 @@ class S18SnowballBot:
 
     def connect(self) -> bool:
         self.ensure_bridge()
-        return bool(self.dm.connect())
+        if not bool(self.dm.connect()):
+            logging.critical("S18 failed to connect to EA bridge for %s.", self.symbol)
+            return False
+
+        from live_executor import REQUIRED_S18_COMMANDS, S18_BRIDGE_NAME
+
+        caps = self.executor.get_bridge_capabilities()
+        if not caps:
+            return False
+        missing = sorted(REQUIRED_S18_COMMANDS - set(caps["commands"]))
+        if caps["name"] != S18_BRIDGE_NAME:
+            logging.critical("Bridge name mismatch: expected=%s got=%s", S18_BRIDGE_NAME, caps["name"])
+            return False
+        if missing:
+            logging.critical("Bridge command mismatch: missing=%s caps=%s", missing, sorted(caps["commands"]))
+            return False
+        logging.info(
+            "EA bridge capabilities verified: name=%s version=%s commands=%s",
+            caps["name"],
+            caps["version"],
+            ",".join(sorted(caps["commands"])),
+        )
+        return True
 
     def normalize_lot(self, info: Any) -> float:
         lot = float(self.params["lot"])
