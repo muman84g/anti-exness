@@ -67,7 +67,6 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "max_virtual_orders": 80,
     "break_even_refresh_seconds": 300,
     "poll_interval_seconds": 1.0,
-    "flat_position_sync_interval_seconds": 5.0,
     "status_log_interval_seconds": 60,
     "regime_timeframe": 16385,
     "regime_bars": 240,
@@ -103,6 +102,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "assume_missing_state_position_is_sl": True,
     "policy_enabled": True,
     "policy_fail_closed": True,
+    "policy_decision_log_enabled": True,
+    "policy_decision_log_interval_seconds": 300,
+    "policy_decision_log_pass_always": True,
+    "policy_decision_log_error_always": True,
     "policy_artifacts_dir": ARTIFACTS_DIR,
     "policy_spread_add_points": 2.0,
     "policy_max_entry_spread_points": 9.0,
@@ -482,7 +485,8 @@ class S18SnowballBot:
         self.cached_regime = self.default_regime()
         self.last_status_log_epoch = 0.0
         self.last_auto_tp_profit_guard_log_epoch = 0.0
-        self.last_position_sync_epoch = 0.0
+        self.last_policy_decision_log_epoch = 0.0
+        self.last_policy_decision_log_signature: tuple[Any, ...] | None = None
         self.sync_closed_count = 0
 
     @property
@@ -778,6 +782,31 @@ class S18SnowballBot:
         return features
 
     def log_policy_decision(self, decision: dict[str, Any]) -> None:
+        if not bool(self.params.get("policy_decision_log_enabled", True)):
+            return
+        reason = str(decision.get("reason", ""))
+        allowed = bool(decision.get("allow", False))
+        signature = (
+            self.symbol,
+            str(decision.get("candidate_id", "")),
+            str(decision.get("model", "")),
+            allowed,
+            reason,
+        )
+        now = time.time()
+        interval = float(self.params.get("policy_decision_log_interval_seconds", 300.0) or 0.0)
+        should_log = False
+        if allowed and bool(self.params.get("policy_decision_log_pass_always", True)):
+            should_log = True
+        elif reason.startswith("policy_error") and bool(self.params.get("policy_decision_log_error_always", True)):
+            should_log = True
+        elif signature != self.last_policy_decision_log_signature:
+            should_log = True
+        elif interval <= 0.0 or now - self.last_policy_decision_log_epoch >= interval:
+            should_log = True
+        if not should_log:
+            return
+
         header = [
             "Timestamp_JST",
             "Symbol",
@@ -808,7 +837,9 @@ class S18SnowballBot:
             decision.get("h1_signal_age_minutes", ""),
             decision.get("m1_atr_pips", ""),
         ]
-        append_csv_row(self.policy_log_file, header, row)
+        if append_csv_row(self.policy_log_file, header, row):
+            self.last_policy_decision_log_epoch = now
+            self.last_policy_decision_log_signature = signature
 
     def evaluate_cycle_start_policy(
         self,
@@ -952,13 +983,8 @@ class S18SnowballBot:
             pips = (entry - float(exit_price)) / self.pip_size
         return pips * usd_per_pip
 
-    def sync_live_positions(self, tick: dict[str, Any], force: bool = False) -> bool:
+    def sync_live_positions(self, tick: dict[str, Any]) -> bool:
         self.sync_closed_count = 0
-        flat_local_state = not self.state["positions"] and not self.state["virtual_orders"]
-        if flat_local_state and not force:
-            interval = float(self.params.get("flat_position_sync_interval_seconds", 0.0) or 0.0)
-            if interval > 0 and time.time() - self.last_position_sync_epoch < interval:
-                return True
         live_positions = self.executor.get_positions(self.symbol, self.magic)
         if live_positions is None:
             self.block_new_entries("position sync failed")
@@ -1011,7 +1037,6 @@ class S18SnowballBot:
         if not self.state["positions"]:
             self.clear_auto_tp()
         self.clear_new_entry_block_if_reason("position sync failed")
-        self.last_position_sync_epoch = time.time()
         return True
 
     def process_stops(self, bid: float, ask: float, info: Any) -> int:
@@ -1456,9 +1481,6 @@ class S18SnowballBot:
                     f"threshold={policy_decision.get('threshold')}"
                 )
                 self.log_status(tick, regime)
-                self.save_state()
-                return
-            if not self.sync_live_positions(tick, force=True):
                 self.save_state()
                 return
             self.start_cycle(tick["bid"])

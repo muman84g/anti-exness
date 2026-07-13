@@ -4,6 +4,10 @@
     "shadow_forward_enabled":  false,
     "policy_enabled":  true,
     "policy_fail_closed":  true,
+    "policy_decision_log_enabled":  true,
+    "policy_decision_log_interval_seconds":  300,
+    "policy_decision_log_pass_always":  true,
+    "policy_decision_log_error_always":  true,
     "policy_spread_add_points":  2.0,
     "policy_max_entry_spread_points":  9.0,
     "lot":  0.01,
@@ -80,6 +84,5 @@
     "max_virtual_orders":  80,
     "break_even_refresh_seconds":  300,
     "poll_interval_seconds":  1,
-    "flat_position_sync_interval_seconds":  5,
     "status_log_interval_seconds":  60
 }
