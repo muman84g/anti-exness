@@ -236,6 +236,7 @@ class MT5Executor(BaseExecutor):
                 positions.append(PositionInfo.from_record(record))
             except Exception as e:
                 logging.error(f"Failed to parse position record '{record}': {e}")
+                return None
         return positions
 
     def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456, comment="", digits=None):

@@ -34,6 +34,32 @@ LONG = 1
 SHORT = -1
 ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
+MARKET_OPEN_DEFINITIVE_UNFILLED_RETCODES = {
+    "10004",  # requote
+    "10006",  # rejected
+    "10007",  # canceled by trader/server
+    "10011",  # generic request error
+    "10013",  # invalid request
+    "10014",  # invalid volume
+    "10015",  # invalid price
+    "10016",  # invalid stops
+    "10017",  # trade disabled
+    "10018",  # market closed
+    "10019",  # not enough money
+    "10020",  # price changed
+    "10021",  # no quotes
+    "10022",  # invalid expiration
+    "10024",  # too many requests
+    "10026",  # server disables autotrading
+    "10027",  # client disables autotrading
+    "10029",  # order/position frozen
+    "10030",  # invalid filling mode
+    "10032",  # only real accounts allowed
+    "10033",  # pending order limit reached
+    "10034",  # volume limit reached
+    "10035",  # invalid order type
+    "10036",  # position already closed
+}
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "s18_bot.log")
@@ -100,6 +126,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "repair_missing_sl_on_sync": True,
     "sl_mismatch_tolerance_pips": 0.2,
     "assume_missing_state_position_is_sl": True,
+    "market_open_reconcile_enabled": True,
+    "market_open_retry_cooldown_seconds": 30,
     "policy_enabled": True,
     "policy_fail_closed": True,
     "policy_decision_log_enabled": True,
@@ -487,6 +515,7 @@ class S18SnowballBot:
         self.last_auto_tp_profit_guard_log_epoch = 0.0
         self.last_policy_decision_log_epoch = 0.0
         self.last_policy_decision_log_signature: tuple[Any, ...] | None = None
+        self.last_market_open_failure_log_epoch = 0.0
         self.sync_closed_count = 0
 
     @property
@@ -537,6 +566,9 @@ class S18SnowballBot:
             "weekend_resume_reanchor_pending": False,
             "sync_block_new_entries": False,
             "sync_block_reason": None,
+            "market_open_retry_after_epoch": None,
+            "last_market_open_failure": None,
+            "reconciliation_required": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -967,6 +999,360 @@ class S18SnowballBot:
         self.state["auto_tp_price"] = None
         self.state["estimated_auto_tp_profit_usd"] = 0.0
 
+    def set_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
+        self.state["reconciliation_required"] = {
+            "type": "market_open_result",
+            "symbol": self.symbol,
+            "magic": self.magic,
+            "cycle_id": int(self.state.get("cycle_id", 0)),
+            "grid_anchor": self.state.get("grid_anchor"),
+            "reason": reason,
+            "details": details,
+            "created_at_jst": jst_now().isoformat(),
+        }
+        self.block_new_entries(reason)
+
+    def market_open_retry_block_reason(self) -> str | None:
+        retry_after = self.state.get("market_open_retry_after_epoch")
+        if retry_after is None:
+            return None
+        remaining = float(retry_after) - time.time()
+        if remaining <= 0.0:
+            self.state["market_open_retry_after_epoch"] = None
+            return None
+        return f"market_open_retry_cooldown remaining_seconds={remaining:.1f}"
+
+    def broker_reject_definitively_unfilled(self, error: str | None) -> bool:
+        text = str(error or "").strip()
+        if not text:
+            return False
+        if text in {"INFO_UNAVAILABLE", "ERR|INFO_TICK"}:
+            return True
+        if text in {"NO_RESPONSE", "ERR|TIMEOUT", "ERR|LOCK_TIMEOUT", "ERR|WRITE_FAILED"}:
+            return False
+        if text.startswith("ERR|"):
+            code = text.split("|", 1)[1]
+            return code in MARKET_OPEN_DEFINITIVE_UNFILLED_RETCODES
+        return False
+
+    def sanitized_comment_prefix(self) -> str:
+        return str(self.params["comment_prefix"]).replace("|", "_").replace(",", "_")
+
+    def market_order_comment(self, order: dict[str, Any]) -> str:
+        prefix = self.sanitized_comment_prefix()
+        suffix = f"_{int(self.state['cycle_id'])}_{int(order['order_id'])}"
+        if len(suffix) >= 31:
+            return suffix[-31:]
+        return f"{prefix[: 31 - len(suffix)]}{suffix}"
+
+    def market_order_matches_position(self, order: dict[str, Any], position: Any, comment: str) -> bool:
+        if int(getattr(position, "magic", -1)) != int(self.magic):
+            return False
+        if str(getattr(position, "symbol", "")).upper() != self.symbol:
+            return False
+        expected_direction = direction_name(direction_from_name(order["direction"]))
+        if str(getattr(position, "direction", "")) != expected_direction:
+            return False
+        return bool(comment) and str(getattr(position, "comment", "")) == comment
+
+    def parse_market_order_comment(self, comment: str) -> tuple[int | None, int | None]:
+        parts = str(comment or "").rsplit("_", 2)
+        if len(parts) < 3:
+            return None, None
+        try:
+            return int(parts[-2]), int(parts[-1])
+        except ValueError:
+            return None, None
+
+    def live_position_is_recoverable(self, position: Any) -> bool:
+        if int(getattr(position, "magic", -1)) != int(self.magic):
+            return False
+        if str(getattr(position, "symbol", "")).upper() != self.symbol:
+            return False
+        comment = str(getattr(position, "comment", "") or "")
+        prefix = self.sanitized_comment_prefix()
+        if not comment.startswith(f"{prefix}_"):
+            return False
+        try:
+            direction_from_name(str(getattr(position, "direction", "")))
+        except ValueError:
+            return False
+        sl = float(getattr(position, "sl", 0.0) or 0.0)
+        return sl > 0.0
+
+    def adopt_untracked_live_position(self, live_position: Any, reason: str) -> None:
+        ticket = int(getattr(live_position, "ticket"))
+        if any(int(position["ticket"]) == ticket for position in self.state["positions"]):
+            return
+        direction_text = direction_name(direction_from_name(str(getattr(live_position, "direction", ""))))
+        comment = str(getattr(live_position, "comment", "") or "")
+        parsed_cycle_id, parsed_order_id = self.parse_market_order_comment(comment)
+        if parsed_cycle_id is not None:
+            self.state["cycle_id"] = max(int(self.state.get("cycle_id", 0)), int(parsed_cycle_id))
+        stop_loss = self.price(float(getattr(live_position, "sl", 0.0) or 0.0))
+        if self.state.get("grid_anchor") is None:
+            self.state["grid_anchor"] = stop_loss
+        self.state["positions"].append(
+            {
+                "ticket": ticket,
+                "direction": direction_text,
+                "entry": self.price(float(getattr(live_position, "open_price"))),
+                "stop_loss": stop_loss,
+                "volume": float(getattr(live_position, "volume", self.params["lot"])),
+                "opened_at_jst": jst_now().isoformat(),
+                "source_order_id": int(parsed_order_id) if parsed_order_id is not None else "",
+                "comment": comment,
+                "recovered_from_live": True,
+            }
+        )
+        self.recalculate_position_counts()
+        self.log_trade_csv(
+            "ENTRY_RECOVERED_SYNC",
+            ticket,
+            direction=direction_text,
+            lot_size=float(getattr(live_position, "volume", self.params["lot"])),
+            price=self.price(float(getattr(live_position, "open_price"))),
+            stop_loss=stop_loss,
+            pnl="",
+            reason=reason,
+            source_order_id=int(parsed_order_id) if parsed_order_id is not None else "",
+            comment=comment,
+        )
+        logging.warning(
+            "Recovered untracked live position into state ticket=%s reason=%s comment=%s",
+            ticket,
+            reason,
+            comment,
+        )
+
+    def recover_untracked_live_positions(self, live_positions: list[Any], reason: str) -> bool:
+        if not live_positions:
+            return True
+        for position in live_positions:
+            if not self.live_position_is_recoverable(position):
+                return False
+        self.clear_virtual_orders()
+        for position in live_positions:
+            self.adopt_untracked_live_position(position, reason)
+        if isinstance(self.state.get("reconciliation_required"), dict) and (
+            self.state["reconciliation_required"].get("type") == "market_open_result"
+        ):
+            self.state["reconciliation_required"] = None
+        sync_reason = str(self.state.get("sync_block_reason") or "")
+        if sync_reason.startswith("market open result") or sync_reason.startswith("untracked live positions"):
+            self.state["sync_block_new_entries"] = False
+            self.state["sync_block_reason"] = None
+        return True
+
+    def adopt_market_open_position(self, order: dict[str, Any], live_position: Any, comment: str, reason: str) -> None:
+        ticket = int(getattr(live_position, "ticket"))
+        direction = direction_from_name(order["direction"])
+        self.state["virtual_orders"] = [
+            item for item in self.state["virtual_orders"] if int(item["order_id"]) != int(order["order_id"])
+        ]
+        self.state["positions"].append(
+            {
+                "ticket": ticket,
+                "direction": direction_name(direction),
+                "entry": self.price(float(getattr(live_position, "open_price"))),
+                "stop_loss": self.price(float(order["stop_loss"])),
+                "volume": float(getattr(live_position, "volume", self.params["lot"])),
+                "opened_at_jst": jst_now().isoformat(),
+                "source_order_id": int(order["order_id"]),
+                "comment": str(getattr(live_position, "comment", comment)),
+            }
+        )
+        self.state["market_open_retry_after_epoch"] = None
+        self.state["last_market_open_failure"] = None
+        if isinstance(self.state.get("reconciliation_required"), dict) and (
+            self.state["reconciliation_required"].get("type") == "market_open_result"
+        ):
+            self.state["reconciliation_required"] = None
+        sync_reason = str(self.state.get("sync_block_reason") or "")
+        if sync_reason.startswith("market open result"):
+            self.state["sync_block_new_entries"] = False
+            self.state["sync_block_reason"] = None
+        self.recalculate_position_counts()
+        self.log_trade_csv(
+            "ENTRY",
+            ticket,
+            direction=direction_name(direction),
+            lot_size=float(getattr(live_position, "volume", self.params["lot"])),
+            price=self.price(float(getattr(live_position, "open_price"))),
+            stop_loss=self.price(float(order["stop_loss"])),
+            pnl="",
+            reason=reason,
+            source_order_id=int(order["order_id"]),
+            comment=str(getattr(live_position, "comment", comment)),
+        )
+        logging.warning(
+            "Adopted market open result as position ticket=%s source_order_id=%s reason=%s",
+            ticket,
+            int(order["order_id"]),
+            reason,
+        )
+
+    def reconcile_market_open_result(self, order: dict[str, Any], comment: str, error: str | None) -> bool | None:
+        if not bool(self.params.get("market_open_reconcile_enabled", True)):
+            return None
+        live_positions = self.executor.get_positions(self.symbol, self.magic)
+        if live_positions is None:
+            self.log_unresolved_market_open(order, comment, error, "position_sync_failed_after_market_open_error")
+            self.set_reconciliation_required(
+                "market open result unresolved: position sync failed",
+                {
+                    "order": order.copy(),
+                    "comment": comment,
+                    "error": error,
+                },
+            )
+            return None
+        matches = [
+            position
+            for position in live_positions
+            if self.market_order_matches_position(order, position, comment)
+        ]
+        state_tickets = {int(position["ticket"]) for position in self.state["positions"]}
+        match_tickets = {int(getattr(position, "ticket")) for position in matches}
+        untracked_positions = [
+            position
+            for position in live_positions
+            if int(getattr(position, "ticket")) not in state_tickets
+            and int(getattr(position, "ticket")) not in match_tickets
+        ]
+        if untracked_positions and not self.recover_untracked_live_positions(
+            untracked_positions,
+            "untracked_live_position_recovered_after_market_open_error",
+        ):
+            untracked_tickets = sorted(int(getattr(position, "ticket")) for position in untracked_positions)
+            self.log_unresolved_market_open(order, comment, error, "unrecoverable_untracked_positions_after_market_open_error")
+            self.set_reconciliation_required(
+                "market open result unresolved: unrecoverable untracked live positions",
+                {
+                    "order": order.copy(),
+                    "comment": comment,
+                    "error": error,
+                    "untracked_tickets": untracked_tickets,
+                },
+            )
+            return None
+        if untracked_positions and not matches:
+            return True
+        if not matches:
+            return False
+        if len(matches) > 1:
+            self.log_unresolved_market_open(order, comment, error, "ambiguous_market_open_result")
+            self.set_reconciliation_required(
+                "market open result ambiguous: multiple matching positions",
+                {
+                    "order": order.copy(),
+                    "comment": comment,
+                    "error": error,
+                    "tickets": [int(getattr(position, "ticket")) for position in matches],
+                },
+            )
+            return None
+        self.adopt_market_open_position(order, matches[0], comment, "market_open_reconciled_after_error")
+        return True
+
+    def record_definitive_market_open_reject(
+        self,
+        order: dict[str, Any],
+        comment: str,
+        error: str | None,
+        tick: dict[str, Any],
+    ) -> None:
+        cooldown = max(0.0, float(self.params.get("market_open_retry_cooldown_seconds", 30.0) or 0.0))
+        retry_after = time.time() + cooldown if cooldown > 0.0 else None
+        self.state["market_open_retry_after_epoch"] = retry_after
+        self.state["last_market_open_failure"] = {
+            "type": "definitive_reject",
+            "order_id": int(order["order_id"]),
+            "direction": str(order.get("direction", "")),
+            "entry": self.price(float(order.get("entry", 0.0))),
+            "stop_loss": self.price(float(order.get("stop_loss", 0.0))),
+            "comment": comment,
+            "error": str(error or "UNKNOWN"),
+            "retry_after_epoch": retry_after,
+            "created_at_jst": jst_now().isoformat(),
+        }
+        self.log_trade_csv(
+            "ENTRY_FAIL_MARKET",
+            0,
+            direction=str(order.get("direction", "")),
+            lot_size=float(self.normalize_lot(tick["info"])),
+            price=self.price(float(tick["ask"] if order["direction"] == "LONG" else tick["bid"])),
+            stop_loss=self.price(float(order["stop_loss"])),
+            pnl="",
+            reason=f"market_open_rejected:{error or 'UNKNOWN'}",
+            source_order_id=int(order["order_id"]),
+            comment=comment,
+        )
+        logging.warning(
+            "S18 market OPEN rejected without fill; keeping virtual order for retry after cooldown: "
+            "symbol=%s order_id=%s error=%s cooldown=%.1fs",
+            self.symbol,
+            int(order["order_id"]),
+            error,
+            cooldown,
+        )
+
+    def log_unresolved_market_open(
+        self,
+        order: dict[str, Any],
+        comment: str,
+        error: str | None,
+        reason: str,
+    ) -> None:
+        self.log_trade_csv(
+            "ENTRY_UNRESOLVED_MARKET",
+            0,
+            direction=str(order.get("direction", "")),
+            lot_size=float(self.params.get("lot", 0.0)),
+            price=self.price(float(order.get("entry", 0.0))),
+            stop_loss=self.price(float(order.get("stop_loss", 0.0))),
+            pnl="",
+            reason=f"{reason}:{error or 'UNKNOWN'}",
+            source_order_id=int(order["order_id"]),
+            comment=comment,
+        )
+
+    def handle_market_open_failure(self, order: dict[str, Any], comment: str, tick: dict[str, Any]) -> bool:
+        error = getattr(self.executor, "last_order_error", "UNKNOWN")
+        reconcile_result = self.reconcile_market_open_result(order, comment, str(error))
+        if reconcile_result is True:
+            return True
+        if reconcile_result is None:
+            if not isinstance(self.state.get("reconciliation_required"), dict):
+                self.log_unresolved_market_open(
+                    order,
+                    comment,
+                    str(error),
+                    "market_open_reconciliation_unavailable",
+                )
+                self.set_reconciliation_required(
+                    "market open result unresolved: reconciliation disabled",
+                    {
+                        "order": order.copy(),
+                        "comment": comment,
+                        "error": str(error),
+                    },
+                )
+            return False
+        if self.broker_reject_definitively_unfilled(str(error)):
+            self.record_definitive_market_open_reject(order, comment, str(error), tick)
+            return False
+        self.log_unresolved_market_open(order, comment, str(error), "ambiguous_market_open_error")
+        self.set_reconciliation_required(
+            "market open result unresolved",
+            {
+                "order": order.copy(),
+                "comment": comment,
+                "error": str(error),
+            },
+        )
+        return False
+
     def remove_position_by_ticket(self, ticket: int) -> dict[str, Any] | None:
         for index, position in enumerate(list(self.state["positions"])):
             if int(position["ticket"]) == int(ticket):
@@ -993,9 +1379,35 @@ class S18SnowballBot:
         state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
 
         extra_tickets = sorted(set(live_by_ticket).difference(state_by_ticket))
+        for ticket in list(extra_tickets):
+            live_position = live_by_ticket[ticket]
+            matching_order = None
+            matching_comment = ""
+            for order in list(self.state["virtual_orders"]):
+                comment = self.market_order_comment(order)
+                if self.market_order_matches_position(order, live_position, comment):
+                    matching_order = order
+                    matching_comment = comment
+                    break
+            if matching_order is None:
+                continue
+            self.adopt_market_open_position(
+                matching_order,
+                live_position,
+                matching_comment,
+                "market_open_reconciled_on_sync",
+            )
+            state_by_ticket[ticket] = self.state["positions"][-1]
+            extra_tickets.remove(ticket)
         if extra_tickets:
-            self.block_new_entries(f"untracked live positions exist: {extra_tickets}")
-            return False
+            extra_positions = [live_by_ticket[ticket] for ticket in extra_tickets]
+            if not self.recover_untracked_live_positions(
+                extra_positions,
+                "untracked_live_position_recovered_on_sync",
+            ):
+                self.block_new_entries(f"unrecoverable untracked live positions exist: {extra_tickets}")
+                return False
+            state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
 
         for ticket, position in list(state_by_ticket.items()):
             live_position = live_by_ticket.get(ticket)
@@ -1125,6 +1537,15 @@ class S18SnowballBot:
             return 0
         if self.state.get("sync_block_new_entries"):
             return 0
+        if isinstance(self.state.get("reconciliation_required"), dict):
+            return 0
+        retry_block = self.market_open_retry_block_reason()
+        if retry_block is not None:
+            now = time.time()
+            if now - self.last_market_open_failure_log_epoch >= float(self.params["status_log_interval_seconds"]):
+                logging.warning("S18 market OPEN retry is temporarily blocked: %s", retry_block)
+                self.last_market_open_failure_log_epoch = now
+            return 0
         if tick["spread_points"] > float(self.params["max_entry_spread_points"]) + 1e-9:
             for order in self.state["virtual_orders"]:
                 direction = direction_from_name(order["direction"])
@@ -1170,7 +1591,7 @@ class S18SnowballBot:
         order_type = ORDER_TYPE_BUY if direction == LONG else ORDER_TYPE_SELL
         lot = self.normalize_lot(tick["info"])
         sl = float(order["stop_loss"]) if bool(self.params["use_server_sl"]) else 0.0
-        comment = f"{self.params['comment_prefix']}_{self.state['cycle_id']}_{order['order_id']}"
+        comment = self.market_order_comment(order)
         ticket = self.executor.open_position(
             self.symbol,
             order_type,
@@ -1183,9 +1604,10 @@ class S18SnowballBot:
             digits=self.digits,
         )
         if ticket is None:
-            self.block_new_entries(f"open failed for virtual order {order['order_id']}")
-            return False
+            return self.handle_market_open_failure(order, comment, tick)
         entry = float(getattr(ticket, "price", 0.0) or (tick["ask"] if direction == LONG else tick["bid"]))
+        self.state["market_open_retry_after_epoch"] = None
+        self.state["last_market_open_failure"] = None
         self.state["virtual_orders"] = [
             item for item in self.state["virtual_orders"] if int(item["order_id"]) != int(order["order_id"])
         ]
@@ -1221,6 +1643,8 @@ class S18SnowballBot:
 
     def manage_orders_and_grid(self, bid: float, ask: float) -> None:
         if self.state["grid_anchor"] is None:
+            return
+        if self.state.get("sync_block_new_entries") or isinstance(self.state.get("reconciliation_required"), dict):
             return
         level = int(self.state.get("long_count", 0)) - int(self.state.get("short_count", 0))
         if level == 0:
@@ -1456,7 +1880,7 @@ class S18SnowballBot:
             or bool(self.state.get("restart_next_tick"))
             or (not self.state["positions"] and not self.state["virtual_orders"])
         ):
-            if self.state.get("sync_block_new_entries"):
+            if self.state.get("sync_block_new_entries") or isinstance(self.state.get("reconciliation_required"), dict):
                 self.log_status(tick, regime)
                 self.save_state()
                 return
@@ -1510,6 +1934,7 @@ class S18SnowballBot:
             f"cycle={self.state['cycle_id']} pos={len(self.state['positions'])} orders={len(self.state['virtual_orders'])} "
             f"auto_tp={self.state.get('auto_tp_price')} regime_allowed={regime.get('entry_allowed')} "
             f"fresh={regime.get('signal_fresh')} block={self.state.get('sync_block_new_entries')} "
+            f"reconcile_block={isinstance(self.state.get('reconciliation_required'), dict)} "
             f"policy_allowed={last_policy.get('allow')} policy_reason={last_policy.get('reason')}"
         )
 
@@ -1584,6 +2009,309 @@ class S18SnowballBot:
         )
         assert not self.auto_tp_profit_guard_passed(1.25099, 1.25108)
         assert self.auto_tp_profit_guard_passed(1.26000, 1.26009)
+        assert self.broker_reject_definitively_unfilled("ERR|10016")
+        assert self.broker_reject_definitively_unfilled("ERR|10020")
+        assert not self.broker_reject_definitively_unfilled("ERR|10009")
+        assert not self.broker_reject_definitively_unfilled("ERR|10010")
+        assert not self.broker_reject_definitively_unfilled("ERR|10012")
+        assert not self.broker_reject_definitively_unfilled("ERR|10028")
+        assert not self.broker_reject_definitively_unfilled("ERR|10031")
+        original_prefix = self.params["comment_prefix"]
+        self.params["comment_prefix"] = "s18|very,long,prefix_that_should_be_truncated"
+        safe_comment = self.market_order_comment({"order_id": 123456789})
+        assert len(safe_comment) == 31
+        assert "|" not in safe_comment and "," not in safe_comment
+        assert safe_comment.startswith("s18_very_long")
+        assert safe_comment.endswith("_1_123456789")
+        assert self.market_order_comment({"order_id": 123456788}) != safe_comment
+        self.params["comment_prefix"] = original_prefix
+
+        class FakeInfo:
+            volume_min = 0.01
+            volume_max = 10.0
+            volume_step = 0.01
+
+        class FakePosition:
+            def __init__(
+                self,
+                ticket: int,
+                symbol: str,
+                magic: int,
+                direction: str,
+                volume: float,
+                open_price: float,
+                sl: float,
+                comment: str,
+            ) -> None:
+                self.ticket = ticket
+                self.symbol = symbol
+                self.magic = magic
+                self.direction = direction
+                self.volume = volume
+                self.open_price = open_price
+                self.sl = sl
+                self.comment = comment
+
+        class FakeExecutor:
+            def __init__(self, error: str, create_position_after_error: bool = False) -> None:
+                self.last_order_error: str | None = None
+                self.error = error
+                self.create_position_after_error = create_position_after_error
+                self.positions: list[FakePosition] = []
+                self.open_calls = 0
+                self.position_ticket = 900001
+
+            def open_position(
+                self,
+                symbol: str,
+                order_type: int,
+                lot_size: float,
+                sl: float = 0.0,
+                tp: float = 0.0,
+                deviation: int = 20,
+                magic: int = 123456,
+                comment: str = "",
+                digits: int | None = None,
+            ) -> None:
+                del tp, deviation, digits
+                self.open_calls += 1
+                self.last_order_error = self.error
+                if self.create_position_after_error:
+                    direction = "LONG" if order_type == ORDER_TYPE_BUY else "SHORT"
+                    open_price = 1.25055 if direction == "LONG" else 1.24945
+                    self.positions = [
+                        FakePosition(
+                            self.position_ticket,
+                            symbol,
+                            magic,
+                            direction,
+                            lot_size,
+                            open_price,
+                            sl,
+                            comment,
+                        )
+                    ]
+                return None
+
+            def get_positions(self, symbol: str, magic: int) -> list[FakePosition]:
+                return [
+                    position
+                    for position in self.positions
+                    if position.symbol == symbol and int(position.magic) == int(magic)
+                ]
+
+        class SyncFailExecutor(FakeExecutor):
+            def get_positions(self, symbol: str, magic: int) -> None:
+                del symbol, magic
+                return None
+
+        original_log_trade_csv = self.log_trade_csv
+        trade_events: list[tuple[str, int, dict[str, Any]]] = []
+
+        def capture_trade(action: str, ticket: int, **kwargs: Any) -> bool:
+            trade_events.append((action, ticket, kwargs))
+            return True
+
+        self.log_trade_csv = capture_trade  # type: ignore[method-assign]
+        try:
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            market_tick = {
+                "bid": 1.25043,
+                "ask": 1.25050,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            market_regime = {"entry_allowed": True, "signal_fresh": True}
+            reject_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            reject_executor = FakeExecutor("ERR|10016")
+            self.executor = reject_executor
+            assert not self.open_from_virtual_order(reject_order, market_tick)
+            assert reject_executor.open_calls == 1
+            assert len(self.state["virtual_orders"]) == 4
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["market_open_retry_after_epoch"] is not None
+            assert any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
+            assert self.fill_virtual_orders(market_tick, market_regime) == 0
+            assert reject_executor.open_calls == 1
+            self.state["market_open_retry_after_epoch"] = None
+            self.state["reconciliation_required"] = {"type": "market_open_result", "reason": "test"}
+            self.state["sync_block_new_entries"] = False
+            assert self.fill_virtual_orders(market_tick, market_regime) == 0
+            assert reject_executor.open_calls == 1
+            self.state["reconciliation_required"] = None
+
+            original_get_tick = self.get_tick
+            original_get_regime = self.get_regime
+            original_sync_live_positions = self.sync_live_positions
+            original_save_state = self.save_state
+            original_live_trading_enabled = self.params.get("live_trading_enabled")
+            original_policy_enabled = self.params.get("policy_enabled")
+            try:
+                self.state = self.default_state()
+                self.state["reconciliation_required"] = {"type": "market_open_result", "reason": "test"}
+                self.state["sync_block_new_entries"] = False
+                self.params["live_trading_enabled"] = True
+                self.params["policy_enabled"] = False
+                self.get_tick = lambda: market_tick  # type: ignore[method-assign]
+                self.get_regime = lambda: market_regime  # type: ignore[method-assign]
+                self.sync_live_positions = lambda tick: True  # type: ignore[method-assign]
+                self.save_state = lambda: None  # type: ignore[method-assign]
+                self.run_once()
+                assert int(self.state["cycle_id"]) == 0
+                assert len(self.state["virtual_orders"]) == 0
+                assert reject_executor.open_calls == 1
+            finally:
+                self.get_tick = original_get_tick  # type: ignore[method-assign]
+                self.get_regime = original_get_regime  # type: ignore[method-assign]
+                self.sync_live_positions = original_sync_live_positions  # type: ignore[method-assign]
+                self.save_state = original_save_state  # type: ignore[method-assign]
+                self.params["live_trading_enabled"] = original_live_trading_enabled
+                self.params["policy_enabled"] = original_policy_enabled
+
+            opposite_position = FakePosition(
+                900111,
+                self.symbol,
+                self.magic,
+                "SHORT",
+                0.01,
+                1.25055,
+                float(reject_order["stop_loss"]),
+                self.market_order_comment(reject_order),
+            )
+            assert not self.market_order_matches_position(
+                reject_order,
+                opposite_position,
+                self.market_order_comment(reject_order),
+            )
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            timeout_adopt_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            timeout_adopt_executor = FakeExecutor("ERR|TIMEOUT", create_position_after_error=True)
+            self.executor = timeout_adopt_executor
+            assert self.open_from_virtual_order(timeout_adopt_order, market_tick)
+            assert len(self.state["positions"]) == 1
+            assert len(self.state["virtual_orders"]) == 3
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["reconciliation_required"] is None
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            sync_fail_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            sync_fail_executor = SyncFailExecutor("ERR|10016")
+            self.executor = sync_fail_executor
+            assert not self.open_from_virtual_order(sync_fail_order, market_tick)
+            assert self.state["sync_block_new_entries"]
+            assert isinstance(self.state["reconciliation_required"], dict)
+            assert "position sync failed" in str(self.state["reconciliation_required"].get("reason"))
+            assert not any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
+            assert any(event[0] == "ENTRY_UNRESOLVED_MARKET" for event in trade_events)
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            untracked_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            untracked_executor = FakeExecutor("ERR|10016")
+            untracked_executor.positions = [
+                FakePosition(
+                    900333,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25055,
+                    float(untracked_order["stop_loss"]),
+                    f"{self.sanitized_comment_prefix()}_{int(self.state['cycle_id'])}_999",
+                )
+            ]
+            self.executor = untracked_executor
+            assert self.open_from_virtual_order(untracked_order, market_tick)
+            assert len(self.state["positions"]) == 1
+            assert len(self.state["virtual_orders"]) == 0
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["reconciliation_required"] is None
+            assert self.state["market_open_retry_after_epoch"] is None
+            assert not any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
+            assert any(event[0] == "ENTRY_RECOVERED_SYNC" for event in trade_events)
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            unrecoverable_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            unrecoverable_executor = FakeExecutor("ERR|10016")
+            unrecoverable_executor.positions = [
+                FakePosition(
+                    900334,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25055,
+                    float(unrecoverable_order["stop_loss"]),
+                    "manual_or_other_bot",
+                )
+            ]
+            self.executor = unrecoverable_executor
+            assert not self.open_from_virtual_order(unrecoverable_order, market_tick)
+            assert self.state["sync_block_new_entries"]
+            assert isinstance(self.state["reconciliation_required"], dict)
+            assert "unrecoverable untracked live positions" in str(self.state["reconciliation_required"].get("reason"))
+            assert not any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
+            assert any(event[0] == "ENTRY_UNRESOLVED_MARKET" for event in trade_events)
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            timeout_unresolved_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            timeout_unresolved_executor = FakeExecutor("ERR|TIMEOUT")
+            self.executor = timeout_unresolved_executor
+            assert not self.open_from_virtual_order(timeout_unresolved_order, market_tick)
+            assert len(self.state["virtual_orders"]) == 4
+            assert self.state["sync_block_new_entries"]
+            assert isinstance(self.state["reconciliation_required"], dict)
+            assert any(event[0] == "ENTRY_UNRESOLVED_MARKET" for event in trade_events)
+            delayed_comment = self.market_order_comment(timeout_unresolved_order)
+            timeout_unresolved_executor.positions = [
+                FakePosition(
+                    900777,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25055,
+                    float(timeout_unresolved_order["stop_loss"]),
+                    delayed_comment,
+                )
+            ]
+            assert self.sync_live_positions(market_tick)
+            assert len(self.state["positions"]) == 1
+            assert len(self.state["virtual_orders"]) == 3
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["reconciliation_required"] is None
+        finally:
+            self.log_trade_csv = original_log_trade_csv  # type: ignore[method-assign]
+            self.executor = None
         logging.info("s18 self-test passed")
 
 
