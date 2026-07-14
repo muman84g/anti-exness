@@ -29,6 +29,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from live_manual_alerts import notify_manual_action_required
+
 JST = timezone(timedelta(hours=9), "JST")
 LONG = 1
 SHORT = -1
@@ -502,6 +504,7 @@ class S19SnowballBot:
         self.last_flat_pending_grid_repair_log_epoch = 0.0
         self.last_position_sync_epoch = 0.0
         self.sync_closed_count = 0
+        self._suppress_manual_alerts = False
 
     @property
     def pip_size(self) -> float:
@@ -1096,6 +1099,9 @@ class S19SnowballBot:
         self.state["sync_block_new_entries"] = True
         self.state["sync_block_reason"] = reason
         logging.error(f"New entries blocked: {reason}")
+        reconciliation = self.state.get("reconciliation_required")
+        if isinstance(reconciliation, dict):
+            self.notify_reconciliation_required(reason, reconciliation)
 
     def reconciliation_block_reason(self) -> str | None:
         reconciliation = self.state.get("reconciliation_required")
@@ -1361,6 +1367,40 @@ class S19SnowballBot:
             "created_at_jst": jst_now().isoformat(),
         }
         self.block_new_entries(reason)
+
+    def notify_manual_action(self, *, title: str, reason: str, action: str, key: str) -> None:
+        if self._suppress_manual_alerts:
+            return
+        notify_manual_action_required(
+            bot_id="bot19",
+            symbol=self.symbol,
+            title=title,
+            reason=reason,
+            action=action,
+            key=key,
+        )
+
+    def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
+        text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
+        if "ERR|10026" in text or "ERR|10027" in text:
+            self.notify_manual_action(
+                title="MT5 Algo Trading disabled or trading permission rejected",
+                reason=reason,
+                action=(
+                    "Turn on MT5 Algo Trading for exness-bot-19/BotBridge_s19 and verify "
+                    "the EA Allow Algo Trading setting; then inspect pending orders/state before clearing any block."
+                ),
+                key=f"bot19:{self.symbol}:autotrading-disabled",
+            )
+            return
+        self.notify_manual_action(
+            title="reconciliation_required",
+            reason=reason,
+            action=(
+                "Inspect MT5 pending orders/positions and bot19 state/logs before clearing the block or restarting entries."
+            ),
+            key=f"bot19:{self.symbol}:reconciliation:{reason}",
+        )
 
     def repair_flat_pending_grid(
         self,
@@ -2225,7 +2265,9 @@ class S19SnowballBot:
         original_state_file = self.state_file
         original_trade_log_file = self.trade_log_file
         original_executor = self.executor
+        original_suppress_manual_alerts = self._suppress_manual_alerts
         temp_dir = tempfile.mkdtemp(prefix="s19_selftest_")
+        self._suppress_manual_alerts = True
         self.params = self.params.copy()
         self.params["live_trading_enabled"] = False
         self.params["use_server_pending_entry"] = False
@@ -2450,6 +2492,7 @@ class S19SnowballBot:
             self.state_file = original_state_file
             self.trade_log_file = original_trade_log_file
             self.executor = original_executor
+            self._suppress_manual_alerts = original_suppress_manual_alerts
             shutil.rmtree(temp_dir, ignore_errors=True)
         logging.info("s19 self-test passed")
 

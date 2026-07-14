@@ -29,6 +29,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from live_manual_alerts import notify_manual_action_required
+
 JST = timezone(timedelta(hours=9), "JST")
 LONG = 1
 SHORT = -1
@@ -517,6 +519,7 @@ class S18SnowballBot:
         self.last_policy_decision_log_signature: tuple[Any, ...] | None = None
         self.last_market_open_failure_log_epoch = 0.0
         self.sync_closed_count = 0
+        self._suppress_manual_alerts = False
 
     @property
     def pip_size(self) -> float:
@@ -982,6 +985,9 @@ class S18SnowballBot:
         self.state["sync_block_new_entries"] = True
         self.state["sync_block_reason"] = reason
         logging.error(f"New entries blocked: {reason}")
+        reconciliation = self.state.get("reconciliation_required")
+        if isinstance(reconciliation, dict):
+            self.notify_reconciliation_required(reason, reconciliation)
 
     def clear_new_entry_block_if_reason(self, reason: str) -> None:
         if not self.state.get("sync_block_new_entries"):
@@ -1011,6 +1017,44 @@ class S18SnowballBot:
             "created_at_jst": jst_now().isoformat(),
         }
         self.block_new_entries(reason)
+
+    def autotrading_disabled_error(self, error: str | None) -> bool:
+        text = str(error or "").strip()
+        return text in {"ERR|10026", "ERR|10027"}
+
+    def notify_manual_action(self, *, title: str, reason: str, action: str, key: str) -> None:
+        if self._suppress_manual_alerts:
+            return
+        notify_manual_action_required(
+            bot_id="bot18",
+            symbol=self.symbol,
+            title=title,
+            reason=reason,
+            action=action,
+            key=key,
+        )
+
+    def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
+        text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
+        if "ERR|10026" in text or "ERR|10027" in text:
+            self.notify_manual_action(
+                title="MT5 Algo Trading disabled or trading permission rejected",
+                reason=reason,
+                action=(
+                    "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
+                    "the EA Allow Algo Trading setting; then inspect state/orders before clearing any block."
+                ),
+                key=f"bot18:{self.symbol}:autotrading-disabled",
+            )
+            return
+        self.notify_manual_action(
+            title="reconciliation_required",
+            reason=reason,
+            action=(
+                "Inspect MT5 positions/orders and bot18 state/logs before clearing the block or restarting entries."
+            ),
+            key=f"bot18:{self.symbol}:reconciliation:{reason}",
+        )
 
     def market_open_retry_block_reason(self) -> str | None:
         retry_after = self.state.get("market_open_retry_after_epoch")
@@ -1296,6 +1340,16 @@ class S18SnowballBot:
             error,
             cooldown,
         )
+        if self.autotrading_disabled_error(error):
+            self.notify_manual_action(
+                title="MT5 Algo Trading disabled or trading permission rejected",
+                reason=f"market OPEN rejected with {error}",
+                action=(
+                    "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
+                    "the EA Allow Algo Trading setting."
+                ),
+                key=f"bot18:{self.symbol}:autotrading-disabled",
+            )
 
     def log_unresolved_market_open(
         self,
@@ -1975,6 +2029,8 @@ class S18SnowballBot:
             time.sleep(float(self.params["poll_interval_seconds"]))
 
     def self_test(self) -> None:
+        original_suppress_manual_alerts = self._suppress_manual_alerts
+        self._suppress_manual_alerts = True
         self.state = self.default_state()
         self.start_cycle(1.25000)
         assert len(self.state["virtual_orders"]) == 4, self.state["virtual_orders"]
@@ -2312,6 +2368,7 @@ class S18SnowballBot:
         finally:
             self.log_trade_csv = original_log_trade_csv  # type: ignore[method-assign]
             self.executor = None
+            self._suppress_manual_alerts = original_suppress_manual_alerts
         logging.info("s18 self-test passed")
 
 

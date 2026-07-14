@@ -25,3 +25,7 @@ Preserve the existing CentOS `bot18/live_config.py` unless the user explicitly a
 ## Runtime logging
 
 `s18_policy_decisions.csv` is diagnostic only. It should not log every repeated threshold-block decision indefinitely; the live runner throttles repeated policy decisions while preserving passes, policy errors, and reason/signature changes.
+
+## Live lot allocation
+
+As of 2026-07-15, the live per-symbol profile lots are GBPUSD `0.09`, EURUSD `0.07`, and AUDUSD `0.07`. Entry thresholds, policy artifacts, and allow-rate settings are unchanged.
