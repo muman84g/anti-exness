@@ -257,6 +257,7 @@ services:
       - ./bot18/live_s18_bot.py:/app/bot18/live_s18_bot.py:ro
       - ./bot18/live_data_fetcher.py:/app/bot18/live_data_fetcher.py:ro
       - ./bot18/live_executor.py:/app/bot18/live_executor.py:ro
+      - ./bot18/live_manual_alerts.py:/app/bot18/live_manual_alerts.py:ro
       - ./bot18/base_interfaces.py:/app/bot18/base_interfaces.py:ro
       - ./bot18/ea_bridge.py:/app/bot18/ea_bridge.py:ro
       - ./bot18/s18_params.json:/app/bot18/s18_params.json:ro
@@ -335,6 +336,7 @@ services:
       - ./bot19/live_s19_bot.py:/app/bot19/live_s19_bot.py:ro
       - ./bot19/live_data_fetcher.py:/app/bot19/live_data_fetcher.py:ro
       - ./bot19/live_executor.py:/app/bot19/live_executor.py:ro
+      - ./bot19/live_manual_alerts.py:/app/bot19/live_manual_alerts.py:ro
       - ./bot19/base_interfaces.py:/app/bot19/base_interfaces.py:ro
       - ./bot19/ea_bridge.py:/app/bot19/ea_bridge.py:ro
       - ./bot19/reset_state_if_flat.py:/app/bot19/reset_state_if_flat.py:ro
