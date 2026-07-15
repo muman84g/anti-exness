@@ -130,6 +130,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "assume_missing_state_position_is_sl": True,
     "market_open_reconcile_enabled": True,
     "market_open_retry_cooldown_seconds": 30,
+    "autotrading_reject_retry_cooldown_seconds": 5,
+    "autotrading_reject_notify_after_count": 5,
     "policy_enabled": True,
     "policy_fail_closed": True,
     "policy_decision_log_enabled": True,
@@ -571,11 +573,79 @@ class S18SnowballBot:
             "sync_block_reason": None,
             "market_open_retry_after_epoch": None,
             "last_market_open_failure": None,
+            "autotrading_reject_streak": 0,
+            "autotrading_reject_first_at_jst": None,
+            "autotrading_reject_last_at_jst": None,
+            "autotrading_reject_last_error": None,
+            "autotrading_reject_last_order_id": None,
+            "autotrading_reject_notified": False,
             "reconciliation_required": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
         }
+
+    def reset_autotrading_reject_state(self, state: dict[str, Any] | None = None) -> None:
+        target = state if state is not None else self.state
+        target["autotrading_reject_streak"] = 0
+        target["autotrading_reject_first_at_jst"] = None
+        target["autotrading_reject_last_at_jst"] = None
+        target["autotrading_reject_last_error"] = None
+        target["autotrading_reject_last_order_id"] = None
+        target["autotrading_reject_notified"] = False
+
+    def autotrading_reject_retry_cooldown(self) -> float:
+        fallback = self.params.get("market_open_retry_cooldown_seconds", 30.0)
+        return max(0.0, float(self.params.get("autotrading_reject_retry_cooldown_seconds", fallback) or 0.0))
+
+    def autotrading_reject_notify_after_count(self) -> int:
+        return max(1, int(self.params.get("autotrading_reject_notify_after_count", 5) or 5))
+
+    def migrate_autotrading_reject_reconciliation(self, state: dict[str, Any]) -> None:
+        reconciliation = state.get("reconciliation_required")
+        if not isinstance(reconciliation, dict):
+            return
+        details = reconciliation.get("details")
+        if not isinstance(details, dict):
+            return
+        error = str(details.get("error") or "").strip()
+        if not self.autotrading_disabled_error(error):
+            return
+        reason = str(reconciliation.get("reason") or state.get("sync_block_reason") or "")
+        if "position sync failed" not in reason:
+            return
+        cooldown = self.autotrading_reject_retry_cooldown()
+        retry_after = time.time() + cooldown if cooldown > 0.0 else None
+        now_jst = jst_now().isoformat()
+        order = details.get("order") if isinstance(details.get("order"), dict) else {}
+        state["market_open_retry_after_epoch"] = retry_after
+        state["last_market_open_failure"] = {
+            "type": "autotrading_reject_migrated_from_reconciliation",
+            "order_id": int(order.get("order_id", 0) or 0),
+            "direction": str(order.get("direction", "")),
+            "entry": self.price(float(order.get("entry", 0.0) or 0.0)),
+            "stop_loss": self.price(float(order.get("stop_loss", 0.0) or 0.0)),
+            "comment": str(details.get("comment", "")),
+            "error": error,
+            "retry_after_epoch": retry_after,
+            "autotrading_reject_streak": max(1, int(state.get("autotrading_reject_streak") or 0)),
+            "created_at_jst": now_jst,
+        }
+        state["autotrading_reject_streak"] = max(1, int(state.get("autotrading_reject_streak") or 0))
+        state["autotrading_reject_first_at_jst"] = state.get("autotrading_reject_first_at_jst") or now_jst
+        state["autotrading_reject_last_at_jst"] = now_jst
+        state["autotrading_reject_last_error"] = error
+        state["autotrading_reject_last_order_id"] = int(order.get("order_id", 0) or 0)
+        state["reconciliation_required"] = None
+        state["sync_block_new_entries"] = False
+        state["sync_block_reason"] = None
+        logging.warning(
+            "Migrated legacy ERR|10026/10027 position-sync reconciliation to retry cooldown: "
+            "symbol=%s error=%s cooldown=%.1fs",
+            self.symbol,
+            error,
+            cooldown,
+        )
 
     def load_state(self) -> dict[str, Any]:
         if not os.path.exists(self.state_file):
@@ -586,6 +656,7 @@ class S18SnowballBot:
             raise ValueError("State symbol/magic does not match s18_params.json")
         default = self.default_state()
         default.update(state)
+        self.migrate_autotrading_reject_reconciliation(default)
         return default
 
     def save_state(self) -> None:
@@ -1042,15 +1113,19 @@ class S18SnowballBot:
             error = f"; error={raw_details.get('error')}"
         alert_reason = f"{reason}{error}"
         if "ERR|10026" in text or "ERR|10027" in text:
-            self.notify_manual_action(
-                title="MT5 Algo Trading disabled or trading permission rejected",
-                reason=alert_reason,
-                action=(
-                    "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
-                    "the EA Allow Algo Trading setting; then inspect state/orders before clearing any block."
-                ),
-                key="bot18:autotrading-disabled",
-            )
+            streak = int(self.state.get("autotrading_reject_streak") or 0)
+            notify_after = self.autotrading_reject_notify_after_count()
+            if streak >= notify_after and not bool(self.state.get("autotrading_reject_notified")):
+                self.notify_manual_action(
+                    title="MT5 Algo Trading disabled or trading permission rejected",
+                    reason=f"{alert_reason}; consecutive={streak}; threshold={notify_after}",
+                    action=(
+                        "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
+                        "the EA Allow Algo Trading setting; then inspect state/orders before clearing any block."
+                    ),
+                    key="bot18:autotrading-disabled",
+                )
+                self.state["autotrading_reject_notified"] = True
             return
         if "position sync failed" in reason:
             return
@@ -1189,6 +1264,7 @@ class S18SnowballBot:
             self.state["reconciliation_required"].get("type") == "market_open_result"
         ):
             self.state["reconciliation_required"] = None
+        self.reset_autotrading_reject_state()
         sync_reason = str(self.state.get("sync_block_reason") or "")
         if sync_reason.startswith("market open result") or sync_reason.startswith("untracked live positions"):
             self.state["sync_block_new_entries"] = False
@@ -1215,6 +1291,7 @@ class S18SnowballBot:
         )
         self.state["market_open_retry_after_epoch"] = None
         self.state["last_market_open_failure"] = None
+        self.reset_autotrading_reject_state()
         if isinstance(self.state.get("reconciliation_required"), dict) and (
             self.state["reconciliation_required"].get("type") == "market_open_result"
         ):
@@ -1313,7 +1390,20 @@ class S18SnowballBot:
         error: str | None,
         tick: dict[str, Any],
     ) -> None:
-        cooldown = max(0.0, float(self.params.get("market_open_retry_cooldown_seconds", 30.0) or 0.0))
+        is_autotrading_reject = self.autotrading_disabled_error(error)
+        now_jst = jst_now().isoformat()
+        autotrading_streak = 0
+        if is_autotrading_reject:
+            cooldown = self.autotrading_reject_retry_cooldown()
+            autotrading_streak = int(self.state.get("autotrading_reject_streak") or 0) + 1
+            self.state["autotrading_reject_streak"] = autotrading_streak
+            self.state["autotrading_reject_first_at_jst"] = self.state.get("autotrading_reject_first_at_jst") or now_jst
+            self.state["autotrading_reject_last_at_jst"] = now_jst
+            self.state["autotrading_reject_last_error"] = str(error or "UNKNOWN")
+            self.state["autotrading_reject_last_order_id"] = int(order["order_id"])
+        else:
+            cooldown = max(0.0, float(self.params.get("market_open_retry_cooldown_seconds", 30.0) or 0.0))
+            self.reset_autotrading_reject_state()
         retry_after = time.time() + cooldown if cooldown > 0.0 else None
         self.state["market_open_retry_after_epoch"] = retry_after
         self.state["last_market_open_failure"] = {
@@ -1325,7 +1415,8 @@ class S18SnowballBot:
             "comment": comment,
             "error": str(error or "UNKNOWN"),
             "retry_after_epoch": retry_after,
-            "created_at_jst": jst_now().isoformat(),
+            "autotrading_reject_streak": autotrading_streak,
+            "created_at_jst": now_jst,
         }
         self.log_trade_csv(
             "ENTRY_FAIL_MARKET",
@@ -1341,22 +1432,28 @@ class S18SnowballBot:
         )
         logging.warning(
             "S18 market OPEN rejected without fill; keeping virtual order for retry after cooldown: "
-            "symbol=%s order_id=%s error=%s cooldown=%.1fs",
+            "symbol=%s order_id=%s error=%s cooldown=%.1fs autotrading_reject_streak=%s",
             self.symbol,
             int(order["order_id"]),
             error,
             cooldown,
+            autotrading_streak,
         )
-        if self.autotrading_disabled_error(error):
+        notify_after = self.autotrading_reject_notify_after_count()
+        if is_autotrading_reject and autotrading_streak >= notify_after and not bool(
+            self.state.get("autotrading_reject_notified")
+        ):
             self.notify_manual_action(
                 title="MT5 Algo Trading disabled or trading permission rejected",
-                reason=f"market OPEN rejected with {error}",
+                reason=f"market OPEN rejected with {error}; consecutive={autotrading_streak}; threshold={notify_after}",
                 action=(
                     "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
-                    "the EA Allow Algo Trading setting."
+                    "the EA Allow Algo Trading setting. If they are already on, inspect MT5 Journal/Experts "
+                    "for repeated trade-permission rejection before restarting entries."
                 ),
                 key="bot18:autotrading-disabled",
             )
+            self.state["autotrading_reject_notified"] = True
 
     def log_unresolved_market_open(
         self,
@@ -1380,6 +1477,9 @@ class S18SnowballBot:
 
     def handle_market_open_failure(self, order: dict[str, Any], comment: str, tick: dict[str, Any]) -> bool:
         error = getattr(self.executor, "last_order_error", "UNKNOWN")
+        if self.autotrading_disabled_error(str(error)) and self.broker_reject_definitively_unfilled(str(error)):
+            self.record_definitive_market_open_reject(order, comment, str(error), tick)
+            return False
         reconcile_result = self.reconcile_market_open_result(order, comment, str(error))
         if reconcile_result is True:
             return True
@@ -1669,6 +1769,7 @@ class S18SnowballBot:
         entry = float(getattr(ticket, "price", 0.0) or (tick["ask"] if direction == LONG else tick["bid"]))
         self.state["market_open_retry_after_epoch"] = None
         self.state["last_market_open_failure"] = None
+        self.reset_autotrading_reject_state()
         self.state["virtual_orders"] = [
             item for item in self.state["virtual_orders"] if int(item["order_id"]) != int(order["order_id"])
         ]
@@ -2206,6 +2307,58 @@ class S18SnowballBot:
             assert self.fill_virtual_orders(market_tick, market_regime) == 0
             assert reject_executor.open_calls == 1
             self.state["reconciliation_required"] = None
+
+            trade_events.clear()
+            original_autotrading_retry_cooldown = self.params.get("autotrading_reject_retry_cooldown_seconds")
+            original_autotrading_notify_after = self.params.get("autotrading_reject_notify_after_count")
+            try:
+                self.params["autotrading_reject_retry_cooldown_seconds"] = 5
+                self.params["autotrading_reject_notify_after_count"] = 5
+                self.state = self.default_state()
+                self.start_cycle(1.25000)
+                auto_reject_order = min(
+                    [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                    key=lambda item: item["entry"],
+                )
+                auto_reject_executor = SyncFailExecutor("ERR|10027")
+                self.executor = auto_reject_executor
+                assert not self.open_from_virtual_order(auto_reject_order, market_tick)
+                assert auto_reject_executor.open_calls == 1
+                assert len(self.state["virtual_orders"]) == 4
+                assert not self.state["sync_block_new_entries"]
+                assert self.state["reconciliation_required"] is None
+                assert int(self.state["autotrading_reject_streak"]) == 1
+                assert self.state["market_open_retry_after_epoch"] is not None
+                assert 0.0 < float(self.state["market_open_retry_after_epoch"]) - time.time() <= 6.0
+                assert not self.state["autotrading_reject_notified"]
+                assert any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
+                for expected_streak in range(2, 6):
+                    self.state["market_open_retry_after_epoch"] = None
+                    assert not self.open_from_virtual_order(auto_reject_order, market_tick)
+                    assert int(self.state["autotrading_reject_streak"]) == expected_streak
+                assert self.state["autotrading_reject_notified"]
+                assert not self.state["sync_block_new_entries"]
+
+                legacy_state = self.default_state()
+                legacy_state["reconciliation_required"] = {
+                    "type": "market_open_result",
+                    "reason": "market open result unresolved: position sync failed",
+                    "details": {
+                        "order": auto_reject_order.copy(),
+                        "comment": self.market_order_comment(auto_reject_order),
+                        "error": "ERR|10027",
+                    },
+                }
+                legacy_state["sync_block_new_entries"] = True
+                legacy_state["sync_block_reason"] = "market open result unresolved: position sync failed"
+                self.migrate_autotrading_reject_reconciliation(legacy_state)
+                assert legacy_state["reconciliation_required"] is None
+                assert not legacy_state["sync_block_new_entries"]
+                assert int(legacy_state["autotrading_reject_streak"]) == 1
+                assert legacy_state["market_open_retry_after_epoch"] is not None
+            finally:
+                self.params["autotrading_reject_retry_cooldown_seconds"] = original_autotrading_retry_cooldown
+                self.params["autotrading_reject_notify_after_count"] = original_autotrading_notify_after
 
             original_get_tick = self.get_tick
             original_get_regime = self.get_regime
