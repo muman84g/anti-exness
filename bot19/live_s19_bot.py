@@ -561,6 +561,9 @@ class S19SnowballBot:
             "pending_open": None,
             "reconciliation_required": None,
             "pending_grid_repair_wait": None,
+            "manual_alert_last_reconciliation_signature": None,
+            "manual_alert_last_reconciliation_reason": None,
+            "manual_alert_last_reconciliation_at_jst": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -1138,40 +1141,267 @@ class S19SnowballBot:
             return False
         return abs(float(getattr(position, "open_price", 0.0)) - float(order["entry"])) <= self.distance_price * 0.5
 
-    def adopt_filled_pending_order(self, order: dict[str, Any], live_position: Any) -> None:
+    def normalize_pending_recovery_order(self, raw_order: dict[str, Any], source: str) -> dict[str, Any] | None:
+        try:
+            direction = direction_name(direction_from_name(str(raw_order["direction"])))
+            entry = self.price(float(raw_order["entry"]))
+            stop_loss = self.price(float(raw_order["stop_loss"]))
+            order_id = int(raw_order["order_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        pending_ticket_raw = raw_order.get("pending_ticket", raw_order.get("ticket"))
+        pending_ticket = None
+        if pending_ticket_raw not in (None, ""):
+            try:
+                pending_ticket = int(pending_ticket_raw)
+            except (TypeError, ValueError):
+                pending_ticket = None
+        return {
+            "order_id": order_id,
+            "direction": direction,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "pending_ticket": pending_ticket,
+            "volume": float(raw_order.get("volume", self.params["lot"]) or self.params["lot"]),
+            "comment": str(raw_order.get("comment", "") or ""),
+            "recovery_source": source,
+        }
+
+    def add_pending_recovery_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        seen: set[tuple[Any, ...]],
+        rows: Any,
+        source: str,
+    ) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            candidate = self.normalize_pending_recovery_order(row, source)
+            if candidate is None:
+                continue
+            key = (
+                candidate.get("order_id"),
+                candidate.get("pending_ticket"),
+                candidate.get("direction"),
+                candidate.get("entry"),
+                candidate.get("stop_loss"),
+                candidate.get("comment"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+
+    def pending_recovery_candidate_orders(self) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        self.add_pending_recovery_candidates(candidates, seen, self.state.get("virtual_orders"), "state.virtual_orders")
+
+        pending_open = self.state.get("pending_open")
+        if isinstance(pending_open, dict):
+            self.add_pending_recovery_candidates(candidates, seen, [pending_open], "state.pending_open")
+
+        reconciliation = self.state.get("reconciliation_required")
+        if isinstance(reconciliation, dict):
+            details = reconciliation.get("details")
+            if isinstance(details, dict):
+                self.add_pending_recovery_candidates(
+                    candidates,
+                    seen,
+                    details.get("state"),
+                    "reconciliation_required.details.state",
+                )
+                self.add_pending_recovery_candidates(
+                    candidates,
+                    seen,
+                    details.get("state_after_reissue"),
+                    "reconciliation_required.details.state_after_reissue",
+                )
+
+        pending_wait = self.state.get("pending_grid_repair_wait")
+        if isinstance(pending_wait, dict):
+            details = pending_wait.get("details")
+            if isinstance(details, dict):
+                self.add_pending_recovery_candidates(
+                    candidates,
+                    seen,
+                    details.get("state"),
+                    "pending_grid_repair_wait.details.state",
+                )
+        return candidates
+
+    def pending_recovery_order_match_score(self, order: dict[str, Any], position: Any) -> int:
+        if int(getattr(position, "magic", -1)) != int(self.magic):
+            return 0
+        if str(getattr(position, "symbol", "")) != self.symbol:
+            return 0
+        try:
+            expected_direction = direction_from_name(str(order["direction"]))
+            live_direction = direction_from_name(str(getattr(position, "direction", "")))
+        except ValueError:
+            return 0
+        if live_direction != expected_direction:
+            return 0
+        expected_sl = self.price(float(order["stop_loss"]))
+        live_sl = self.price(float(getattr(position, "sl", 0.0) or 0.0))
+        if abs(expected_sl - live_sl) > self.pip_size * 0.2:
+            return 0
+        pending_ticket = order.get("pending_ticket")
+        if pending_ticket not in (None, "") and int(getattr(position, "ticket", -1)) == int(pending_ticket):
+            return 3
+        comment = str(order.get("comment") or "")
+        if comment and str(getattr(position, "comment", "")) == comment:
+            return 2
+        if abs(float(getattr(position, "open_price", 0.0)) - float(order["entry"])) <= self.distance_price * 0.5:
+            return 1
+        return 0
+
+    def pending_recovery_order_matches_position(self, order: dict[str, Any], position: Any) -> bool:
+        return self.pending_recovery_order_match_score(order, position) > 0
+
+    def recover_untracked_live_positions_from_pending_history(
+        self,
+        live_positions: list[Any],
+        reason: str,
+    ) -> bool:
+        if not live_positions:
+            return True
+        candidates = self.pending_recovery_candidate_orders()
+        if not candidates:
+            return False
+
+        recoveries: list[tuple[int, dict[str, Any], Any]] = []
+        used_candidate_indexes: set[int] = set()
+        for live_position in live_positions:
+            matches: list[tuple[int, int, dict[str, Any]]] = []
+            for index, candidate in enumerate(candidates):
+                if index in used_candidate_indexes:
+                    continue
+                score = self.pending_recovery_order_match_score(candidate, live_position)
+                if score > 0:
+                    matches.append((score, index, candidate))
+            best_score = max((score for score, _index, _candidate in matches), default=0)
+            best_matches = [
+                (index, candidate)
+                for score, index, candidate in matches
+                if score == best_score
+            ]
+            if len(best_matches) != 1:
+                logging.error(
+                    "S19 cannot auto-recover untracked live position ticket=%s; best_score=%s matches=%s candidates=%s",
+                    int(getattr(live_position, "ticket", 0)),
+                    best_score,
+                    len(best_matches),
+                    [
+                        {
+                            "order_id": item.get("order_id"),
+                            "pending_ticket": item.get("pending_ticket"),
+                            "comment": item.get("comment"),
+                            "source": item.get("recovery_source"),
+                        }
+                        for item in candidates
+                    ],
+                )
+                return False
+            index, candidate = best_matches[0]
+            used_candidate_indexes.add(index)
+            recoveries.append((index, candidate, live_position))
+
+        for _index, order, live_position in recoveries:
+            self.adopt_filled_pending_order(
+                order,
+                live_position,
+                event="ENTRY_RECOVERED_SYNC",
+                reason=reason,
+                recovered=True,
+            )
+        self.state["pending_open"] = None
+        self.state["pending_grid_repair_wait"] = None
+        self.state["reconciliation_required"] = None
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        self.recalculate_position_counts()
+        logging.warning(
+            "S19 recovered %s untracked live position(s) from pending history reason=%s",
+            len(recoveries),
+            reason,
+        )
+        return True
+
+    def clear_flat_reconciliation_if_confirmed(self, live_positions: list[Any], live_orders: list[Any]) -> bool:
+        if self.state["positions"] or self.state["virtual_orders"]:
+            return False
+        if live_positions or live_orders:
+            return False
+        has_reconciliation = isinstance(self.state.get("reconciliation_required"), dict)
+        has_pending_open = isinstance(self.state.get("pending_open"), dict)
+        has_repair_wait = isinstance(self.state.get("pending_grid_repair_wait"), dict)
+        if not (has_reconciliation or has_pending_open or has_repair_wait):
+            return False
+        logging.warning(
+            "S19 cleared unresolved reconciliation after MT5 confirmed flat: reconciliation=%s pending_open=%s repair_wait=%s reason=%s",
+            has_reconciliation,
+            has_pending_open,
+            has_repair_wait,
+            self.state.get("sync_block_reason"),
+        )
+        self.state["reconciliation_required"] = None
+        self.state["pending_open"] = None
+        self.state["pending_grid_repair_wait"] = None
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        self.clear_auto_tp()
+        return True
+
+    def adopt_filled_pending_order(
+        self,
+        order: dict[str, Any],
+        live_position: Any,
+        *,
+        event: str = "ENTRY",
+        reason: str = "server_pending_stop_filled",
+        recovered: bool = False,
+    ) -> None:
         ticket = int(getattr(live_position, "ticket"))
         direction = direction_from_name(order["direction"])
         self.state["virtual_orders"] = [
             item for item in self.state["virtual_orders"] if int(item["order_id"]) != int(order["order_id"])
         ]
-        self.state["positions"].append(
-            {
-                "ticket": ticket,
-                "direction": direction_name(direction),
-                "entry": self.price(float(getattr(live_position, "open_price"))),
-                "stop_loss": self.price(float(order["stop_loss"])),
-                "volume": float(getattr(live_position, "volume", order.get("volume", self.params["lot"]))),
-                "opened_at_jst": jst_now().isoformat(),
-                "source_order_id": int(order["order_id"]),
-                "comment": str(getattr(live_position, "comment", order.get("comment", ""))),
-            }
-        )
+        position = {
+            "ticket": ticket,
+            "direction": direction_name(direction),
+            "entry": self.price(float(getattr(live_position, "open_price"))),
+            "stop_loss": self.price(float(order["stop_loss"])),
+            "volume": float(getattr(live_position, "volume", order.get("volume", self.params["lot"]))),
+            "opened_at_jst": jst_now().isoformat(),
+            "source_order_id": int(order["order_id"]),
+            "comment": str(getattr(live_position, "comment", order.get("comment", ""))),
+        }
+        if recovered:
+            position["recovered_from_live"] = True
+            position["recovery_reason"] = reason
+            position["recovery_source"] = str(order.get("recovery_source", ""))
+        self.state["positions"].append(position)
         self.log_trade_csv(
-            "ENTRY",
+            event,
             ticket,
             direction=direction_name(direction),
             lot_size=float(getattr(live_position, "volume", order.get("volume", self.params["lot"]))),
             price=self.price(float(getattr(live_position, "open_price"))),
             stop_loss=self.price(float(order["stop_loss"])),
             pnl="",
-            reason="server_pending_stop_filled",
+            reason=reason,
             source_order_id=int(order["order_id"]),
             comment=str(getattr(live_position, "comment", order.get("comment", ""))),
         )
         logging.info(
-            "Adopted filled pending order %s as position ticket=%s",
+            "Adopted filled pending order %s as position ticket=%s reason=%s",
             int(order.get("pending_ticket") or 0),
             ticket,
+            reason,
         )
 
     def cancel_server_pending_order(self, order: dict[str, Any]) -> bool:
@@ -1380,6 +1610,23 @@ class S19SnowballBot:
             key=key,
         )
 
+    def reconciliation_alert_signature(self, reason: str, details: dict[str, Any]) -> str:
+        payload = {
+            "reason": reason,
+            "details": details,
+        }
+        serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def mark_reconciliation_alert_if_new(self, reason: str, details: dict[str, Any]) -> bool:
+        signature = self.reconciliation_alert_signature(reason, details)
+        if self.state.get("manual_alert_last_reconciliation_signature") == signature:
+            return False
+        self.state["manual_alert_last_reconciliation_signature"] = signature
+        self.state["manual_alert_last_reconciliation_reason"] = reason
+        self.state["manual_alert_last_reconciliation_at_jst"] = jst_now().isoformat()
+        return True
+
     def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
         text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
         error = ""
@@ -1388,6 +1635,8 @@ class S19SnowballBot:
             error = f"; error={raw_details.get('error')}"
         alert_reason = f"{reason}{error}"
         if "ERR|10026" in text or "ERR|10027" in text:
+            if not self.mark_reconciliation_alert_if_new(reason, details):
+                return
             self.notify_manual_action(
                 title="MT5 Algo Trading disabled or trading permission rejected",
                 reason=alert_reason,
@@ -1399,6 +1648,8 @@ class S19SnowballBot:
             )
             return
         if "position sync failed" in reason:
+            return
+        if not self.mark_reconciliation_alert_if_new(reason, details):
             return
         self.notify_manual_action(
             title="reconciliation_required",
@@ -1523,8 +1774,14 @@ class S19SnowballBot:
             state_by_ticket[ticket] = self.state["positions"][-1]
             extra_tickets.remove(ticket)
         if extra_tickets:
-            self.block_new_entries(f"untracked live positions exist: {extra_tickets}")
-            return False
+            extra_positions = [live_by_ticket[ticket] for ticket in extra_tickets]
+            if not self.recover_untracked_live_positions_from_pending_history(
+                extra_positions,
+                f"untracked live positions recovered from pending history: {extra_tickets}",
+            ):
+                self.block_new_entries(f"untracked live positions exist: {extra_tickets}")
+                return False
+            state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
 
         for ticket, position in list(state_by_ticket.items()):
             live_position = live_by_ticket.get(ticket)
@@ -1579,6 +1836,7 @@ class S19SnowballBot:
             flat_grid_anomaly = self.flat_pending_grid_anomaly(live_orders)
             if flat_grid_anomaly is not None:
                 return self.repair_flat_pending_grid(tick, regime, live_orders, flat_grid_anomaly)
+            self.clear_flat_reconciliation_if_confirmed(live_positions, live_orders)
             extra_order_tickets = sorted(live_order_tickets.difference(set(pending_tickets)))
             if extra_order_tickets:
                 self.block_new_entries(f"untracked live pending orders exist: {extra_order_tickets}")
@@ -2281,6 +2539,33 @@ class S19SnowballBot:
         self.state_file = os.path.join(temp_dir, "state.json")
         self.trade_log_file = os.path.join(temp_dir, "trades.csv")
         try:
+            original_notify_manual_action = self.notify_manual_action
+            manual_alert_calls: list[dict[str, Any]] = []
+
+            def capture_manual_alert(**kwargs: Any) -> None:
+                manual_alert_calls.append(kwargs)
+
+            self.notify_manual_action = capture_manual_alert  # type: ignore[method-assign]
+            try:
+                self.state = self.default_state()
+                reconciliation_details = {
+                    "type": "flat_pending_grid_repair",
+                    "reason": "untracked live positions exist: [111]",
+                    "details": {"tickets": [111]},
+                    "created_at_jst": "2026-07-16T00:00:00+09:00",
+                }
+                self.notify_reconciliation_required("untracked live positions exist: [111]", reconciliation_details)
+                self.notify_reconciliation_required("untracked live positions exist: [111]", reconciliation_details)
+                assert len(manual_alert_calls) == 1
+                changed_reconciliation_details = {
+                    **reconciliation_details,
+                    "details": {"tickets": [222]},
+                }
+                self.notify_reconciliation_required("untracked live positions exist: [222]", changed_reconciliation_details)
+                assert len(manual_alert_calls) == 2
+            finally:
+                self.notify_manual_action = original_notify_manual_action  # type: ignore[method-assign]
+
             self.state = self.default_state()
             assert self.start_cycle(1.25000)
             assert len(self.state["virtual_orders"]) == 4, self.state["virtual_orders"]
@@ -2335,10 +2620,31 @@ class S19SnowballBot:
                     self.magic = 190019
                     self.comment = comment
 
+            class FakeLivePosition:
+                def __init__(
+                    self,
+                    ticket: int,
+                    direction: str,
+                    open_price: float,
+                    sl: float,
+                    comment: str,
+                    volume: float = 0.01,
+                ) -> None:
+                    self.ticket = ticket
+                    self.symbol = "GBPUSD"
+                    self.magic = 190019
+                    self.direction = direction
+                    self.open_price = open_price
+                    self.sl = sl
+                    self.volume = volume
+                    self.comment = comment
+
             class FakeExecutor:
                 def __init__(self) -> None:
                     self.cancelled: list[int] = []
                     self.placed: list[tuple[int, float, float]] = []
+                    self.positions: list[FakeLivePosition] = []
+                    self.orders: list[FakePendingOrder] = []
                     self.last_order_error = None
 
                 def cancel_order(self, ticket: int) -> bool:
@@ -2364,6 +2670,20 @@ class S19SnowballBot:
                 @staticmethod
                 def price(value: float) -> float:
                     return round(float(value), 5)
+
+                def get_positions(self, symbol: str, magic: int) -> list[FakeLivePosition]:
+                    return [
+                        position
+                        for position in self.positions
+                        if position.symbol == symbol and int(position.magic) == int(magic)
+                    ]
+
+                def get_orders(self, symbol: str, magic: int) -> list[FakePendingOrder]:
+                    return [
+                        order
+                        for order in self.orders
+                        if order.symbol == symbol and int(order.magic) == int(magic)
+                    ]
 
             self.params["live_trading_enabled"] = True
             self.params["use_server_pending_entry"] = True
@@ -2493,6 +2813,96 @@ class S19SnowballBot:
             assert len(self.state["virtual_orders"]) == 4
             assert self.state_pending_grid_tuples() == self.expected_flat_pending_grid_tuples()
             assert self.state["pending_grid_repair_wait"] is None
+
+            self.state = self.default_state()
+            self.state["cycle_id"] = 3
+            self.state["grid_anchor"] = 1.34990
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "untracked live positions exist: [27643208]"
+            self.state["pending_open"] = {
+                "type": "server_pending_stop",
+                "request_id": "GBPUSD-190019-3-13",
+                "symbol": "GBPUSD",
+                "magic": 190019,
+                "order_id": 13,
+                "direction": "LONG",
+                "entry": 1.35090,
+                "stop_loss": 1.34990,
+                "volume": 0.01,
+                "comment": "s19_gbp_3_13",
+                "status": "OPEN_RESPONSE_UNCONFIRMED",
+                "last_error": "ERR|10006",
+            }
+            self.state["reconciliation_required"] = {
+                "type": "flat_pending_grid_repair",
+                "symbol": "GBPUSD",
+                "magic": 190019,
+                "cycle_id": 3,
+                "grid_anchor": 1.34990,
+                "reason": "flat pending grid reissue failed",
+                "details": {
+                    "reason": "flat_pending_grid_integrity_failed",
+                    "state": [
+                        {
+                            "order_id": 9,
+                            "ticket": 27643208,
+                            "direction": "LONG",
+                            "entry": 1.35090,
+                            "stop_loss": 1.34990,
+                            "comment": "s19_gbp_3_9",
+                        }
+                    ],
+                    "state_after_reissue": [],
+                },
+                "created_at_jst": "2026-07-16T01:27:02+09:00",
+            }
+            self.executor = FakeExecutor()
+            self.executor.positions = [
+                FakeLivePosition(27643208, "LONG", 1.35120, 1.34990, "s19_gbp_3_9")
+            ]
+            self.executor.orders = []
+            assert self.sync_live_positions(tick, regime, force=True)
+            assert len(self.state["positions"]) == 1
+            recovered_position = self.state["positions"][0]
+            assert int(recovered_position["ticket"]) == 27643208
+            assert recovered_position["direction"] == "LONG"
+            assert recovered_position["recovered_from_live"] is True
+            assert self.state["reconciliation_required"] is None
+            assert self.state["pending_open"] is None
+            assert self.state["pending_grid_repair_wait"] is None
+            assert not self.state["sync_block_new_entries"]
+
+            self.state = self.default_state()
+            self.state["cycle_id"] = 3
+            self.state["grid_anchor"] = 1.34990
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "untracked live positions exist: [27643208]"
+            self.state["pending_open"] = {
+                "type": "server_pending_stop",
+                "request_id": "GBPUSD-190019-3-13",
+                "symbol": "GBPUSD",
+                "magic": 190019,
+                "order_id": 13,
+                "direction": "LONG",
+                "entry": 1.35090,
+                "stop_loss": 1.34990,
+                "volume": 0.01,
+                "comment": "s19_gbp_3_13",
+                "status": "OPEN_RESPONSE_UNCONFIRMED",
+                "last_error": "ERR|10006",
+            }
+            self.state["reconciliation_required"] = {
+                "type": "flat_pending_grid_repair",
+                "reason": "flat pending grid reissue failed",
+                "details": {"state": []},
+            }
+            self.executor = FakeExecutor()
+            assert self.sync_live_positions(tick, regime, force=True)
+            assert self.state["positions"] == []
+            assert self.state["virtual_orders"] == []
+            assert self.state["reconciliation_required"] is None
+            assert self.state["pending_open"] is None
+            assert not self.state["sync_block_new_entries"]
         finally:
             self.params = original_params
             self.state = original_state

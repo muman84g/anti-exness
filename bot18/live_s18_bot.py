@@ -580,6 +580,9 @@ class S18SnowballBot:
             "autotrading_reject_last_order_id": None,
             "autotrading_reject_notified": False,
             "reconciliation_required": None,
+            "manual_alert_last_reconciliation_signature": None,
+            "manual_alert_last_reconciliation_reason": None,
+            "manual_alert_last_reconciliation_at_jst": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -1105,6 +1108,23 @@ class S18SnowballBot:
             key=key,
         )
 
+    def reconciliation_alert_signature(self, reason: str, details: dict[str, Any]) -> str:
+        payload = {
+            "reason": reason,
+            "details": details,
+        }
+        serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def mark_reconciliation_alert_if_new(self, reason: str, details: dict[str, Any]) -> bool:
+        signature = self.reconciliation_alert_signature(reason, details)
+        if self.state.get("manual_alert_last_reconciliation_signature") == signature:
+            return False
+        self.state["manual_alert_last_reconciliation_signature"] = signature
+        self.state["manual_alert_last_reconciliation_reason"] = reason
+        self.state["manual_alert_last_reconciliation_at_jst"] = jst_now().isoformat()
+        return True
+
     def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
         text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
         error = ""
@@ -1116,6 +1136,8 @@ class S18SnowballBot:
             streak = int(self.state.get("autotrading_reject_streak") or 0)
             notify_after = self.autotrading_reject_notify_after_count()
             if streak >= notify_after and not bool(self.state.get("autotrading_reject_notified")):
+                if not self.mark_reconciliation_alert_if_new(reason, details):
+                    return
                 self.notify_manual_action(
                     title="MT5 Algo Trading disabled or trading permission rejected",
                     reason=f"{alert_reason}; consecutive={streak}; threshold={notify_after}",
@@ -1128,6 +1150,8 @@ class S18SnowballBot:
                 self.state["autotrading_reject_notified"] = True
             return
         if "position sync failed" in reason:
+            return
+        if not self.mark_reconciliation_alert_if_new(reason, details):
             return
         self.notify_manual_action(
             title="reconciliation_required",
@@ -1269,6 +1293,60 @@ class S18SnowballBot:
         if sync_reason.startswith("market open result") or sync_reason.startswith("untracked live positions"):
             self.state["sync_block_new_entries"] = False
             self.state["sync_block_reason"] = None
+        return True
+
+    def clear_flat_market_open_reconciliation(self, live_positions: list[Any]) -> bool:
+        if live_positions:
+            return False
+        if self.state.get("positions"):
+            return False
+        reconciliation = self.state.get("reconciliation_required")
+        if not isinstance(reconciliation, dict):
+            return False
+        if reconciliation.get("type") != "market_open_result":
+            return False
+        reason = str(reconciliation.get("reason") or "")
+        if not reason.startswith("market open result unresolved"):
+            return False
+        details = reconciliation.get("details") if isinstance(reconciliation.get("details"), dict) else {}
+        order = details.get("order") if isinstance(details.get("order"), dict) else None
+        if not isinstance(order, dict):
+            return False
+        order_id = int(order.get("order_id", 0) or 0)
+        if order_id <= 0:
+            return False
+        if not any(int(item.get("order_id", 0) or 0) == order_id for item in self.state.get("virtual_orders", [])):
+            return False
+
+        cooldown = max(0.0, float(self.params.get("market_open_retry_cooldown_seconds", 30.0) or 0.0))
+        retry_after = time.time() + cooldown if cooldown > 0.0 else None
+        comment = str(details.get("comment") or self.market_order_comment(order))
+        error = str(details.get("error") or "UNKNOWN")
+        self.state["reconciliation_required"] = None
+        sync_reason = str(self.state.get("sync_block_reason") or "")
+        if sync_reason.startswith("market open result"):
+            self.state["sync_block_new_entries"] = False
+            self.state["sync_block_reason"] = None
+        self.state["market_open_retry_after_epoch"] = retry_after
+        self.state["last_market_open_failure"] = {
+            "type": "market_open_timeout_flat_confirmed",
+            "order_id": order_id,
+            "direction": str(order.get("direction", "")),
+            "entry": self.price(float(order.get("entry", 0.0) or 0.0)),
+            "stop_loss": self.price(float(order.get("stop_loss", 0.0) or 0.0)),
+            "comment": comment,
+            "error": error,
+            "retry_after_epoch": retry_after,
+            "created_at_jst": jst_now().isoformat(),
+        }
+        logging.warning(
+            "Cleared stale market OPEN reconciliation after MT5 flat confirmation: "
+            "symbol=%s order_id=%s error=%s cooldown=%.1fs",
+            self.symbol,
+            order_id,
+            error,
+            cooldown,
+        )
         return True
 
     def adopt_market_open_position(self, order: dict[str, Any], live_position: Any, comment: str, reason: str) -> None:
@@ -1568,6 +1646,9 @@ class S18SnowballBot:
             ):
                 self.block_new_entries(f"unrecoverable untracked live positions exist: {extra_tickets}")
                 return False
+            state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
+
+        if self.clear_flat_market_open_reconciliation(live_positions):
             state_by_ticket = {int(p["ticket"]): p for p in self.state["positions"]}
 
         for ticket, position in list(state_by_ticket.items()):
@@ -2139,6 +2220,42 @@ class S18SnowballBot:
     def self_test(self) -> None:
         original_suppress_manual_alerts = self._suppress_manual_alerts
         self._suppress_manual_alerts = True
+        original_notify_manual_action = self.notify_manual_action
+        manual_alert_calls: list[dict[str, Any]] = []
+
+        def capture_manual_alert(**kwargs: Any) -> None:
+            manual_alert_calls.append(kwargs)
+
+        self.notify_manual_action = capture_manual_alert  # type: ignore[method-assign]
+        try:
+            self.state = self.default_state()
+            reconciliation_details = {
+                "type": "market_open_result",
+                "reason": "market open result unresolved: unrecoverable untracked live positions",
+                "details": {"untracked_tickets": [111]},
+                "created_at_jst": "2026-07-16T00:00:00+09:00",
+            }
+            self.notify_reconciliation_required(
+                "market open result unresolved: unrecoverable untracked live positions",
+                reconciliation_details,
+            )
+            self.notify_reconciliation_required(
+                "market open result unresolved: unrecoverable untracked live positions",
+                reconciliation_details,
+            )
+            assert len(manual_alert_calls) == 1
+            changed_reconciliation_details = {
+                **reconciliation_details,
+                "details": {"untracked_tickets": [222]},
+            }
+            self.notify_reconciliation_required(
+                "market open result unresolved: unrecoverable untracked live positions",
+                changed_reconciliation_details,
+            )
+            assert len(manual_alert_calls) == 2
+        finally:
+            self.notify_manual_action = original_notify_manual_action  # type: ignore[method-assign]
+
         self.state = self.default_state()
         self.start_cycle(1.25000)
         assert len(self.state["virtual_orders"]) == 4, self.state["virtual_orders"]
@@ -2492,6 +2609,42 @@ class S18SnowballBot:
             assert "unrecoverable untracked live positions" in str(self.state["reconciliation_required"].get("reason"))
             assert not any(event[0] == "ENTRY_FAIL_MARKET" for event in trade_events)
             assert any(event[0] == "ENTRY_UNRESOLVED_MARKET" for event in trade_events)
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            timeout_unresolved_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            timeout_unresolved_executor = FakeExecutor("ERR|TIMEOUT")
+            self.executor = timeout_unresolved_executor
+            assert not self.open_from_virtual_order(timeout_unresolved_order, market_tick)
+            assert len(self.state["virtual_orders"]) == 4
+            assert self.state["sync_block_new_entries"]
+            assert isinstance(self.state["reconciliation_required"], dict)
+            assert any(event[0] == "ENTRY_UNRESOLVED_MARKET" for event in trade_events)
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            timeout_flat_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            timeout_flat_executor = FakeExecutor("ERR|TIMEOUT")
+            self.executor = timeout_flat_executor
+            assert not self.open_from_virtual_order(timeout_flat_order, market_tick)
+            assert self.state["sync_block_new_entries"]
+            assert isinstance(self.state["reconciliation_required"], dict)
+            assert self.sync_live_positions(market_tick)
+            assert len(self.state["positions"]) == 0
+            assert len(self.state["virtual_orders"]) == 4
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["reconciliation_required"] is None
+            assert self.state["market_open_retry_after_epoch"] is not None
+            assert self.fill_virtual_orders(market_tick, market_regime) == 0
+            assert timeout_flat_executor.open_calls == 1
 
             trade_events.clear()
             self.state = self.default_state()

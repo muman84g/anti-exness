@@ -36,9 +36,11 @@ MT5側bridgeはPython側の `ea_bridge.py` と同じ `cmd_s19.txt` / `res_s19.tx
 Windowsでは `BotBridge_s19` が置かれた MT5 terminal data folder の `MQL5/Files` を優先検出します。環境差がある場合は `EA_BRIDGE_FILES_DIR` または `MT5_FILES_DIR` で明示してください。
 `BotBridge_s19.ex5` はbot19用の実行bridgeとしてgit管理対象です。CentOS側は `git pull` で `.mq5` と `.ex5` の両方を更新できます。MT5が別の `MQL5/Experts` 配下を見ている場合だけ、その実配置先へコピーしてください。
 
-server-side pending stop を使うため、発注応答が未確認になった場合は `pending_open` / `reconciliation_required` を state に残し、新規entryを止めます。手動解除前に MT5 上の建玉・未約定注文・ticket・comment が state と一致することを確認してください。
+server-side pending stop を使うため、発注応答が未確認になった場合は `pending_open` / `reconciliation_required` を state に残し、新規entryを止めます。MT5 上のbot19建玉が state に無い場合でも、現在の `virtual_orders`、`pending_open`、または保存済みの pending-grid repair 履歴から ticket/comment/direction/SL/entry が一意に一致する場合だけ state に自動採用します。一意に照合できない場合は `reconciliation_required` のまま停止します。
 
 未約定・建玉なしのcycle中は、S19 pending grid は `Buy Stop` 2本 + `Sell Stop` 2本を正常形とします。MT5側で1本だけcancelされるなどして2:2が崩れた場合、runnerは残りのS19 pendingを全cancelし、spread/regimeがentry可能なら同じ `grid_anchor` で2:2を再発注します。spread/regimeがNGなら `grid_anchor` を維持して再発注待ちにします。cancelまたは再発注に失敗した場合は `reconciliation_required` で停止します。
+
+MT5 がbot19の建玉・未約定注文ともに完全flatを返し、state側に未解決の `pending_open` / pending-grid repair の残骸だけがある場合は、その stale block を自動解除して通常のflat-cycle待機に戻します。
 
 If stale pending tickets remain in `state/s19_gbpusd_bot_state.json`, use `reset_state_if_flat.py` only after stopping bot19. It refuses to reset unless MT5 reports no bot19 positions and no bot19 pending orders.
 
