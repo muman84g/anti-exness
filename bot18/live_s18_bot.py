@@ -1036,24 +1036,31 @@ class S18SnowballBot:
 
     def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
         text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
+        error = ""
+        raw_details = details.get("details") if isinstance(details.get("details"), dict) else details
+        if isinstance(raw_details, dict) and raw_details.get("error"):
+            error = f"; error={raw_details.get('error')}"
+        alert_reason = f"{reason}{error}"
         if "ERR|10026" in text or "ERR|10027" in text:
             self.notify_manual_action(
                 title="MT5 Algo Trading disabled or trading permission rejected",
-                reason=reason,
+                reason=alert_reason,
                 action=(
                     "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
                     "the EA Allow Algo Trading setting; then inspect state/orders before clearing any block."
                 ),
-                key=f"bot18:{self.symbol}:autotrading-disabled",
+                key="bot18:autotrading-disabled",
             )
+            return
+        if "position sync failed" in reason:
             return
         self.notify_manual_action(
             title="reconciliation_required",
-            reason=reason,
+            reason=alert_reason,
             action=(
                 "Inspect MT5 positions/orders and bot18 state/logs before clearing the block or restarting entries."
             ),
-            key=f"bot18:{self.symbol}:reconciliation:{reason}",
+            key=f"bot18:reconciliation:{reason}",
         )
 
     def market_open_retry_block_reason(self) -> str | None:
@@ -1348,7 +1355,7 @@ class S18SnowballBot:
                     "Turn on MT5 Algo Trading for exness-bot-18/BotBridge_s18 and verify "
                     "the EA Allow Algo Trading setting."
                 ),
-                key=f"bot18:{self.symbol}:autotrading-disabled",
+                key="bot18:autotrading-disabled",
             )
 
     def log_unresolved_market_open(

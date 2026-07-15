@@ -1382,24 +1382,31 @@ class S19SnowballBot:
 
     def notify_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
         text = f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True)}"
+        error = ""
+        raw_details = details.get("details") if isinstance(details.get("details"), dict) else details
+        if isinstance(raw_details, dict) and raw_details.get("error"):
+            error = f"; error={raw_details.get('error')}"
+        alert_reason = f"{reason}{error}"
         if "ERR|10026" in text or "ERR|10027" in text:
             self.notify_manual_action(
                 title="MT5 Algo Trading disabled or trading permission rejected",
-                reason=reason,
+                reason=alert_reason,
                 action=(
                     "Turn on MT5 Algo Trading for exness-bot-19/BotBridge_s19 and verify "
                     "the EA Allow Algo Trading setting; then inspect pending orders/state before clearing any block."
                 ),
-                key=f"bot19:{self.symbol}:autotrading-disabled",
+                key="bot19:autotrading-disabled",
             )
+            return
+        if "position sync failed" in reason:
             return
         self.notify_manual_action(
             title="reconciliation_required",
-            reason=reason,
+            reason=alert_reason,
             action=(
                 "Inspect MT5 pending orders/positions and bot19 state/logs before clearing the block or restarting entries."
             ),
-            key=f"bot19:{self.symbol}:reconciliation:{reason}",
+            key=f"bot19:reconciliation:{reason}",
         )
 
     def repair_flat_pending_grid(

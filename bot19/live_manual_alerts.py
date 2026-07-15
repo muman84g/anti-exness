@@ -36,7 +36,14 @@ def _webhook_url() -> str:
     )
 
 
-def _min_interval_seconds() -> float:
+def _min_interval_seconds(key: str) -> float:
+    if ":reconciliation:" in key:
+        raw = os.environ.get("BOT_MANUAL_ALERT_RECONCILE_INTERVAL_SECONDS")
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                logging.warning("Invalid manual alert reconciliation interval; using fallback")
     raw = os.environ.get("BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS") or os.environ.get(
         "DISCORD_NOTIFY_MIN_INTERVAL_SECONDS"
     )
@@ -71,7 +78,7 @@ def notify_manual_action_required(
         return False
 
     now = time.time()
-    interval = _min_interval_seconds()
+    interval = _min_interval_seconds(key)
     previous = _LAST_SENT_EPOCH_BY_KEY.get(key)
     if previous is not None and now - previous < interval:
         return False
