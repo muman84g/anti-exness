@@ -1,98 +1,116 @@
 GitHub push memo
 
-Purpose: push live bot files quickly while keeping live_config out of GitHub, then tell the user the CentOS-side next steps.
+Purpose: push one explicitly authorized live-bot change while excluding sensitive local configuration, then report the target-specific CentOS follow-up steps.
 
-## First-Time Bot Push Rule
+This memo is not authorization to commit, push, deploy, restart, or enable trading. Confirm each requested action and the target bot first.
 
-For a first-time bot push, include the generated target bot folder as-is.
+## Target Variables
 
-Exclude only:
+Set the target once and use it consistently. Example for bot20:
+
+```powershell
+$NN = '20'
+$BOT = "bot$NN"
+$SERVICE = "exness-bot-$NN"
+$RUNNER = "live_s${NN}_bot.py"
+```
+
+Verify `$BOT`, `$SERVICE`, runner, compose mount, strategy ID, and `BOT_BACKTEST_MAP_ja.md` before staging.
+
+## Sensitive Exclusions
+
+For a first-time bot push, include the generated target bot folder as requested by project policy, excluding:
 
 - `live_config.py`
-- direct live_config derivatives, especially `__pycache__/live_config*.pyc`
-- `.env`, credential files, secrets, tokens, and account credentials
+- direct live-config derivatives such as `__pycache__/live_config*.pyc`
+- `.env`, credentials, account data, secrets, and tokens
 
-This means initial `logs/`, `state/`, `sNN_bot_state.json`, other `__pycache__/*.pyc`, and generated placeholder files can be committed on the first push.
+For an existing bot update, stage only the authorized changed files unless the user asks to refresh the whole target folder.
 
-For an existing bot update, stage only changed files unless the user asks to refresh the whole folder.
+## Clean Clone Route
 
-## Fast Route For bot20
-
-Use a clean clone under `C:\botter\_push_*` if the local `C:\botter` tree is not usable as a normal Git repo.
+Use this only when the local project tree is not suitable for the requested push. Keep clones outside `C:\botter` and `C:\botter\bot`:
 
 ```powershell
 $STAMP = Get-Date -Format yyyyMMdd_HHmmss
-$CLONE = "C:\botter\_push_anti-exness-$STAMP"
+$CLONE_ROOT = 'C:\Users\muuma\Downloads\codex-temp'
+New-Item -ItemType Directory -Force -Path $CLONE_ROOT | Out-Null
+$CLONE = Join-Path $CLONE_ROOT "anti-exness-push-$BOT-$STAMP"
 git clone https://github.com/muman84g/anti-exness.git $CLONE
 ```
 
-Copy bot20 as a folder, then remove only live_config artifacts:
+Copy the contents of the target folder, not the folder onto itself:
 
 ```powershell
-$SRC = 'C:\botter\bot'
-$DST = $CLONE
-Copy-Item -LiteralPath "$SRC\BOT_BACKTEST_MAP_ja.md" -Destination "$DST\BOT_BACKTEST_MAP_ja.md" -Force
-Get-ChildItem -LiteralPath $SRC -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination $DST -Force
-Copy-Item -LiteralPath "$SRC\bot20" -Destination "$DST\bot20" -Recurse -Force
-Remove-Item -LiteralPath "$DST\bot20\live_config.py" -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "$DST\bot20\__pycache__\live_config.cpython-312.pyc" -Force -ErrorAction SilentlyContinue
+$SRC_ROOT = 'C:\botter\bot'
+$SRC_BOT = Join-Path $SRC_ROOT $BOT
+$DST_BOT = Join-Path $CLONE $BOT
+Copy-Item -LiteralPath "$SRC_ROOT\BOT_BACKTEST_MAP_ja.md" -Destination "$CLONE\BOT_BACKTEST_MAP_ja.md" -Force
+Get-ChildItem -LiteralPath $SRC_ROOT -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination $CLONE -Force
+New-Item -ItemType Directory -Force -Path $DST_BOT | Out-Null
+Get-ChildItem -LiteralPath $SRC_BOT -Force |
+  Where-Object { $_.Name -ne 'live_config.py' } |
+  Copy-Item -Destination $DST_BOT -Recurse -Force
+Get-ChildItem -LiteralPath "$DST_BOT\__pycache__" -Force -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like 'live_config*.pyc' } |
+  Remove-Item -Force
 ```
 
-Add only the `exness-bot-20` service block to the clone's `docker-compose.yml`. Preserve existing bot18/bot19 settings unless the user asked to change them.
+If compose changes are authorized, add or update only `$SERVICE`. Preserve unrelated service blocks and mounts.
 
-Stage and verify:
+## Stage And Verify
 
 ```powershell
 Set-Location $CLONE
 git add -- BOT_BACKTEST_MAP_ja.md docker-compose.yml github*push.txt
-git add -f bot20
+git add -f -- $BOT
 git diff --cached --name-only
-git diff --cached --name-only | Select-String -Pattern '(^|/)live_config\.py$|__pycache__/live_config|\.env'
+git diff --cached --name-only | Select-String -Pattern '(^|/)live_config\.py$|__pycache__/live_config|\.env|credential|secret|token'
 ```
 
-The final command must return no matches.
+The final command must return no matches. Also inspect `git diff --cached` before committing.
 
-Commit and push:
+Commit and push only when explicitly requested:
 
 ```powershell
-git commit -m "Add bot20 live bot files"
+git commit -m "Update $BOT live bot files"
 git push origin main
 ```
 
-## Final Response After Push
+## CentOS Follow-Up
 
-After a successful push, always include the CentOS-side next steps. For bot20:
+After a successful push, report these target-specific next steps; do not run them unless separately authorized on that host:
 
 ```bash
 cd /home/muu/python_program/anti-exness
 git pull
 ```
 
-If this is the first CentOS deployment for the bot, place local `bot20/live_config.py` on CentOS manually before starting. Do not commit it.
+For a first deployment, place the local sensitive `botNN/live_config.py` on CentOS manually before any start. Do not commit it.
 
-No-order check, if the Docker image has the needed Python dependencies:
-
-```bash
-sudo docker compose run --rm --no-deps exness-bot-20 python3 /app/bot20/live_s20_bot.py --self-test
-```
-
-Start or refresh only bot20 when the user is ready:
+No-order self-test, after replacing `<NN>` and confirming the runner path:
 
 ```bash
-sudo docker compose up -d --no-deps --force-recreate exness-bot-20
+sudo docker compose run --rm --no-deps exness-bot-<NN> python3 /app/bot<NN>/live_s<NN>_bot.py --self-test
 ```
 
-Then check:
+Recreate only the authorized target when the user is ready:
 
 ```bash
-sudo docker ps --filter name=exness-bot-20
-sudo docker compose logs --tail=80 exness-bot-20
-tail -n 80 bot20/logs/s20_bot.log
+sudo docker compose up -d --no-deps --force-recreate exness-bot-<NN>
+sudo docker ps --filter name=exness-bot-<NN>
+sudo docker compose logs --tail=80 exness-bot-<NN>
+tail -n 80 bot<NN>/logs/s<NN>_bot.log
 ```
 
-For shadow-forward, confirm `bot20/s20_params.json` remains:
+Before a first shadow-forward start, confirm the target params keep real trading disabled and shadow mode enabled unless the user explicitly authorized another mode.
 
-```json
-"live_trading_enabled": false,
-"shadow_forward_enabled": true
-```
+## Final Response Checklist
+
+After reporting the pushed commit, include:
+
+- the temp clone path if one was created
+- the exact target-specific CentOS `git pull` command
+- the no-order Docker self-test command for the target bot
+- the recreate/log commands only as next steps, clearly marked as not run unless separately authorized
+- whether deploy, restart, bridge attachment, or live switching was not performed
