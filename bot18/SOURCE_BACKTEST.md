@@ -12,6 +12,10 @@
 ## Source
 
 - Main known source: `C:\botter\backtest\output\backtest33_lightGBM_template_audit_bot18v2`
+- Current live artifacts match `candidates\event_filter_template\live_bot18_v2_staging`
+  / `bot18_v2_basket_forward_20260704`.
+- `live_bot18_v2_aud055_staging` is a separate AUDUSD allow-rate 0.55 forward
+  calibration and is not the current `bot18` artifact set.
 - Legacy related sources: `backtest24_bot18`, `backtest34_bot18_small_range_filter`
 - Strategy family: S18 v2 three-symbol ML event-filter basket
 - Symbols: GBPUSD, EURUSD, AUDUSD
@@ -25,6 +29,19 @@ Preserve the existing CentOS `bot18/live_config.py` unless the user explicitly a
 ## Runtime logging
 
 `s18_policy_decisions.csv` is diagnostic only. It should not log every repeated threshold-block decision indefinitely; the live runner throttles repeated policy decisions while preserving passes, policy errors, and reason/signature changes.
+
+## Live feature timing
+
+S18 live policy features use closed bars only. H1 history is fetched through
+`CopyRates(..., 0, bars)`, so the latest forming H1 row is dropped before
+regime features are built. `h1_signal_age_minutes` is the current decision
+time minus the latest closed H1 label, matching the backtest exporter rule
+`decision_time_utc - h1_signal_time`. M1 policy features also drop the latest
+forming M1 row before calculating ATR/range/return/volume.
+
+Live still is not tick-identical to the backtest: the regime result is cached
+for `regime_refresh_seconds`, and cycle starts are evaluated on live polling
+ticks rather than only at historical M1 close rows.
 
 ## Live price calculation
 

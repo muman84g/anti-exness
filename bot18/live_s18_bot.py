@@ -70,7 +70,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s18_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-post-sl-cooldown-v2"
+BOT_SOURCE_REVISION = "2026-07-16-h1-age-timing-v1"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -180,6 +180,23 @@ def configure_logging(file_enabled: bool = True) -> None:
 
 def jst_now() -> datetime:
     return datetime.now(timezone.utc).astimezone(JST)
+
+
+def finite_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(parsed):
+        return float(default)
+    return parsed
+
+
+def bar_clock_now_from_epoch(now_epoch: float, index: pd.DatetimeIndex) -> pd.Timestamp:
+    now_utc = pd.Timestamp.fromtimestamp(float(now_epoch), tz=timezone.utc)
+    if index.tz is not None:
+        return now_utc.tz_convert(index.tz)
+    return now_utc.tz_localize(None)
 
 
 def load_params() -> dict[str, Any]:
@@ -820,19 +837,19 @@ class S18SnowballBot:
             if h1 is None or len(h1) < 80:
                 raise ValueError("not enough H1 bars")
             h1 = h1.sort_index()
+            decision_time = bar_clock_now_from_epoch(now_epoch, h1.index)
             if bool(self.params["drop_latest_h1_bar"]):
                 if len(h1) < 2:
                     raise ValueError("not enough H1 bars after dropping current bar")
                 closed = h1.iloc[:-1].copy()
-                current_open = h1.index[-1]
                 signal_time = h1.index[-2] + pd.Timedelta(hours=1)
-                age_minutes = (current_open - signal_time).total_seconds() / 60.0
+                age_minutes = (decision_time - signal_time).total_seconds() / 60.0
                 signal_fresh = 0.0 <= age_minutes <= float(self.params["max_signal_age_minutes"])
             else:
                 closed = h1.copy()
                 signal_time = h1.index[-1]
-                age_minutes = 0.0
-                signal_fresh = True
+                age_minutes = (decision_time - signal_time).total_seconds() / 60.0
+                signal_fresh = 0.0 <= age_minutes <= float(self.params["max_signal_age_minutes"])
             regime = build_trend_regime_from_h1(closed, self.params)
             if regime.empty:
                 raise ValueError("regime output is empty")
@@ -886,7 +903,7 @@ class S18SnowballBot:
                 effective_spread_points <= float(self.params["policy_max_entry_spread_points"]) + 1e-9
             ),
             "spread_points_decision": effective_spread_points,
-            "h1_signal_age_minutes": float(regime.get("signal_age_minutes", 999999.0) or 999999.0),
+            "h1_signal_age_minutes": finite_float(regime.get("signal_age_minutes"), 999999.0),
             "h1_adx": float(regime.get("adx", 0.0) or 0.0),
             "h1_efficiency_ratio": float(regime.get("efficiency_ratio", 0.0) or 0.0),
             "h1_displacement_atr": float(regime.get("displacement_atr", 0.0) or 0.0),
@@ -2579,6 +2596,72 @@ class S18SnowballBot:
             assert len(manual_alert_calls) == 2
         finally:
             self.notify_manual_action = original_notify_manual_action  # type: ignore[method-assign]
+
+        age_index = pd.date_range(pd.Timestamp("2026-07-16 00:00:00"), periods=3, freq="h")
+        age_epoch = pd.Timestamp("2026-07-16 02:37:30", tz=timezone.utc).timestamp()
+        age_now = bar_clock_now_from_epoch(age_epoch, age_index)
+        assert age_now == pd.Timestamp("2026-07-16 02:37:30")
+        signal_time = age_index[-2] + pd.Timedelta(hours=1)
+        assert (age_now - signal_time).total_seconds() / 60.0 == 37.5
+        assert finite_float(0.0, 999999.0) == 0.0
+        original_get_m1_policy_features = self.get_m1_policy_features
+        self.get_m1_policy_features = lambda: {  # type: ignore[method-assign]
+            "m1_atr_pips": 1.0,
+            "m1_range_pips": 2.0,
+            "m1_ret_1_pips": 0.25,
+            "m1_tick_volume": 100.0,
+        }
+        try:
+            policy_features = self.build_cycle_start_event_features(
+                {"bid": 1.25000, "spread_points": 1.0},
+                {
+                    "signal_age_minutes": 0.0,
+                    "adx": 0.0,
+                    "efficiency_ratio": 0.0,
+                    "displacement_atr": 0.0,
+                    "trend_direction": 0,
+                },
+            )
+            assert policy_features["h1_signal_age_minutes"] == 0.0
+        finally:
+            self.get_m1_policy_features = original_get_m1_policy_features  # type: ignore[method-assign]
+
+        class FakeRegimeDataManager:
+            def get_historical_data(self, mt5_symbol: str, timeframe: int, num_bars: int) -> pd.DataFrame:
+                del mt5_symbol, timeframe
+                now_utc = pd.Timestamp.fromtimestamp(time.time(), tz=timezone.utc).tz_localize(None)
+                current_open = now_utc.floor("h")
+                index = pd.date_range(
+                    current_open - pd.Timedelta(hours=int(num_bars) - 1),
+                    periods=int(num_bars),
+                    freq="h",
+                )
+                close = pd.Series(np.linspace(1.2000, 1.2600, int(num_bars)), index=index)
+                return pd.DataFrame(
+                    {
+                        "Open": close,
+                        "High": close + 0.0010,
+                        "Low": close - 0.0010,
+                        "Close": close,
+                        "Volume": 100,
+                    },
+                    index=index,
+                )
+
+        original_dm = self.dm
+        original_executor = self.executor
+        original_last_regime_fetch_epoch = self.last_regime_fetch_epoch
+        try:
+            self.dm = FakeRegimeDataManager()  # type: ignore[assignment]
+            self.executor = object()  # type: ignore[assignment]
+            self.last_regime_fetch_epoch = 0.0
+            regime = self.get_regime()
+            assert 0.0 <= float(regime["signal_age_minutes"]) <= 65.0, regime
+            assert float(regime["signal_age_minutes"]) != 999999.0, regime
+        finally:
+            self.dm = original_dm
+            self.executor = original_executor
+            self.last_regime_fetch_epoch = original_last_regime_fetch_epoch
 
         self.state = self.default_state()
         self.start_cycle(1.25000)
