@@ -70,6 +70,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s18_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
+BOT_SOURCE_REVISION = "2026-07-16-post-sl-cooldown-v2"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -1155,44 +1156,59 @@ class S18SnowballBot:
         pnl: float,
         reason: str,
     ) -> bool:
-        if self.state["positions"]:
-            return False
+        remaining_positions_count = len(self.state["positions"])
         old_virtual_orders_count = len(self.state["virtual_orders"])
         cooldown = self.post_sl_reanchor_cooldown()
         retry_after = time.time() + cooldown if cooldown > 0.0 else None
         self.clear_virtual_orders()
         self.clear_auto_tp()
-        self.state["grid_anchor"] = None
+        if remaining_positions_count == 0:
+            self.state["grid_anchor"] = None
+            self.state["restart_next_tick"] = True
         self.state["last_break_even_refresh_epoch"] = None
-        self.state["restart_next_tick"] = True
         self.state["post_sl_reanchor_after_epoch"] = retry_after
         self.state["market_open_retry_after_epoch"] = None
         self.state["last_market_open_failure"] = None
         self.reset_autotrading_reject_state()
         self.state["last_post_sl_reanchor"] = {
-            "type": "post_sl_reanchor",
+            "type": "post_sl_reanchor" if remaining_positions_count == 0 else "post_sl_entry_cooldown",
             "ticket": int(ticket),
             "direction": str(direction),
             "exit_price": self.price(float(exit_price)),
             "pnl": float(pnl),
             "reason": reason,
             "old_virtual_orders_count": old_virtual_orders_count,
+            "remaining_positions_count": remaining_positions_count,
             "cooldown_seconds": cooldown,
             "retry_after_epoch": retry_after,
             "cycle_id": int(self.state.get("cycle_id", 0)),
             "created_at_jst": jst_now().isoformat(),
         }
-        logging.warning(
-            "S18 post-SL breakout reanchor prepared: symbol=%s ticket=%s direction=%s "
-            "exit=%.5f pnl=%.2f old_virtual_orders=%s cooldown=%.1fs",
-            self.symbol,
-            int(ticket),
-            str(direction),
-            self.price(float(exit_price)),
-            float(pnl),
-            old_virtual_orders_count,
-            cooldown,
-        )
+        if remaining_positions_count == 0:
+            logging.warning(
+                "S18 post-SL breakout reanchor prepared: symbol=%s ticket=%s direction=%s "
+                "exit=%.5f pnl=%.2f old_virtual_orders=%s cooldown=%.1fs",
+                self.symbol,
+                int(ticket),
+                str(direction),
+                self.price(float(exit_price)),
+                float(pnl),
+                old_virtual_orders_count,
+                cooldown,
+            )
+        else:
+            logging.warning(
+                "S18 post-SL entry cooldown prepared: symbol=%s ticket=%s direction=%s "
+                "exit=%.5f pnl=%.2f remaining_positions=%s old_virtual_orders=%s cooldown=%.1fs",
+                self.symbol,
+                int(ticket),
+                str(direction),
+                self.price(float(exit_price)),
+                float(pnl),
+                remaining_positions_count,
+                old_virtual_orders_count,
+                cooldown,
+            )
         return True
 
     def set_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
@@ -2048,6 +2064,13 @@ class S18SnowballBot:
             return 0
         if isinstance(self.state.get("reconciliation_required"), dict):
             return 0
+        post_sl_block = self.post_sl_reanchor_block_reason()
+        if post_sl_block is not None:
+            now = time.time()
+            if now - self.last_post_sl_reanchor_log_epoch >= float(self.params["status_log_interval_seconds"]):
+                logging.warning("S18 post-SL virtual-order fill is temporarily blocked: %s", post_sl_block)
+                self.last_post_sl_reanchor_log_epoch = now
+            return 0
         retry_block = self.market_open_retry_block_reason()
         if retry_block is not None:
             now = time.time()
@@ -2177,6 +2200,8 @@ class S18SnowballBot:
         if self.state["grid_anchor"] is None:
             return
         if self.state.get("sync_block_new_entries") or isinstance(self.state.get("reconciliation_required"), dict):
+            return
+        if self.post_sl_reanchor_block_reason() is not None:
             return
         level = int(self.state.get("long_count", 0)) - int(self.state.get("short_count", 0))
         if level == 0:
@@ -2506,6 +2531,7 @@ class S18SnowballBot:
             f"symbol={self.symbol} magic={self.magic} lot={self.params['lot']} "
             f"distance={self.params['distance_pips']} inactive_add={self.params['inactive_add_distance_pips']}"
         )
+        logging.info("S18 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         while True:
             try:
                 self.run_once()
@@ -2787,6 +2813,54 @@ class S18SnowballBot:
                 self.params["live_trading_enabled"] = original_live_trading_enabled
 
             self.params["live_trading_enabled"] = True
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            self.state["positions"] = [
+                {
+                    "ticket": 800005,
+                    "direction": "LONG",
+                    "entry": 1.25050,
+                    "stop_loss": 1.25000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": "s18_selftest_partial_sl_missing",
+                },
+                {
+                    "ticket": 800006,
+                    "direction": "LONG",
+                    "entry": 1.24950,
+                    "stop_loss": 1.24900,
+                    "volume": 0.01,
+                    "source_order_id": 2,
+                    "comment": "s18_selftest_partial_sl_remaining",
+                },
+            ]
+            self.recalculate_position_counts()
+            partial_sl_executor = FakeExecutor("OK")
+            partial_sl_executor.positions = [
+                FakePosition(
+                    800006,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.24950,
+                    1.24900,
+                    "s18_selftest_partial_sl_remaining",
+                )
+            ]
+            self.executor = partial_sl_executor
+            assert self.sync_live_positions(market_tick)
+            assert len(self.state["positions"]) == 1
+            assert int(self.state["positions"][0]["ticket"]) == 800006
+            assert len(self.state["virtual_orders"]) == 0
+            assert self.state["post_sl_reanchor_after_epoch"] is not None
+            assert self.state["last_post_sl_reanchor"]["type"] == "post_sl_entry_cooldown"
+            assert self.fill_virtual_orders(market_tick, market_regime) == 0
+            self.manage_orders_and_grid(market_tick["bid"], market_tick["ask"])
+            assert len(self.state["virtual_orders"]) == 0
+            assert partial_sl_executor.open_calls == 0
+
             self.state = self.default_state()
             self.start_cycle(1.25000)
             flat_stale_tick = {
@@ -3277,6 +3351,7 @@ class S18V2BasketRunner:
             live_trading_enabled,
             shadow_forward_enabled,
         )
+        logging.info("S18 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         sleep_seconds = min(float(bot.params["poll_interval_seconds"]) for bot in self.bots)
         while True:
             for bot in self.bots:
