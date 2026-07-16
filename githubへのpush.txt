@@ -86,6 +86,12 @@ cd /home/muu/python_program/anti-exness
 git pull
 ```
 
+For this CentOS Docker deployment, treat `git pull` as host-file update only.
+If live-bot source, params, artifacts, compose mounts, or helper files changed,
+the running container should be considered stale until the target service is
+recreated. Do not say the running bot has the update just because `git pull`
+finished.
+
 For a first deployment, place the local sensitive `botNN/live_config.py` on CentOS manually before any start. Do not commit it.
 
 No-order self-test, after replacing `<NN>` and confirming the runner path:
@@ -94,7 +100,8 @@ No-order self-test, after replacing `<NN>` and confirming the runner path:
 sudo docker compose run --rm --no-deps exness-bot-<NN> python3 /app/bot<NN>/live_s<NN>_bot.py --self-test
 ```
 
-Recreate only the authorized target when the user is ready:
+After the no-order self-test passes, recreate only the authorized target to
+make the updated files active in the running container:
 
 ```bash
 sudo docker compose up -d --no-deps --force-recreate exness-bot-<NN>
@@ -112,5 +119,6 @@ After reporting the pushed commit, include:
 - the temp clone path if one was created
 - the exact target-specific CentOS `git pull` command
 - the no-order Docker self-test command for the target bot
-- the recreate/log commands only as next steps, clearly marked as not run unless separately authorized
+- the recreate/log commands needed to activate changed files in the running container, clearly marked as not run unless separately authorized
+- a clear distinction between "pushed to GitHub", "pulled on CentOS host", and "active in the recreated container"
 - whether deploy, restart, bridge attachment, or live switching was not performed

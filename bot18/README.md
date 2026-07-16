@@ -36,9 +36,12 @@ The top-level `lot` remains `0.01` as a fallback; live profiles use each profile
 - bot log: `logs/s18_bot.log`
 - trades: `logs/s18_trades.csv`
 - policy decisions: `logs/s18_policy_decisions.csv`
+- decision snapshots: `logs/s18_decision_snapshots.csv`
 - state: `state/s18_<symbol>_bot_state.json`
 
 `s18_policy_decisions.csv` is throttled to avoid high-volume repeated threshold-block rows. It logs policy passes, policy errors, reason/signature changes, and otherwise one repeated decision per symbol every `policy_decision_log_interval_seconds` seconds.
+
+`s18_decision_snapshots.csv` is for backtest/live reproducibility checks. It logs one detailed row per closed-M1 cycle-start policy decision while flat, including the M1 decision time, live tick Bid/Ask, effective spread, selected H1/M1 features, model output, threshold, and whether the bot blocked, shadow-allowed, or started a cycle. Duplicate polls inside the same M1 decision bar are skipped. Actual market-entry drift from the virtual trigger is recorded in `s18_trades.csv` as `source_entry`, requested/filled entry, and `source_drift_pips`.
 
 ## Market order rejection safety
 

@@ -39,6 +39,7 @@
 - Do not manually repair state while the target bot is running. Verify ticket, symbol, direction, lot, SL, and TP before an authorized repair.
 - Report changed files, checks run, and explicitly state whether deploy, restart, or live switching was not performed.
 - After any successful GitHub push for live-bot files, report the target-specific CentOS follow-up steps from `C:\botter\bot\githubへのpush.txt`, and state that they were not run unless separately authorized.
+- For the CentOS Docker runtime, do not describe a live-bot file update as active in the running container until the authorized target service has been recreated with `docker compose up -d --no-deps --force-recreate exness-bot-NN`.
 
 ## Temporary Work
 

@@ -67,10 +67,12 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "s18_bot.log")
 TRADE_LOG_FILE = os.path.join(LOG_DIR, "s18_trades.csv")
 POLICY_LOG_FILE = os.path.join(LOG_DIR, "s18_policy_decisions.csv")
+DECISION_SNAPSHOT_LOG_FILE = os.path.join(LOG_DIR, "s18_decision_snapshots.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-m1-policy-timing-v1"
+BOT_SOURCE_REVISION = "2026-07-16-decision-snapshot-v1"
+DUPLICATE_M1_DECISION_REASON = "duplicate_m1_decision_bar"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -141,6 +143,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "policy_decision_log_interval_seconds": 300,
     "policy_decision_log_pass_always": True,
     "policy_decision_log_error_always": True,
+    "decision_snapshot_log_enabled": True,
     "policy_artifacts_dir": ARTIFACTS_DIR,
     "policy_spread_add_points": 2.0,
     "policy_max_entry_spread_points": 9.0,
@@ -538,6 +541,9 @@ class S18SnowballBot:
         )
         self.trade_log_file = str(self.params.get("trade_log_file", TRADE_LOG_FILE))
         self.policy_log_file = str(self.params.get("policy_log_file", POLICY_LOG_FILE))
+        self.decision_snapshot_log_file = str(
+            self.params.get("decision_snapshot_log_file", DECISION_SNAPSHOT_LOG_FILE)
+        )
         self.policy = policy
         self.dm = None
         self.executor = None
@@ -992,6 +998,98 @@ class S18SnowballBot:
             self.last_policy_decision_log_epoch = now
             self.last_policy_decision_log_signature = signature
 
+    def log_decision_snapshot(
+        self,
+        decision: dict[str, Any],
+        tick: dict[str, Any],
+        regime: dict[str, Any],
+        action: str,
+    ) -> None:
+        if not bool(self.params.get("decision_snapshot_log_enabled", True)):
+            return
+        if str(decision.get("reason", "")) == DUPLICATE_M1_DECISION_REASON:
+            return
+        now_utc = datetime.now(timezone.utc)
+        header = [
+            "Timestamp_JST",
+            "WallTimeUTC",
+            "Symbol",
+            "Action",
+            "CandidateId",
+            "Model",
+            "Allowed",
+            "Reason",
+            "PredProba",
+            "Threshold",
+            "M1DecisionTimeUTC",
+            "TickBid",
+            "TickAsk",
+            "ActualSpreadPoints",
+            "BidDecision",
+            "SpreadPointsDecision",
+            "H1SignalTime",
+            "H1AgeMinutes",
+            "H1ADX",
+            "H1EfficiencyRatio",
+            "H1DisplacementATR",
+            "H1TrendDirection",
+            "H1GatePass",
+            "SignalFresh",
+            "RegimeAllowed",
+            "M1ATRPips",
+            "M1RangePips",
+            "M1Ret1Pips",
+            "M1TickVolume",
+            "SessionTokyoCoreJST",
+            "SessionLondonCoreJST",
+            "SessionNewYorkCoreJST",
+            "MinuteOfDayJST",
+            "CycleIdBefore",
+            "PositionsBefore",
+            "VirtualOrdersBefore",
+            "LiveTradingEnabled",
+        ]
+        row = [
+            jst_now().strftime("%Y-%m-%d %H:%M:%S"),
+            now_utc.isoformat(),
+            self.symbol,
+            action,
+            decision.get("candidate_id", ""),
+            decision.get("model", ""),
+            int(bool(decision.get("allow", False))),
+            decision.get("reason", ""),
+            decision.get("pred_proba", ""),
+            decision.get("threshold", ""),
+            decision.get("m1_decision_time_utc", ""),
+            tick.get("bid", ""),
+            tick.get("ask", ""),
+            decision.get("actual_spread_points", tick.get("spread_points", "")),
+            decision.get("bid_decision", ""),
+            decision.get("spread_points_decision", ""),
+            regime.get("signal_time", ""),
+            decision.get("h1_signal_age_minutes", ""),
+            decision.get("h1_adx", ""),
+            decision.get("h1_efficiency_ratio", ""),
+            decision.get("h1_displacement_atr", ""),
+            decision.get("h1_trend_direction", ""),
+            decision.get("h1_gate_pass", int(bool(regime.get("trend_allowed_raw", False)))),
+            int(bool(regime.get("signal_fresh", False))),
+            int(bool(regime.get("entry_allowed", False))),
+            decision.get("m1_atr_pips", ""),
+            decision.get("m1_range_pips", ""),
+            decision.get("m1_ret_1_pips", ""),
+            decision.get("m1_tick_volume", ""),
+            decision.get("session_tokyo_core_jst", ""),
+            decision.get("session_london_core_jst", ""),
+            decision.get("session_newyork_core_jst", ""),
+            decision.get("minute_of_day_jst", ""),
+            self.state.get("cycle_id", ""),
+            len(self.state.get("positions", [])),
+            len(self.state.get("virtual_orders", [])),
+            int(bool(self.params.get("live_trading_enabled", False))),
+        ]
+        append_csv_row(self.decision_snapshot_log_file, header, row)
+
     def evaluate_cycle_start_policy(
         self,
         tick: dict[str, Any],
@@ -1009,7 +1107,7 @@ class S18SnowballBot:
             if m1_decision_time and m1_decision_time == last_m1_decision_time:
                 result = {
                     "allow": False,
-                    "reason": "duplicate_m1_decision_bar",
+                    "reason": DUPLICATE_M1_DECISION_REASON,
                     "actual_spread_points": float(tick["spread_points"]),
                 }
                 result.update(features)
@@ -1041,7 +1139,8 @@ class S18SnowballBot:
                 "m1_decision_time_utc",
             }
         }
-        self.log_policy_decision(result)
+        if str(result.get("reason", "")) != DUPLICATE_M1_DECISION_REASON:
+            self.log_policy_decision(result)
         return result
 
     def is_weekend_entry_blocked(self) -> bool:
@@ -2504,15 +2603,18 @@ class S18SnowballBot:
                 return
             policy_decision = self.evaluate_cycle_start_policy(tick, regime)
             if not bool(policy_decision.get("allow", False)):
-                logging.info(
-                    "S18 policy blocked cycle start: "
-                    f"symbol={self.symbol} reason={policy_decision.get('reason')} "
-                    f"proba={policy_decision.get('pred_proba')} threshold={policy_decision.get('threshold')}"
-                )
+                if str(policy_decision.get("reason", "")) != DUPLICATE_M1_DECISION_REASON:
+                    self.log_decision_snapshot(policy_decision, tick, regime, "policy_blocked")
+                    logging.info(
+                        "S18 policy blocked cycle start: "
+                        f"symbol={self.symbol} reason={policy_decision.get('reason')} "
+                        f"proba={policy_decision.get('pred_proba')} threshold={policy_decision.get('threshold')}"
+                    )
                 self.log_status(tick, regime)
                 self.save_state()
                 return
             if not bool(self.params.get("live_trading_enabled", False)):
+                self.log_decision_snapshot(policy_decision, tick, regime, "shadow_allowed_no_start")
                 logging.info(
                     "S18 shadow policy allowed cycle start but live_trading_enabled=false; "
                     f"symbol={self.symbol} proba={policy_decision.get('pred_proba')} "
@@ -2521,6 +2623,7 @@ class S18SnowballBot:
                 self.log_status(tick, regime)
                 self.save_state()
                 return
+            self.log_decision_snapshot(policy_decision, tick, regime, "start_cycle")
             self.start_cycle(tick["bid"])
 
         stop_count = int(self.sync_closed_count)
@@ -2715,6 +2818,58 @@ class S18SnowballBot:
             self.params["policy_enabled"] = original_policy_enabled
             self.params["policy_decision_log_enabled"] = original_policy_log_enabled
             self.get_m1_policy_features = original_get_m1_policy_features  # type: ignore[method-assign]
+
+        original_append_csv_row = globals()["append_csv_row"]
+        original_snapshot_log_enabled = self.params.get("decision_snapshot_log_enabled")
+        original_snapshot_log_file = self.decision_snapshot_log_file
+        captured_snapshot_rows: list[tuple[list[str], list[Any]]] = []
+
+        def capture_snapshot_csv(path: str, header: list[str], row: list[Any]) -> bool:
+            if path == "__self_test_decision_snapshots__.csv":
+                captured_snapshot_rows.append((header, row))
+            return True
+
+        globals()["append_csv_row"] = capture_snapshot_csv
+        try:
+            self.params["decision_snapshot_log_enabled"] = True
+            self.decision_snapshot_log_file = "__self_test_decision_snapshots__.csv"
+            self.state = self.default_state()
+            snapshot_tick = {"bid": 1.25000, "ask": 1.25007, "spread_points": 7.0}
+            snapshot_regime = {
+                "signal_time": "2026-07-16 01:00:00",
+                "signal_fresh": True,
+                "entry_allowed": True,
+                "trend_allowed_raw": True,
+            }
+            snapshot_decision = {
+                "allow": False,
+                "reason": "threshold_block",
+                "candidate_id": "self_test",
+                "model": "fake",
+                "pred_proba": 0.4,
+                "threshold": 0.5,
+                "m1_decision_time_utc": "2026-07-16T01:01:00+00:00",
+                "actual_spread_points": 7.0,
+                "bid_decision": 1.25,
+                "spread_points_decision": 9.0,
+                "h1_signal_age_minutes": 1.0,
+                "h1_adx": 25.0,
+                "m1_atr_pips": 1.0,
+            }
+            self.log_decision_snapshot(snapshot_decision, snapshot_tick, snapshot_regime, "policy_blocked")
+            assert len(captured_snapshot_rows) == 1
+            snapshot_row = dict(zip(captured_snapshot_rows[0][0], captured_snapshot_rows[0][1]))
+            assert snapshot_row["Action"] == "policy_blocked"
+            assert snapshot_row["M1DecisionTimeUTC"] == "2026-07-16T01:01:00+00:00"
+            assert snapshot_row["TickAsk"] == 1.25007
+            duplicate_snapshot = dict(snapshot_decision)
+            duplicate_snapshot["reason"] = DUPLICATE_M1_DECISION_REASON
+            self.log_decision_snapshot(duplicate_snapshot, snapshot_tick, snapshot_regime, "policy_blocked")
+            assert len(captured_snapshot_rows) == 1
+        finally:
+            globals()["append_csv_row"] = original_append_csv_row
+            self.params["decision_snapshot_log_enabled"] = original_snapshot_log_enabled
+            self.decision_snapshot_log_file = original_snapshot_log_file
 
         class FakeRegimeDataManager:
             def get_historical_data(self, mt5_symbol: str, timeframe: int, num_bars: int) -> pd.DataFrame:

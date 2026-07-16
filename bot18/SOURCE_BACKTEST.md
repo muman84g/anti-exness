@@ -46,6 +46,13 @@ backtest: the regime result is cached for `regime_refresh_seconds`, and the
 actual tick used for the first eligible live poll after an M1 close can differ
 from the historical M1 close price/spread row used by the exporter.
 
+For reproducibility checks, live writes `logs/s18_decision_snapshots.csv`.
+This CSV records one detailed row per non-duplicate closed-M1 cycle-start
+policy decision, including `m1_decision_time_utc`, live tick Bid/Ask,
+effective spread, H1/M1 feature values, model probability, threshold, reason,
+and whether the decision blocked, shadow-allowed, or started a cycle. Compare
+this file against backtest event rows before changing thresholds or features.
+
 ## Live price calculation
 
 S18 live execution uses local virtual grid levels as trigger/accounting state. When a virtual level is crossed and a market `OPEN` is sent, the executable request is rebuilt from the current tick on every send/retry: LONG uses current Ask and SHORT uses current Bid, with server SL one grid distance from that current market entry. This avoids carrying an obsolete virtual-level SL into a later fill after Algo Trading rejection, timeout, or broker rejection.
