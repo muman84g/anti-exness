@@ -30,6 +30,10 @@ Preserve the existing CentOS `bot18/live_config.py` unless the user explicitly a
 
 S18 live execution uses local virtual grid levels as trigger/accounting state. When a virtual level is crossed and a market `OPEN` is sent, the executable request is rebuilt from the current tick on every send/retry: LONG uses current Ask and SHORT uses current Bid, with server SL one grid distance from that current market entry. This avoids carrying an obsolete virtual-level SL into a later fill after Algo Trading rejection, timeout, or broker rejection.
 
+After a server-side or local SL leaves a symbol flat, live execution clears the old virtual breakout triggers and waits `post_sl_reanchor_cooldown_seconds` before starting a fresh cycle from the current Bid. This is an intentional live safety behavior so a stopped-out breakout is not immediately re-entered from the same stale trigger set. If the symbol is flat and an old breakout trigger is crossed only after a large market drift, live execution also clears/reanchors when the drift exceeds `max_flat_breakout_entry_drift_pips`; it does not chase a stale flat trigger with a late market order.
+
+Recoverable live-only entry blocks, such as transient position-sync, SL-close, autoTP-close, SL-repair, max-count, or recovered untracked-position blocks, are cleared only after a later clean sync proves MT5 live tickets and bot state tickets are aligned. Ambiguous exposure and unresolved reconciliation remain fail-closed.
+
 ## Live lot allocation
 
 As of 2026-07-15, the live per-symbol profile lots are GBPUSD `0.09`, EURUSD `0.07`, and AUDUSD `0.07`. Entry thresholds, policy artifacts, and allow-rate settings are unchanged.

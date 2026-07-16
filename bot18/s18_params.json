@@ -52,6 +52,8 @@
     "assume_missing_state_position_is_sl":  true,
     "market_open_reconcile_enabled":  true,
     "market_open_retry_cooldown_seconds":  30,
+    "post_sl_reanchor_cooldown_seconds":  30,
+    "max_flat_breakout_entry_drift_pips":  20.0,
     "autotrading_reject_retry_cooldown_seconds":  5,
     "autotrading_reject_notify_after_count":  5,
     "profiles":  [

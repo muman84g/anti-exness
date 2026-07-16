@@ -130,6 +130,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "assume_missing_state_position_is_sl": True,
     "market_open_reconcile_enabled": True,
     "market_open_retry_cooldown_seconds": 30,
+    "post_sl_reanchor_cooldown_seconds": 30,
+    "max_flat_breakout_entry_drift_pips": 20.0,
     "autotrading_reject_retry_cooldown_seconds": 5,
     "autotrading_reject_notify_after_count": 5,
     "policy_enabled": True,
@@ -520,6 +522,7 @@ class S18SnowballBot:
         self.last_policy_decision_log_epoch = 0.0
         self.last_policy_decision_log_signature: tuple[Any, ...] | None = None
         self.last_market_open_failure_log_epoch = 0.0
+        self.last_post_sl_reanchor_log_epoch = 0.0
         self.sync_closed_count = 0
         self._suppress_manual_alerts = False
 
@@ -572,6 +575,9 @@ class S18SnowballBot:
             "sync_block_new_entries": False,
             "sync_block_reason": None,
             "market_open_retry_after_epoch": None,
+            "post_sl_reanchor_after_epoch": None,
+            "last_post_sl_reanchor": None,
+            "last_flat_breakout_reanchor": None,
             "last_market_open_failure": None,
             "autotrading_reject_streak": 0,
             "autotrading_reject_first_at_jst": None,
@@ -1051,6 +1057,7 @@ class S18SnowballBot:
         self.state["auto_tp_price"] = None
         self.state["estimated_auto_tp_profit_usd"] = 0.0
         self.state["restart_next_tick"] = False
+        self.state["post_sl_reanchor_after_epoch"] = None
         self.ensure_orders(LONG)
         self.ensure_orders(SHORT)
         logging.info(f"Started s18 v2 cycle {self.state['cycle_id']} anchor={self.state['grid_anchor']}")
@@ -1072,12 +1079,121 @@ class S18SnowballBot:
         self.state["sync_block_reason"] = None
         logging.warning(f"New-entry block cleared after recovery: {reason}")
 
+    def recoverable_sync_block_resolution(self, live_positions: list[Any]) -> str | None:
+        if not self.state.get("sync_block_new_entries"):
+            return None
+        if isinstance(self.state.get("reconciliation_required"), dict):
+            return None
+
+        reason = str(self.state.get("sync_block_reason") or "")
+        live_tickets = {int(getattr(position, "ticket")) for position in live_positions}
+        state_tickets = {int(position["ticket"]) for position in self.state["positions"]}
+        tickets_match = live_tickets == state_tickets
+        if not tickets_match:
+            return None
+
+        if reason == "position sync failed":
+            return "clean position sync"
+        if reason.startswith("failed to repair SL for ticket"):
+            return "clean sync after SL repair verification"
+        if reason.startswith("state ticket missing on MT5:"):
+            return "clean sync after missing state ticket recovery"
+        if reason.startswith("unrecoverable untracked live positions exist:"):
+            return "clean sync after untracked-position recovery"
+        if reason.startswith("SL close failed for ticket"):
+            return "clean sync after SL close failure"
+        if reason.startswith("autoTP close failures:"):
+            return "clean sync after autoTP close failure"
+        if reason == "max open positions reached" and len(self.state["positions"]) < int(
+            self.params["max_open_positions"]
+        ):
+            return "open-position count below limit"
+        if reason == "max virtual orders reached" and len(self.state["virtual_orders"]) < int(
+            self.params["max_virtual_orders"]
+        ):
+            return "virtual-order count below limit"
+        return None
+
+    def clear_recovered_sync_block(self, live_positions: list[Any]) -> None:
+        resolution = self.recoverable_sync_block_resolution(live_positions)
+        if resolution is None:
+            return
+        reason = str(self.state.get("sync_block_reason") or "")
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        logging.warning(
+            "New-entry block cleared after recoverable sync condition: reason=%s resolution=%s",
+            reason,
+            resolution,
+        )
+
     def clear_virtual_orders(self) -> None:
         self.state["virtual_orders"] = []
 
     def clear_auto_tp(self) -> None:
         self.state["auto_tp_price"] = None
         self.state["estimated_auto_tp_profit_usd"] = 0.0
+
+    def post_sl_reanchor_cooldown(self) -> float:
+        return max(0.0, float(self.params.get("post_sl_reanchor_cooldown_seconds", 30.0) or 0.0))
+
+    def post_sl_reanchor_block_reason(self) -> str | None:
+        retry_after = self.state.get("post_sl_reanchor_after_epoch")
+        if retry_after is None:
+            return None
+        remaining = float(retry_after) - time.time()
+        if remaining <= 0.0:
+            self.state["post_sl_reanchor_after_epoch"] = None
+            return None
+        return f"post_sl_reanchor_cooldown remaining_seconds={remaining:.1f}"
+
+    def prepare_post_sl_reanchor(
+        self,
+        ticket: int,
+        direction: str,
+        exit_price: float,
+        pnl: float,
+        reason: str,
+    ) -> bool:
+        if self.state["positions"]:
+            return False
+        old_virtual_orders_count = len(self.state["virtual_orders"])
+        cooldown = self.post_sl_reanchor_cooldown()
+        retry_after = time.time() + cooldown if cooldown > 0.0 else None
+        self.clear_virtual_orders()
+        self.clear_auto_tp()
+        self.state["grid_anchor"] = None
+        self.state["last_break_even_refresh_epoch"] = None
+        self.state["restart_next_tick"] = True
+        self.state["post_sl_reanchor_after_epoch"] = retry_after
+        self.state["market_open_retry_after_epoch"] = None
+        self.state["last_market_open_failure"] = None
+        self.reset_autotrading_reject_state()
+        self.state["last_post_sl_reanchor"] = {
+            "type": "post_sl_reanchor",
+            "ticket": int(ticket),
+            "direction": str(direction),
+            "exit_price": self.price(float(exit_price)),
+            "pnl": float(pnl),
+            "reason": reason,
+            "old_virtual_orders_count": old_virtual_orders_count,
+            "cooldown_seconds": cooldown,
+            "retry_after_epoch": retry_after,
+            "cycle_id": int(self.state.get("cycle_id", 0)),
+            "created_at_jst": jst_now().isoformat(),
+        }
+        logging.warning(
+            "S18 post-SL breakout reanchor prepared: symbol=%s ticket=%s direction=%s "
+            "exit=%.5f pnl=%.2f old_virtual_orders=%s cooldown=%.1fs",
+            self.symbol,
+            int(ticket),
+            str(direction),
+            self.price(float(exit_price)),
+            float(pnl),
+            old_virtual_orders_count,
+            cooldown,
+        )
+        return True
 
     def set_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
         self.state["reconciliation_required"] = {
@@ -1224,6 +1340,75 @@ class S18SnowballBot:
         request = self.build_market_open_request(order, tick)
         order["last_market_open_request"] = request
         return request
+
+    def flat_breakout_entry_drift_pips(self, order: dict[str, Any], tick: dict[str, Any]) -> float:
+        direction = direction_from_name(order["direction"])
+        source_entry = self.price(float(order.get("entry", 0.0) or 0.0))
+        if source_entry <= 0.0:
+            return 0.0
+        requested_entry = self.price(float(tick["ask"] if direction == LONG else tick["bid"]))
+        if direction == LONG:
+            return max(0.0, (requested_entry - source_entry) / self.pip_size)
+        return max(0.0, (source_entry - requested_entry) / self.pip_size)
+
+    def prepare_flat_breakout_reanchor_if_stale(
+        self,
+        order: dict[str, Any],
+        tick: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        if self.state["positions"]:
+            return False
+        max_drift_pips = float(self.params.get("max_flat_breakout_entry_drift_pips", 0.0) or 0.0)
+        if max_drift_pips <= 0.0:
+            return False
+        drift_pips = self.flat_breakout_entry_drift_pips(order, tick)
+        if drift_pips <= max_drift_pips + 1e-12:
+            return False
+
+        old_virtual_orders_count = len(self.state["virtual_orders"])
+        source_entry = self.price(float(order.get("entry", 0.0) or 0.0))
+        source_stop_loss = self.price(float(order.get("stop_loss", 0.0) or 0.0))
+        direction = direction_from_name(order["direction"])
+        requested_entry = self.price(float(tick["ask"] if direction == LONG else tick["bid"]))
+
+        self.clear_virtual_orders()
+        self.clear_auto_tp()
+        self.state["grid_anchor"] = None
+        self.state["last_break_even_refresh_epoch"] = None
+        self.state["restart_next_tick"] = True
+        self.state["market_open_retry_after_epoch"] = None
+        self.state["last_market_open_failure"] = None
+        self.reset_autotrading_reject_state()
+        self.state["last_flat_breakout_reanchor"] = {
+            "type": "flat_breakout_reanchor",
+            "order_id": int(order.get("order_id", 0) or 0),
+            "direction": direction_name(direction),
+            "source_entry": source_entry,
+            "source_stop_loss": source_stop_loss,
+            "requested_entry": requested_entry,
+            "drift_pips": round(drift_pips, 3),
+            "max_drift_pips": max_drift_pips,
+            "reason": reason,
+            "old_virtual_orders_count": old_virtual_orders_count,
+            "cycle_id": int(self.state.get("cycle_id", 0)),
+            "created_at_jst": jst_now().isoformat(),
+        }
+        logging.warning(
+            "S18 stale flat breakout trigger reanchor prepared: symbol=%s order_id=%s direction=%s "
+            "source_entry=%.5f requested_entry=%.5f drift_pips=%.1f max_drift_pips=%.1f "
+            "old_virtual_orders=%s reason=%s",
+            self.symbol,
+            int(order.get("order_id", 0) or 0),
+            direction_name(direction),
+            source_entry,
+            requested_entry,
+            drift_pips,
+            max_drift_pips,
+            old_virtual_orders_count,
+            reason,
+        )
+        return True
 
     def market_open_request_from_order(self, order: dict[str, Any]) -> dict[str, Any]:
         request = order.get("last_market_open_request")
@@ -1743,6 +1928,13 @@ class S18SnowballBot:
                     logging.warning(
                         f"Ticket {ticket} is absent on MT5; assumed server-side SL at {exit_price}, pnl={pnl:.2f}"
                     )
+                    self.prepare_post_sl_reanchor(
+                        ticket,
+                        str(position.get("direction", "")),
+                        exit_price,
+                        pnl,
+                        "position_missing_on_mt5_assumed_server_sl",
+                    )
                     continue
                 self.block_new_entries(f"state ticket missing on MT5: {ticket}")
                 return False
@@ -1758,7 +1950,7 @@ class S18SnowballBot:
         self.recalculate_position_counts()
         if not self.state["positions"]:
             self.clear_auto_tp()
-        self.clear_new_entry_block_if_reason("position sync failed")
+        self.clear_recovered_sync_block(live_positions)
         return True
 
     def process_stops(self, bid: float, ask: float, info: Any) -> int:
@@ -1793,6 +1985,13 @@ class S18SnowballBot:
                 )
                 logging.info(f"SL close ticket={ticket} pnl={pnl:.2f}")
                 closed += 1
+                self.prepare_post_sl_reanchor(
+                    ticket,
+                    str(position.get("direction", "")),
+                    close_price,
+                    pnl,
+                    "local_stop_crossed",
+                )
             else:
                 status = getattr(result, "status", "UNKNOWN")
                 self.log_trade_csv(
@@ -1875,6 +2074,12 @@ class S18SnowballBot:
             order = buy_orders[0] if buy_orders and float(buy_orders[0]["entry"]) <= tick["ask"] + 1e-12 else None
             if order is None or not self.virtual_order_fill_allowed(order, tick["bid"], tick["ask"], regime):
                 break
+            if self.prepare_flat_breakout_reanchor_if_stale(
+                order,
+                tick,
+                "flat_long_breakout_entry_drift_exceeded",
+            ):
+                return filled
             if not self.open_from_virtual_order(order, tick):
                 break
             filled += 1
@@ -1888,6 +2093,12 @@ class S18SnowballBot:
             order = sell_orders[0] if sell_orders and float(sell_orders[0]["entry"]) >= tick["bid"] - 1e-12 else None
             if order is None or not self.virtual_order_fill_allowed(order, tick["bid"], tick["ask"], regime):
                 break
+            if self.prepare_flat_breakout_reanchor_if_stale(
+                order,
+                tick,
+                "flat_short_breakout_entry_drift_exceeded",
+            ):
+                return filled
             if not self.open_from_virtual_order(order, tick):
                 break
             filled += 1
@@ -2205,6 +2416,15 @@ class S18SnowballBot:
                 self.log_status(tick, regime)
                 self.save_state()
                 return
+            post_sl_block = self.post_sl_reanchor_block_reason()
+            if post_sl_block is not None:
+                now = time.time()
+                if now - self.last_post_sl_reanchor_log_epoch >= float(self.params["status_log_interval_seconds"]):
+                    logging.warning("S18 post-SL reanchor is temporarily blocked: %s", post_sl_block)
+                    self.last_post_sl_reanchor_log_epoch = now
+                self.log_status(tick, regime)
+                self.save_state()
+                return
             if not bool(regime.get("entry_allowed", False)):
                 self.log_status(tick, regime)
                 self.save_state()
@@ -2470,6 +2690,30 @@ class S18SnowballBot:
                     if position.symbol == symbol and int(position.magic) == int(magic)
                 ]
 
+            def modify_position_sl_tp(self, ticket: int, sl: float, tp: float = 0.0) -> bool:
+                del tp
+                for position in self.positions:
+                    if int(position.ticket) == int(ticket):
+                        position.sl = sl
+                        return True
+                return False
+
+            def close_position(self, ticket: int, deviation: int = 20) -> Any | None:
+                del deviation
+                for index, position in enumerate(list(self.positions)):
+                    if int(position.ticket) != int(ticket):
+                        continue
+                    self.positions.pop(index)
+
+                    class CloseResult:
+                        close_price = position.sl
+                        profit = 0.0
+                        lot = position.volume
+                        status = "OK"
+
+                    return CloseResult()
+                return None
+
         class SyncFailExecutor(FakeExecutor):
             def get_positions(self, symbol: str, magic: int) -> None:
                 del symbol, magic
@@ -2493,6 +2737,171 @@ class S18SnowballBot:
                 "info": FakeInfo(),
             }
             market_regime = {"entry_allowed": True, "signal_fresh": True}
+
+            original_get_tick = self.get_tick
+            original_get_regime = self.get_regime
+            original_save_state = self.save_state
+            original_live_trading_enabled = self.params.get("live_trading_enabled")
+            try:
+                self.state = self.default_state()
+                self.start_cycle(1.25000)
+                self.state["positions"] = [
+                    {
+                        "ticket": 800001,
+                        "direction": "LONG",
+                        "entry": 1.25050,
+                        "stop_loss": 1.25000,
+                        "volume": 0.01,
+                        "source_order_id": 1,
+                        "comment": "s18_selftest_sl",
+                    }
+                ]
+                self.recalculate_position_counts()
+                post_sl_executor = FakeExecutor("OK")
+                self.executor = post_sl_executor
+                self.params["live_trading_enabled"] = True
+                self.get_tick = lambda: market_tick  # type: ignore[method-assign]
+                self.get_regime = lambda: market_regime  # type: ignore[method-assign]
+                self.save_state = lambda: None  # type: ignore[method-assign]
+                self.run_once()
+                assert len(self.state["positions"]) == 0
+                assert len(self.state["virtual_orders"]) == 0
+                assert bool(self.state["restart_next_tick"])
+                assert self.state["post_sl_reanchor_after_epoch"] is not None
+                assert post_sl_executor.open_calls == 0
+                self.state["post_sl_reanchor_after_epoch"] = time.time() - 1.0
+                self.run_once()
+                assert int(self.state["cycle_id"]) == 2
+                assert not self.state["restart_next_tick"]
+                assert self.state["grid_anchor"] == self.price(market_tick["bid"])
+                next_long_order = min(
+                    [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                    key=lambda item: item["entry"],
+                )
+                assert next_long_order["entry"] == self.price(market_tick["bid"] + self.distance_price)
+                assert post_sl_executor.open_calls == 0
+            finally:
+                self.get_tick = original_get_tick  # type: ignore[method-assign]
+                self.get_regime = original_get_regime  # type: ignore[method-assign]
+                self.save_state = original_save_state  # type: ignore[method-assign]
+                self.params["live_trading_enabled"] = original_live_trading_enabled
+
+            self.params["live_trading_enabled"] = True
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            flat_stale_tick = {
+                "bid": 1.25343,
+                "ask": 1.25350,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            flat_stale_executor = FakeExecutor("OK")
+            self.executor = flat_stale_executor
+            assert self.fill_virtual_orders(flat_stale_tick, market_regime) == 0
+            assert flat_stale_executor.open_calls == 0
+            assert len(self.state["virtual_orders"]) == 0
+            assert bool(self.state["restart_next_tick"])
+            assert self.state["last_flat_breakout_reanchor"]["reason"] == "flat_long_breakout_entry_drift_exceeded"
+            assert self.state["last_flat_breakout_reanchor"]["drift_pips"] == 30.0
+
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            self.state["positions"] = [
+                {
+                    "ticket": 800002,
+                    "direction": "LONG",
+                    "entry": 1.25050,
+                    "stop_loss": 1.25000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": "s18_selftest_sl_close_failed",
+                }
+            ]
+            self.recalculate_position_counts()
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "SL close failed for ticket 800002: UNKNOWN"
+            self.executor = FakeExecutor("OK")
+            assert self.sync_live_positions(market_tick)
+            assert len(self.state["positions"]) == 0
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["sync_block_reason"] is None
+            assert self.state["post_sl_reanchor_after_epoch"] is not None
+
+            self.state = self.default_state()
+            self.state["cycle_id"] = 2
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "autoTP close failures: [(800010, 'UNKNOWN')]"
+            self.executor = FakeExecutor("OK")
+            assert self.sync_live_positions(market_tick)
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["sync_block_reason"] is None
+
+            self.state = self.default_state()
+            self.state["positions"] = [
+                {
+                    "ticket": 800003,
+                    "direction": "LONG",
+                    "entry": 1.25050,
+                    "stop_loss": 1.25000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": "s18_selftest_repair_sl",
+                }
+            ]
+            self.recalculate_position_counts()
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "failed to repair SL for ticket 800003"
+            repair_executor = FakeExecutor("OK")
+            repair_executor.positions = [
+                FakePosition(
+                    800003,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25050,
+                    0.0,
+                    "s18_selftest_repair_sl",
+                )
+            ]
+            self.executor = repair_executor
+            assert self.sync_live_positions(market_tick)
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["sync_block_reason"] is None
+            assert repair_executor.positions[0].sl == 1.25000
+
+            self.state = self.default_state()
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "unrecoverable untracked live positions exist: [800004]"
+            recovered_untracked_executor = FakeExecutor("OK")
+            recovered_untracked_executor.positions = [
+                FakePosition(
+                    800004,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25050,
+                    1.25000,
+                    f"{self.sanitized_comment_prefix()}_1_1",
+                )
+            ]
+            self.executor = recovered_untracked_executor
+            assert self.sync_live_positions(market_tick)
+            assert len(self.state["positions"]) == 1
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["sync_block_reason"] is None
+
+            self.state = self.default_state()
+            self.state["sync_block_new_entries"] = True
+            self.state["sync_block_reason"] = "max open positions reached"
+            self.executor = FakeExecutor("OK")
+            assert self.sync_live_positions(market_tick)
+            assert not self.state["sync_block_new_entries"]
+            assert self.state["sync_block_reason"] is None
+
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
             reject_order = min(
                 [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
                 key=lambda item: item["entry"],
