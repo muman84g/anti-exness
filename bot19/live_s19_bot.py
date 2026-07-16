@@ -46,6 +46,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s19_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s19_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
+BOT_SOURCE_REVISION = "2026-07-16-pending-fill-sync-v3"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -107,6 +108,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "assume_missing_state_position_is_sl": True,
     "use_server_pending_entry": True,
     "flat_pending_grid_repair_enabled": True,
+    "pending_fill_sync_grace_seconds": 5.0,
     "dynamic_recovery_close_enabled": True,
     "dynamic_recovery_sl_streak": 6,
     "dynamic_recovery_min_cycle_loss_usd": -10.0,
@@ -561,6 +563,7 @@ class S19SnowballBot:
             "pending_open": None,
             "reconciliation_required": None,
             "pending_grid_repair_wait": None,
+            "pending_fill_sync_wait": None,
             "manual_alert_last_reconciliation_signature": None,
             "manual_alert_last_reconciliation_reason": None,
             "manual_alert_last_reconciliation_at_jst": None,
@@ -966,6 +969,17 @@ class S19SnowballBot:
                 return True
             lot = self.normalize_lot(info)
             order_type = ORDER_TYPE_BUY_STOP if direction == LONG else ORDER_TYPE_SELL_STOP
+            price_block_reason = self.pending_stop_price_block_reason(
+                direction,
+                entry,
+                stop_loss,
+                float(bid),
+                float(ask),
+                info,
+            )
+            if price_block_reason is not None:
+                logging.warning("S19 pending stop price gate blocked order send: %s", price_block_reason)
+                return False
             sl = stop_loss if bool(self.params["use_server_sl"]) else 0.0
             comment = f"{self.params['comment_prefix']}_{self.state['cycle_id']}_{order['order_id']}"
             request_id = f"{self.symbol}-{self.magic}-{self.state['cycle_id']}-{order['order_id']}"
@@ -1320,6 +1334,7 @@ class S19SnowballBot:
             )
         self.state["pending_open"] = None
         self.state["pending_grid_repair_wait"] = None
+        self.state["pending_fill_sync_wait"] = None
         self.state["reconciliation_required"] = None
         self.state["sync_block_new_entries"] = False
         self.state["sync_block_reason"] = None
@@ -1341,6 +1356,7 @@ class S19SnowballBot:
         has_repair_wait = isinstance(self.state.get("pending_grid_repair_wait"), dict)
         if not (has_reconciliation or has_pending_open or has_repair_wait):
             return False
+
         logging.warning(
             "S19 cleared unresolved reconciliation after MT5 confirmed flat: reconciliation=%s pending_open=%s repair_wait=%s reason=%s",
             has_reconciliation,
@@ -1351,10 +1367,85 @@ class S19SnowballBot:
         self.state["reconciliation_required"] = None
         self.state["pending_open"] = None
         self.state["pending_grid_repair_wait"] = None
+        self.state["pending_fill_sync_wait"] = None
+        self.state["grid_anchor"] = None
+        self.state["cycle_realized_usd"] = 0.0
+        self.state["restart_next_tick"] = False
         self.state["sync_block_new_entries"] = False
         self.state["sync_block_reason"] = None
         self.clear_auto_tp()
         return True
+
+    def clear_pending_fill_sync_wait(self) -> None:
+        self.state["pending_fill_sync_wait"] = None
+
+    def defer_flat_pending_grid_repair_for_fill_sync(self, anomaly: dict[str, Any]) -> bool:
+        missing_tickets = sorted(
+            int(ticket)
+            for ticket in anomaly.get("missing_tickets", [])
+            if ticket not in (None, "")
+        )
+        if not missing_tickets:
+            self.clear_pending_fill_sync_wait()
+            return False
+        if anomaly.get("extra_tickets") or self.state.get("positions"):
+            self.clear_pending_fill_sync_wait()
+            return False
+        state_count = int(anomaly.get("state_count") or 0)
+        live_count = int(anomaly.get("live_count") or 0)
+        if state_count <= 0 or live_count >= state_count:
+            self.clear_pending_fill_sync_wait()
+            return False
+        grace_seconds = max(0.0, float(self.params.get("pending_fill_sync_grace_seconds", 5.0) or 0.0))
+        if grace_seconds <= 0.0:
+            self.clear_pending_fill_sync_wait()
+            return False
+
+        now = time.time()
+        wait = self.state.get("pending_fill_sync_wait")
+        same_wait = (
+            isinstance(wait, dict)
+            and sorted(int(ticket) for ticket in wait.get("missing_tickets", [])) == missing_tickets
+            and int(wait.get("cycle_id", 0)) == int(self.state.get("cycle_id", 0))
+        )
+        if not same_wait:
+            self.state["pending_fill_sync_wait"] = {
+                "reason": "pending_order_missing_waiting_for_position_sync",
+                "missing_tickets": missing_tickets,
+                "cycle_id": int(self.state.get("cycle_id", 0)),
+                "first_seen_epoch": now,
+                "first_seen_jst": jst_now().isoformat(),
+                "details": anomaly,
+            }
+            logging.warning(
+                "S19 pending order missing from live ORDERS; deferring flat grid repair for fill sync: tickets=%s grace=%.1fs",
+                missing_tickets,
+                grace_seconds,
+            )
+            return True
+
+        first_seen_epoch = float(wait.get("first_seen_epoch", now))
+        elapsed = now - first_seen_epoch
+        wait["last_seen_epoch"] = now
+        wait["last_seen_jst"] = jst_now().isoformat()
+        wait["details"] = anomaly
+        if elapsed < grace_seconds:
+            logging.warning(
+                "S19 pending order still missing; waiting for position sync before flat grid repair: tickets=%s elapsed=%.1fs grace=%.1fs",
+                missing_tickets,
+                elapsed,
+                grace_seconds,
+            )
+            return True
+
+        logging.warning(
+            "S19 pending fill sync grace expired; continuing flat grid repair: tickets=%s elapsed=%.1fs grace=%.1fs",
+            missing_tickets,
+            elapsed,
+            grace_seconds,
+        )
+        self.clear_pending_fill_sync_wait()
+        return False
 
     def adopt_filled_pending_order(
         self,
@@ -1385,6 +1476,7 @@ class S19SnowballBot:
             position["recovery_reason"] = reason
             position["recovery_source"] = str(order.get("recovery_source", ""))
         self.state["positions"].append(position)
+        self.state["pending_fill_sync_wait"] = None
         self.log_trade_csv(
             event,
             ticket,
@@ -1501,6 +1593,110 @@ class S19SnowballBot:
             }
             for order in live_orders
         ]
+
+    def pending_stop_price_block_reason(
+        self,
+        direction: int,
+        entry: float,
+        stop_loss: float,
+        bid: float,
+        ask: float,
+        info: Any,
+    ) -> str | None:
+        point = float(getattr(info, "point", self.point_size) or self.point_size)
+        if point <= 0.0:
+            point = self.point_size
+        try:
+            stops_level = max(0, int(float(getattr(info, "stops_level", 0) or 0)))
+        except (TypeError, ValueError):
+            stops_level = 0
+        min_distance = stops_level * point
+        epsilon = max(point * 0.1, 10 ** (-self.digits - 1))
+        entry = self.price(entry)
+        stop_loss = self.price(stop_loss)
+        bid = self.price(bid)
+        ask = self.price(ask)
+        if direction == LONG:
+            min_entry = self.price(ask + min_distance)
+            if entry <= min_entry + epsilon:
+                return (
+                    "pending_price_block direction=LONG "
+                    f"entry={entry:.{self.digits}f} ask={ask:.{self.digits}f} "
+                    f"min_entry={min_entry:.{self.digits}f} stops_level={stops_level}"
+                )
+            if bool(self.params.get("use_server_sl", False)) and stop_loss:
+                max_sl = self.price(entry - min_distance)
+                if stop_loss >= max_sl - epsilon:
+                    return (
+                        "pending_sl_block direction=LONG "
+                        f"entry={entry:.{self.digits}f} stop_loss={stop_loss:.{self.digits}f} "
+                        f"max_sl={max_sl:.{self.digits}f} stops_level={stops_level}"
+                    )
+            return None
+        if direction == SHORT:
+            max_entry = self.price(bid - min_distance)
+            if entry >= max_entry - epsilon:
+                return (
+                    "pending_price_block direction=SHORT "
+                    f"entry={entry:.{self.digits}f} bid={bid:.{self.digits}f} "
+                    f"max_entry={max_entry:.{self.digits}f} stops_level={stops_level}"
+                )
+            if bool(self.params.get("use_server_sl", False)) and stop_loss:
+                min_sl = self.price(entry + min_distance)
+                if stop_loss <= min_sl + epsilon:
+                    return (
+                        "pending_sl_block direction=SHORT "
+                        f"entry={entry:.{self.digits}f} stop_loss={stop_loss:.{self.digits}f} "
+                        f"min_sl={min_sl:.{self.digits}f} stops_level={stops_level}"
+                    )
+            return None
+        return f"pending_price_block unsupported_direction={direction}"
+
+    def flat_pending_grid_price_block_reason(self, tick: dict[str, Any]) -> str | None:
+        info = tick.get("info")
+        if info is None:
+            return "pending_price_block missing_symbol_info"
+        for direction_text, entry, stop_loss in self.expected_flat_pending_grid_tuples():
+            reason = self.pending_stop_price_block_reason(
+                direction_from_name(direction_text),
+                entry,
+                stop_loss,
+                float(tick["bid"]),
+                float(tick["ask"]),
+                info,
+            )
+            if reason is not None:
+                return reason
+        return None
+
+    def reanchor_flat_pending_grid_for_reissue(self, tick: dict[str, Any], reason: str) -> None:
+        old_anchor = self.state.get("grid_anchor")
+        old_cycle_id = int(self.state.get("cycle_id", 0))
+        new_anchor = self.price(float(tick["bid"]))
+        self.state["cycle_id"] = old_cycle_id + 1
+        self.state["cycle_realized_usd"] = 0.0
+        self.state["grid_anchor"] = new_anchor
+        self.state["auto_tp_price"] = None
+        self.state["estimated_auto_tp_profit_usd"] = 0.0
+        self.state["restart_next_tick"] = False
+        self.state["dynamic_sl_streak"] = 0
+        self.state["dynamic_cycle_exposure_blocks"] = 0
+        repair_wait = self.state.get("pending_grid_repair_wait")
+        if isinstance(repair_wait, dict):
+            repair_wait["reanchor_reason"] = reason
+            repair_wait["reanchored_from_cycle_id"] = old_cycle_id
+            repair_wait["reanchored_to_cycle_id"] = int(self.state["cycle_id"])
+            repair_wait["reanchored_from_anchor"] = old_anchor
+            repair_wait["reanchored_to_anchor"] = new_anchor
+            repair_wait["reanchored_at_jst"] = jst_now().isoformat()
+        logging.warning(
+            "S19 reanchored flat pending grid before reissue: old_cycle=%s new_cycle=%s old_anchor=%s new_anchor=%s reason=%s",
+            old_cycle_id,
+            self.state["cycle_id"],
+            old_anchor,
+            new_anchor,
+            reason,
+        )
 
     def flat_pending_grid_expected(self) -> bool:
         return (
@@ -1698,6 +1894,13 @@ class S19SnowballBot:
         }
 
         wait_reason = self.flat_pending_grid_reissue_block_reason(tick, regime)
+        if wait_reason is None:
+            price_block_reason = self.flat_pending_grid_price_block_reason(tick)
+            if price_block_reason is not None:
+                self.reanchor_flat_pending_grid_for_reissue(tick, price_block_reason)
+                wait_reason = self.flat_pending_grid_reissue_block_reason(tick, regime)
+                if wait_reason is None:
+                    wait_reason = self.flat_pending_grid_price_block_reason(tick)
         if wait_reason is not None:
             self.state["pending_grid_repair_wait"]["wait_reason"] = wait_reason
             if should_log:
@@ -1833,10 +2036,15 @@ class S19SnowballBot:
                 self.block_new_entries("pending order sync failed")
                 return False
             live_order_tickets = {int(order.ticket) for order in live_orders}
-            flat_grid_anomaly = self.flat_pending_grid_anomaly(live_orders)
-            if flat_grid_anomaly is not None:
-                return self.repair_flat_pending_grid(tick, regime, live_orders, flat_grid_anomaly)
-            self.clear_flat_reconciliation_if_confirmed(live_positions, live_orders)
+            if self.clear_flat_reconciliation_if_confirmed(live_positions, live_orders):
+                self.clear_pending_fill_sync_wait()
+            else:
+                flat_grid_anomaly = self.flat_pending_grid_anomaly(live_orders)
+                if flat_grid_anomaly is not None:
+                    if self.defer_flat_pending_grid_repair_for_fill_sync(flat_grid_anomaly):
+                        return False
+                    return self.repair_flat_pending_grid(tick, regime, live_orders, flat_grid_anomaly)
+                self.clear_pending_fill_sync_wait()
             extra_order_tickets = sorted(live_order_tickets.difference(set(pending_tickets)))
             if extra_order_tickets:
                 self.block_new_entries(f"untracked live pending orders exist: {extra_order_tickets}")
@@ -2515,6 +2723,7 @@ class S19SnowballBot:
             f"symbol={self.symbol} magic={self.magic} lot={self.params['lot']} "
             f"distance={self.params['distance_pips']} inactive_add={self.params['inactive_add_distance_pips']}"
         )
+        logging.info("S19 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         while True:
             try:
                 self.run_once()
@@ -2685,6 +2894,49 @@ class S19SnowballBot:
                         if order.symbol == symbol and int(order.magic) == int(magic)
                     ]
 
+            def seed_pending_grid_state() -> None:
+                self.state = self.default_state()
+                self.state["cycle_id"] = 1
+                self.state["grid_anchor"] = 1.25000
+                self.state["next_order_id"] = 5
+                self.state["virtual_orders"] = [
+                    {
+                        "order_id": 1,
+                        "direction": "LONG",
+                        "entry": 1.25100,
+                        "stop_loss": 1.25000,
+                        "pending_ticket": 1001,
+                        "volume": 0.01,
+                        "comment": "s19_gbp_1_1",
+                    },
+                    {
+                        "order_id": 2,
+                        "direction": "LONG",
+                        "entry": 1.25200,
+                        "stop_loss": 1.25100,
+                        "pending_ticket": 1002,
+                        "volume": 0.01,
+                        "comment": "s19_gbp_1_2",
+                    },
+                    {
+                        "order_id": 3,
+                        "direction": "SHORT",
+                        "entry": 1.24900,
+                        "stop_loss": 1.25000,
+                        "pending_ticket": 1003,
+                        "volume": 0.01,
+                        "comment": "s19_gbp_1_3",
+                    },
+                    {
+                        "order_id": 4,
+                        "direction": "SHORT",
+                        "entry": 1.24800,
+                        "stop_loss": 1.24900,
+                        "pending_ticket": 1004,
+                        "volume": 0.01,
+                        "comment": "s19_gbp_1_4",
+                    },
+                ]
             self.params["live_trading_enabled"] = True
             self.params["use_server_pending_entry"] = True
             self.state = self.default_state()
@@ -2750,6 +3002,22 @@ class S19SnowballBot:
             assert self.state_pending_grid_tuples() == self.expected_flat_pending_grid_tuples()
             assert self.state["pending_grid_repair_wait"] is None
 
+            # A filled pending stop can disappear from ORDERS before it appears in POSITIONS.
+            # Defer flat-grid repair briefly so the original pending metadata can be adopted.
+            seed_pending_grid_state()
+            self.executor = FakeExecutor()
+            self.executor.orders = list(live_orders)
+            assert not self.sync_live_positions(tick, regime, force=True)
+            assert self.executor.cancelled == []
+            assert len(self.state["virtual_orders"]) == 4
+            assert isinstance(self.state.get("pending_fill_sync_wait"), dict)
+            self.executor.positions = [FakeLivePosition(1001, "LONG", 1.25100, 1.25000, "s19_gbp_1_1")]
+            assert self.sync_live_positions(tick, regime, force=True)
+            assert self.executor.cancelled == []
+            assert len(self.state["positions"]) == 1
+            assert int(self.state["positions"][0]["ticket"]) == 1001
+            assert len(self.state["virtual_orders"]) == 3
+            assert self.state["pending_fill_sync_wait"] is None
             self.state = self.default_state()
             self.state["cycle_id"] = 1
             self.state["grid_anchor"] = 1.25000
@@ -2896,12 +3164,19 @@ class S19SnowballBot:
                 "reason": "flat pending grid reissue failed",
                 "details": {"state": []},
             }
+            self.state["pending_grid_repair_wait"] = {
+                "reason": "flat_pending_grid_integrity_failed",
+                "details": {"state": []},
+            }
             self.executor = FakeExecutor()
             assert self.sync_live_positions(tick, regime, force=True)
             assert self.state["positions"] == []
             assert self.state["virtual_orders"] == []
             assert self.state["reconciliation_required"] is None
             assert self.state["pending_open"] is None
+            assert self.state["pending_grid_repair_wait"] is None
+            assert self.state["grid_anchor"] is None
+            assert self.flat_pending_grid_anomaly([]) is None
             assert not self.state["sync_block_new_entries"]
         finally:
             self.params = original_params
@@ -2912,7 +3187,6 @@ class S19SnowballBot:
             self._suppress_manual_alerts = original_suppress_manual_alerts
             shutil.rmtree(temp_dir, ignore_errors=True)
         logging.info("s19 self-test passed")
-
 
 class S19BasketRunner:
     def __init__(self, raw_params: dict[str, Any] | None = None) -> None:
@@ -2961,6 +3235,7 @@ class S19BasketRunner:
             live_trading_enabled,
             shadow_forward_enabled,
         )
+        logging.info("S19 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         sleep_seconds = min(float(bot.params["poll_interval_seconds"]) for bot in self.bots)
         while True:
             for bot in self.bots:

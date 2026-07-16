@@ -126,8 +126,9 @@ class PendingStopSafetyTests(unittest.TestCase):
         executor = FakeExecutor(live_orders=[extra_order])
         bot = make_bot("s19_untracked_pending", executor)
         tick = {"bid": 1.25000, "ask": 1.25009, "info": make_info(), "spread_points": 9.0}
+        regime = {"entry_allowed": True, "signal_fresh": True}
 
-        self.assertFalse(bot.sync_live_positions(tick))
+        self.assertFalse(bot.sync_live_positions(tick, regime))
         self.assertIn("untracked live pending orders", bot.state["sync_block_reason"])
 
     def test_cancel_order_does_not_treat_invalid_request_as_absent(self):
