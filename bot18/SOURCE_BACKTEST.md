@@ -26,6 +26,10 @@ Preserve the existing CentOS `bot18/live_config.py` unless the user explicitly a
 
 `s18_policy_decisions.csv` is diagnostic only. It should not log every repeated threshold-block decision indefinitely; the live runner throttles repeated policy decisions while preserving passes, policy errors, and reason/signature changes.
 
+## Live price calculation
+
+S18 live execution uses local virtual grid levels as trigger/accounting state. When a virtual level is crossed and a market `OPEN` is sent, the executable request is rebuilt from the current tick on every send/retry: LONG uses current Ask and SHORT uses current Bid, with server SL one grid distance from that current market entry. This avoids carrying an obsolete virtual-level SL into a later fill after Algo Trading rejection, timeout, or broker rejection.
+
 ## Live lot allocation
 
 As of 2026-07-15, the live per-symbol profile lots are GBPUSD `0.09`, EURUSD `0.07`, and AUDUSD `0.07`. Entry thresholds, policy artifacts, and allow-rate settings are unchanged.

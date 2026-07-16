@@ -163,15 +163,15 @@ DEFAULT_PARAMS: dict[str, Any] = {
 }
 
 
-def configure_logging() -> None:
-    os.makedirs(LOG_DIR, exist_ok=True)
+def configure_logging(file_enabled: bool = True) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if file_enabled:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        handlers.insert(0, logging.FileHandler(LOG_FILE, encoding="utf-8"))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
+        handlers=handlers,
     )
 
 
@@ -1195,6 +1195,56 @@ class S18SnowballBot:
             return suffix[-31:]
         return f"{prefix[: 31 - len(suffix)]}{suffix}"
 
+    def build_market_open_request(self, order: dict[str, Any], tick: dict[str, Any]) -> dict[str, Any]:
+        direction = direction_from_name(order["direction"])
+        requested_entry = self.price(float(tick["ask"] if direction == LONG else tick["bid"]))
+        requested_stop_loss = self.price(
+            requested_entry - self.distance_price if direction == LONG else requested_entry + self.distance_price
+        )
+        source_entry = self.price(float(order.get("entry", 0.0) or 0.0))
+        source_stop_loss = self.price(float(order.get("stop_loss", 0.0) or 0.0))
+        source_drift_pips = abs(requested_entry - source_entry) / self.pip_size if source_entry > 0.0 else 0.0
+        stop_loss_drift_pips = (
+            abs(requested_stop_loss - source_stop_loss) / self.pip_size if source_stop_loss > 0.0 else 0.0
+        )
+        return {
+            "type": "market_open_request",
+            "order_id": int(order["order_id"]),
+            "direction": direction_name(direction),
+            "source_entry": source_entry,
+            "source_stop_loss": source_stop_loss,
+            "requested_entry": requested_entry,
+            "requested_stop_loss": requested_stop_loss,
+            "source_drift_pips": round(source_drift_pips, 3),
+            "stop_loss_drift_pips": round(stop_loss_drift_pips, 3),
+            "created_at_jst": jst_now().isoformat(),
+        }
+
+    def refresh_market_open_request(self, order: dict[str, Any], tick: dict[str, Any]) -> dict[str, Any]:
+        request = self.build_market_open_request(order, tick)
+        order["last_market_open_request"] = request
+        return request
+
+    def market_open_request_from_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        request = order.get("last_market_open_request")
+        if isinstance(request, dict):
+            return request
+        direction = direction_from_name(order["direction"])
+        source_entry = self.price(float(order.get("entry", 0.0) or 0.0))
+        source_stop_loss = self.price(float(order.get("stop_loss", 0.0) or 0.0))
+        return {
+            "type": "market_open_request_fallback",
+            "order_id": int(order["order_id"]),
+            "direction": direction_name(direction),
+            "source_entry": source_entry,
+            "source_stop_loss": source_stop_loss,
+            "requested_entry": source_entry,
+            "requested_stop_loss": source_stop_loss,
+            "source_drift_pips": 0.0,
+            "stop_loss_drift_pips": 0.0,
+            "created_at_jst": jst_now().isoformat(),
+        }
+
     def market_order_matches_position(self, order: dict[str, Any], position: Any, comment: str) -> bool:
         if int(getattr(position, "magic", -1)) != int(self.magic):
             return False
@@ -1322,6 +1372,7 @@ class S18SnowballBot:
         retry_after = time.time() + cooldown if cooldown > 0.0 else None
         comment = str(details.get("comment") or self.market_order_comment(order))
         error = str(details.get("error") or "UNKNOWN")
+        request = self.market_open_request_from_order(order)
         self.state["reconciliation_required"] = None
         sync_reason = str(self.state.get("sync_block_reason") or "")
         if sync_reason.startswith("market open result"):
@@ -1332,8 +1383,11 @@ class S18SnowballBot:
             "type": "market_open_timeout_flat_confirmed",
             "order_id": order_id,
             "direction": str(order.get("direction", "")),
-            "entry": self.price(float(order.get("entry", 0.0) or 0.0)),
-            "stop_loss": self.price(float(order.get("stop_loss", 0.0) or 0.0)),
+            "entry": self.price(float(request["requested_entry"])),
+            "stop_loss": self.price(float(request["requested_stop_loss"])),
+            "source_entry": self.price(float(request["source_entry"])),
+            "source_stop_loss": self.price(float(request["source_stop_loss"])),
+            "source_drift_pips": float(request["source_drift_pips"]),
             "comment": comment,
             "error": error,
             "retry_after_epoch": retry_after,
@@ -1352,6 +1406,9 @@ class S18SnowballBot:
     def adopt_market_open_position(self, order: dict[str, Any], live_position: Any, comment: str, reason: str) -> None:
         ticket = int(getattr(live_position, "ticket"))
         direction = direction_from_name(order["direction"])
+        request = self.market_open_request_from_order(order)
+        live_stop_loss = self.price(float(getattr(live_position, "sl", 0.0) or 0.0))
+        stop_loss = live_stop_loss if live_stop_loss > 0.0 else self.price(float(request["requested_stop_loss"]))
         self.state["virtual_orders"] = [
             item for item in self.state["virtual_orders"] if int(item["order_id"]) != int(order["order_id"])
         ]
@@ -1360,7 +1417,7 @@ class S18SnowballBot:
                 "ticket": ticket,
                 "direction": direction_name(direction),
                 "entry": self.price(float(getattr(live_position, "open_price"))),
-                "stop_loss": self.price(float(order["stop_loss"])),
+                "stop_loss": stop_loss,
                 "volume": float(getattr(live_position, "volume", self.params["lot"])),
                 "opened_at_jst": jst_now().isoformat(),
                 "source_order_id": int(order["order_id"]),
@@ -1385,7 +1442,7 @@ class S18SnowballBot:
             direction=direction_name(direction),
             lot_size=float(getattr(live_position, "volume", self.params["lot"])),
             price=self.price(float(getattr(live_position, "open_price"))),
-            stop_loss=self.price(float(order["stop_loss"])),
+            stop_loss=stop_loss,
             pnl="",
             reason=reason,
             source_order_id=int(order["order_id"]),
@@ -1483,13 +1540,17 @@ class S18SnowballBot:
             cooldown = max(0.0, float(self.params.get("market_open_retry_cooldown_seconds", 30.0) or 0.0))
             self.reset_autotrading_reject_state()
         retry_after = time.time() + cooldown if cooldown > 0.0 else None
+        request = self.market_open_request_from_order(order)
         self.state["market_open_retry_after_epoch"] = retry_after
         self.state["last_market_open_failure"] = {
             "type": "definitive_reject",
             "order_id": int(order["order_id"]),
             "direction": str(order.get("direction", "")),
-            "entry": self.price(float(order.get("entry", 0.0))),
-            "stop_loss": self.price(float(order.get("stop_loss", 0.0))),
+            "entry": self.price(float(request["requested_entry"])),
+            "stop_loss": self.price(float(request["requested_stop_loss"])),
+            "source_entry": self.price(float(request["source_entry"])),
+            "source_stop_loss": self.price(float(request["source_stop_loss"])),
+            "source_drift_pips": float(request["source_drift_pips"]),
             "comment": comment,
             "error": str(error or "UNKNOWN"),
             "retry_after_epoch": retry_after,
@@ -1501,8 +1562,8 @@ class S18SnowballBot:
             0,
             direction=str(order.get("direction", "")),
             lot_size=float(self.normalize_lot(tick["info"])),
-            price=self.price(float(tick["ask"] if order["direction"] == "LONG" else tick["bid"])),
-            stop_loss=self.price(float(order["stop_loss"])),
+            price=self.price(float(request["requested_entry"])),
+            stop_loss=self.price(float(request["requested_stop_loss"])),
             pnl="",
             reason=f"market_open_rejected:{error or 'UNKNOWN'}",
             source_order_id=int(order["order_id"]),
@@ -1510,12 +1571,18 @@ class S18SnowballBot:
         )
         logging.warning(
             "S18 market OPEN rejected without fill; keeping virtual order for retry after cooldown: "
-            "symbol=%s order_id=%s error=%s cooldown=%.1fs autotrading_reject_streak=%s",
+            "symbol=%s order_id=%s error=%s cooldown=%.1fs autotrading_reject_streak=%s "
+            "requested_entry=%.5f requested_sl=%.5f source_entry=%.5f source_sl=%.5f source_drift_pips=%.1f",
             self.symbol,
             int(order["order_id"]),
             error,
             cooldown,
             autotrading_streak,
+            float(request["requested_entry"]),
+            float(request["requested_stop_loss"]),
+            float(request["source_entry"]),
+            float(request["source_stop_loss"]),
+            float(request["source_drift_pips"]),
         )
         notify_after = self.autotrading_reject_notify_after_count()
         if is_autotrading_reject and autotrading_streak >= notify_after and not bool(
@@ -1540,13 +1607,14 @@ class S18SnowballBot:
         error: str | None,
         reason: str,
     ) -> None:
+        request = self.market_open_request_from_order(order)
         self.log_trade_csv(
             "ENTRY_UNRESOLVED_MARKET",
             0,
             direction=str(order.get("direction", "")),
             lot_size=float(self.params.get("lot", 0.0)),
-            price=self.price(float(order.get("entry", 0.0))),
-            stop_loss=self.price(float(order.get("stop_loss", 0.0))),
+            price=self.price(float(request["requested_entry"])),
+            stop_loss=self.price(float(request["requested_stop_loss"])),
             pnl="",
             reason=f"{reason}:{error or 'UNKNOWN'}",
             source_order_id=int(order["order_id"]),
@@ -1832,7 +1900,9 @@ class S18SnowballBot:
         direction = direction_from_name(order["direction"])
         order_type = ORDER_TYPE_BUY if direction == LONG else ORDER_TYPE_SELL
         lot = self.normalize_lot(tick["info"])
-        sl = float(order["stop_loss"]) if bool(self.params["use_server_sl"]) else 0.0
+        request = self.refresh_market_open_request(order, tick)
+        requested_stop_loss = self.price(float(request["requested_stop_loss"]))
+        sl = requested_stop_loss if bool(self.params["use_server_sl"]) else 0.0
         comment = self.market_order_comment(order)
         ticket = self.executor.open_position(
             self.symbol,
@@ -1848,6 +1918,7 @@ class S18SnowballBot:
         if ticket is None:
             return self.handle_market_open_failure(order, comment, tick)
         entry = float(getattr(ticket, "price", 0.0) or (tick["ask"] if direction == LONG else tick["bid"]))
+        position_stop_loss = requested_stop_loss
         self.state["market_open_retry_after_epoch"] = None
         self.state["last_market_open_failure"] = None
         self.reset_autotrading_reject_state()
@@ -1859,7 +1930,7 @@ class S18SnowballBot:
                 "ticket": int(ticket),
                 "direction": direction_name(direction),
                 "entry": self.price(entry),
-                "stop_loss": self.price(float(order["stop_loss"])),
+                "stop_loss": position_stop_loss,
                 "volume": lot,
                 "opened_at_jst": jst_now().isoformat(),
                 "source_order_id": int(order["order_id"]),
@@ -1873,14 +1944,21 @@ class S18SnowballBot:
             direction=direction_name(direction),
             lot_size=lot,
             price=self.price(entry),
-            stop_loss=self.price(float(order["stop_loss"])),
+            stop_loss=position_stop_loss,
             pnl="",
             reason="virtual_order_fill",
             source_order_id=int(order["order_id"]),
             comment=comment,
         )
         logging.info(
-            f"Opened {direction_name(direction)} ticket={int(ticket)} entry={self.price(entry)} sl={self.price(float(order['stop_loss']))}"
+            "Opened %s ticket=%s entry=%.5f sl=%.5f source_entry=%.5f source_sl=%.5f source_drift_pips=%.1f",
+            direction_name(direction),
+            int(ticket),
+            self.price(entry),
+            position_stop_loss,
+            float(request["source_entry"]),
+            float(request["source_stop_loss"]),
+            float(request["source_drift_pips"]),
         )
         return True
 
@@ -2341,6 +2419,7 @@ class S18SnowballBot:
                 self.positions: list[FakePosition] = []
                 self.open_calls = 0
                 self.position_ticket = 900001
+                self.open_requests: list[dict[str, Any]] = []
 
             def open_position(
                 self,
@@ -2356,6 +2435,16 @@ class S18SnowballBot:
             ) -> None:
                 del tp, deviation, digits
                 self.open_calls += 1
+                self.open_requests.append(
+                    {
+                        "symbol": symbol,
+                        "order_type": order_type,
+                        "lot_size": lot_size,
+                        "sl": sl,
+                        "magic": magic,
+                        "comment": comment,
+                    }
+                )
                 self.last_order_error = self.error
                 if self.create_position_after_error:
                     direction = "LONG" if order_type == ORDER_TYPE_BUY else "SHORT"
@@ -2424,6 +2513,54 @@ class S18SnowballBot:
             assert self.fill_virtual_orders(market_tick, market_regime) == 0
             assert reject_executor.open_calls == 1
             self.state["reconciliation_required"] = None
+
+            trade_events.clear()
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            stale_order = min(
+                [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                key=lambda item: item["entry"],
+            )
+            stale_order["entry"] = 1.33731
+            stale_order["stop_loss"] = 1.33681
+            stale_tick = {
+                "bid": 1.35396,
+                "ask": 1.35403,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            stale_executor = FakeExecutor("OK")
+            captured_open_requests: list[dict[str, Any]] = []
+
+            def capture_success_open(
+                symbol: str,
+                order_type: int,
+                lot_size: float,
+                sl: float = 0.0,
+                tp: float = 0.0,
+                deviation: int = 20,
+                magic: int = 123456,
+                comment: str = "",
+                digits: int | None = None,
+            ) -> Any:
+                del symbol, order_type, lot_size, tp, deviation, magic, comment, digits
+                captured_open_requests.append({"sl": sl})
+
+                class SuccessTicket:
+                    price = stale_tick["ask"]
+
+                    def __int__(self) -> int:
+                        return 900555
+
+                return SuccessTicket()
+
+            stale_executor.open_position = capture_success_open  # type: ignore[method-assign]
+            self.executor = stale_executor
+            assert self.open_from_virtual_order(stale_order, stale_tick)
+            assert captured_open_requests[-1]["sl"] == 1.35353
+            assert self.state["positions"][-1]["stop_loss"] == 1.35353
+            assert trade_events[-1][2]["stop_loss"] == 1.35353
+            assert trade_events[-1][2]["stop_loss"] != 1.33681
 
             trade_events.clear()
             original_autotrading_retry_cooldown = self.params.get("autotrading_reject_retry_cooldown_seconds")
@@ -2748,7 +2885,7 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true", help="run pure logic checks without bridge connection")
     parser.add_argument("--policy-self-test", action="store_true", help="also load frozen ML artifacts and test predict")
     args = parser.parse_args()
-    configure_logging()
+    configure_logging(file_enabled=not bool(args.self_test))
     raw_params = load_params()
     if args.self_test and not args.policy_self_test:
         raw_params = raw_params.copy()
