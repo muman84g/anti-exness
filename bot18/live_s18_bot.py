@@ -70,7 +70,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s18_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-h1-age-timing-v1"
+BOT_SOURCE_REVISION = "2026-07-16-m1-policy-timing-v1"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -197,6 +197,15 @@ def bar_clock_now_from_epoch(now_epoch: float, index: pd.DatetimeIndex) -> pd.Ti
     if index.tz is not None:
         return now_utc.tz_convert(index.tz)
     return now_utc.tz_localize(None)
+
+
+def utc_datetime_from_bar_timestamp(value: Any) -> datetime:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    else:
+        timestamp = timestamp.tz_convert(timezone.utc)
+    return timestamp.to_pydatetime()
 
 
 def load_params() -> dict[str, Any]:
@@ -607,6 +616,7 @@ class S18SnowballBot:
             "manual_alert_last_reconciliation_signature": None,
             "manual_alert_last_reconciliation_reason": None,
             "manual_alert_last_reconciliation_at_jst": None,
+            "last_cycle_start_policy_m1_decision_time_utc": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -875,7 +885,7 @@ class S18SnowballBot:
         self.state["last_regime"] = result
         return result
 
-    def get_m1_policy_features(self) -> dict[str, float]:
+    def get_m1_policy_features(self) -> dict[str, Any]:
         self.ensure_bridge()
         m1 = self.dm.get_historical_data(
             self.symbol,
@@ -889,14 +899,16 @@ class S18SnowballBot:
             if len(m1) < 17:
                 raise ValueError("not enough M1 bars after dropping current bar")
             m1 = m1.iloc[:-1].copy()
-        return build_m1_feature_row(m1, self.pip_size)
+        decision_time = utc_datetime_from_bar_timestamp(m1.index[-1] + pd.Timedelta(minutes=1))
+        features: dict[str, Any] = build_m1_feature_row(m1, self.pip_size)
+        features["m1_decision_time_utc"] = decision_time.isoformat()
+        return features
 
     def build_cycle_start_event_features(
         self,
         tick: dict[str, Any],
         regime: dict[str, Any],
     ) -> dict[str, Any]:
-        decision_time_utc = datetime.now(timezone.utc)
         effective_spread_points = float(tick["spread_points"]) + float(self.params["policy_spread_add_points"])
         features: dict[str, Any] = {
             "spread_gate_pass": int(
@@ -911,6 +923,12 @@ class S18SnowballBot:
             "bid_decision": float(tick["bid"]),
         }
         features.update(self.get_m1_policy_features())
+        raw_decision_time = features.get("m1_decision_time_utc")
+        decision_time_utc = (
+            datetime.fromisoformat(str(raw_decision_time)).astimezone(timezone.utc)
+            if raw_decision_time
+            else datetime.now(timezone.utc)
+        )
         features.update(session_features(decision_time_utc))
         return features
 
@@ -986,10 +1004,22 @@ class S18SnowballBot:
             return {"allow": not bool(self.params.get("policy_fail_closed", True)), "reason": reason}
         try:
             features = self.build_cycle_start_event_features(tick, regime)
-            result = self.policy.predict(self.symbol, features)
-            result.update(features)
-            result["reason"] = "threshold_pass" if bool(result["allow"]) else "threshold_block"
-            result["actual_spread_points"] = float(tick["spread_points"])
+            m1_decision_time = str(features.get("m1_decision_time_utc") or "")
+            last_m1_decision_time = str(self.state.get("last_cycle_start_policy_m1_decision_time_utc") or "")
+            if m1_decision_time and m1_decision_time == last_m1_decision_time:
+                result = {
+                    "allow": False,
+                    "reason": "duplicate_m1_decision_bar",
+                    "actual_spread_points": float(tick["spread_points"]),
+                }
+                result.update(features)
+            else:
+                if m1_decision_time:
+                    self.state["last_cycle_start_policy_m1_decision_time_utc"] = m1_decision_time
+                result = self.policy.predict(self.symbol, features)
+                result.update(features)
+                result["reason"] = "threshold_pass" if bool(result["allow"]) else "threshold_block"
+                result["actual_spread_points"] = float(tick["spread_points"])
         except Exception as exc:
             result = {
                 "allow": not bool(self.params.get("policy_fail_closed", True)),
@@ -1008,6 +1038,7 @@ class S18SnowballBot:
                 "reason",
                 "actual_spread_points",
                 "spread_points_decision",
+                "m1_decision_time_utc",
             }
         }
         self.log_policy_decision(result)
@@ -2624,6 +2655,65 @@ class S18SnowballBot:
             )
             assert policy_features["h1_signal_age_minutes"] == 0.0
         finally:
+            self.get_m1_policy_features = original_get_m1_policy_features  # type: ignore[method-assign]
+
+        class AlwaysAllowPolicy:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def predict(self, symbol: str, features: dict[str, Any]) -> dict[str, Any]:
+                del symbol, features
+                self.calls += 1
+                return {
+                    "allow": True,
+                    "candidate_id": "self_test",
+                    "model": "fake",
+                    "threshold": 0.5,
+                    "pred_proba": 0.9,
+                }
+
+        original_policy = self.policy
+        original_policy_enabled = self.params.get("policy_enabled")
+        original_policy_log_enabled = self.params.get("policy_decision_log_enabled")
+        original_get_m1_policy_features = self.get_m1_policy_features
+        decision_time_holder = {"value": "2026-07-16T00:01:00+00:00"}
+        fake_policy = AlwaysAllowPolicy()
+        self.policy = fake_policy  # type: ignore[assignment]
+        self.params["policy_enabled"] = True
+        self.params["policy_decision_log_enabled"] = False
+        self.get_m1_policy_features = lambda: {  # type: ignore[method-assign]
+            "m1_atr_pips": 1.0,
+            "m1_range_pips": 2.0,
+            "m1_ret_1_pips": 0.25,
+            "m1_tick_volume": 100.0,
+            "m1_decision_time_utc": decision_time_holder["value"],
+        }
+        try:
+            self.state = self.default_state()
+            policy_tick = {"bid": 1.25000, "spread_points": 1.0}
+            policy_regime = {
+                "signal_age_minutes": 1.0,
+                "adx": 25.0,
+                "efficiency_ratio": 0.4,
+                "displacement_atr": 1.2,
+                "trend_direction": 1,
+            }
+            first_decision = self.evaluate_cycle_start_policy(policy_tick, policy_regime)
+            assert bool(first_decision["allow"])
+            assert fake_policy.calls == 1
+            assert self.state["last_cycle_start_policy_m1_decision_time_utc"] == "2026-07-16T00:01:00+00:00"
+            repeated_decision = self.evaluate_cycle_start_policy(policy_tick, policy_regime)
+            assert not bool(repeated_decision["allow"])
+            assert repeated_decision["reason"] == "duplicate_m1_decision_bar"
+            assert fake_policy.calls == 1
+            decision_time_holder["value"] = "2026-07-16T00:02:00+00:00"
+            next_bar_decision = self.evaluate_cycle_start_policy(policy_tick, policy_regime)
+            assert bool(next_bar_decision["allow"])
+            assert fake_policy.calls == 2
+        finally:
+            self.policy = original_policy
+            self.params["policy_enabled"] = original_policy_enabled
+            self.params["policy_decision_log_enabled"] = original_policy_log_enabled
             self.get_m1_policy_features = original_get_m1_policy_features  # type: ignore[method-assign]
 
         class FakeRegimeDataManager:

@@ -39,9 +39,12 @@ time minus the latest closed H1 label, matching the backtest exporter rule
 `decision_time_utc - h1_signal_time`. M1 policy features also drop the latest
 forming M1 row before calculating ATR/range/return/volume.
 
-Live still is not tick-identical to the backtest: the regime result is cached
-for `regime_refresh_seconds`, and cycle starts are evaluated on live polling
-ticks rather than only at historical M1 close rows.
+Cycle-start policy evaluation is keyed by the latest closed M1 decision time,
+so the live runner evaluates at most once per closed M1 bar while flat, matching
+the backtest exporter event cadence. Live still is not tick-identical to the
+backtest: the regime result is cached for `regime_refresh_seconds`, and the
+actual tick used for the first eligible live poll after an M1 close can differ
+from the historical M1 close price/spread row used by the exporter.
 
 ## Live price calculation
 
