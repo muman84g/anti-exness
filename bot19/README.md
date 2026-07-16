@@ -38,6 +38,8 @@ Windowsでは `BotBridge_s19` が置かれた MT5 terminal data folder の `MQL5
 
 server-side pending stop を使うため、発注応答が未確認になった場合は `pending_open` / `reconciliation_required` を state に残し、新規entryを止めます。MT5 上のbot19建玉が state に無い場合でも、現在の `virtual_orders`、`pending_open`、または保存済みの pending-grid repair 履歴から ticket/comment/direction/SL/entry が一意に一致する場合だけ state に自動採用します。一意に照合できない場合は `reconciliation_required` のまま停止します。
 
+同一口座で複数botを動かす前提で、bot19の建玉・pending注文は `symbol` + `magic` で絞って扱います。新しいstateの建玉・virtual orderには `symbol` / `magic` を保存します。missing state ticket を server-side SL とみなす前、または `CLOSE` / `MODIFY` / pending `CANCEL` のようなticket単体操作の前には、ticketがbot19所有であることを symbol/magic/comment 証拠で確認します。bot18など別magicのticketがstateへ混入した場合は、close/cancel/adopt/SL扱いせず新規entryをブロックします。
+
 未約定・建玉なしのcycle中は、S19 pending grid は `Buy Stop` 2本 + `Sell Stop` 2本を正常形とします。MT5側で1本だけcancelされるなどして2:2が崩れた場合、runnerは残りのS19 pendingを全cancelし、spread/regimeがentry可能なら同じ `grid_anchor` で2:2を再発注します。spread/regimeがNGなら `grid_anchor` を維持して再発注待ちにします。cancelまたは再発注に失敗した場合は `reconciliation_required` で停止します。
 
 MT5 がbot19の建玉・未約定注文ともに完全flatを返し、state側に未解決の `pending_open` / pending-grid repair の残骸だけがある場合は、その stale block を自動解除して通常のflat-cycle待機に戻します。

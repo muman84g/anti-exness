@@ -23,6 +23,7 @@
 ## Mapping And Naming
 
 - Preserve bot number, strategy ID, magic, symbol, service, volume mount, bridge, state, log, and IPC names unless the user asks to change them.
+- Assume multiple bots may run on the same trading account. Never use account-wide position/order presence as a bot-owned exposure signal; scope live exposure by bot-owned symbol/magic and, before ticket-only actions, verify ticket ownership by symbol, magic, and comment evidence.
 - Update `BOT_BACKTEST_MAP_ja.md`, README, params, runner notes, and `SOURCE_BACKTEST.md` together when their mapping changes.
 - Document every unavoidable backtest/live mismatch in `SOURCE_BACKTEST.md`.
 - For local virtual-grid bots that execute market orders, treat virtual levels as trigger/state identity. Recalculate actual market entry and SL/TP from the current tick at every send/retry unless the strategy source explicitly requires fixed absolute prices.
@@ -36,6 +37,7 @@
 - Design live-bot recovery for autonomous operation. Stopping or requiring manual action is a last resort for ambiguous or unsafe states, not the default fix for predictable price drift, stale orders, retryable broker errors, or recoverable state mismatch.
 - Keep temporary entry-block recovery reason-aware. Clear `sync_block_new_entries` only after the matching clean-sync recovery condition is proven; do not leave recoverable blocks stale, and do not clear unresolved reconciliation or ambiguous exposure.
 - Preserve fail-closed behavior for order, sync, state, pending-open, and reconciliation failures.
+- For `CLOSE`, `MODIFY`, `CANCEL`, and missing-state-ticket server-SL assumptions, fail closed if the ticket cannot be proven to belong to the target bot. Add regression checks for same-symbol/different-magic foreign tickets when changing sync or state recovery.
 - Do not manually repair state while the target bot is running. Verify ticket, symbol, direction, lot, SL, and TP before an authorized repair.
 - Report changed files, checks run, and explicitly state whether deploy, restart, or live switching was not performed.
 - After any successful GitHub push for live-bot files, report the target-specific CentOS follow-up steps from `C:\botter\bot\githubへのpush.txt`, and state that they were not run unless separately authorized.

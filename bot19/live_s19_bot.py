@@ -46,7 +46,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s19_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s19_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-pending-fill-sync-v3"
+BOT_SOURCE_REVISION = "2026-07-16-ticket-owner-guard-v1"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -949,6 +949,8 @@ class S19SnowballBot:
             return True
         order = {
             "order_id": int(self.state["next_order_id"]),
+            "symbol": self.symbol,
+            "magic": self.magic,
             "direction": direction_name(direction),
             "entry": entry,
             "stop_loss": stop_loss,
@@ -1036,6 +1038,8 @@ class S19SnowballBot:
                     logging.exception("Could not persist pending_open failure state")
                 return False
             order["pending_ticket"] = int(pending_ticket)
+            order["symbol"] = self.symbol
+            order["magic"] = self.magic
             order["volume"] = lot
             order["comment"] = comment
             self.state["pending_open"] = None
@@ -1155,6 +1159,161 @@ class S19SnowballBot:
             return False
         return abs(float(getattr(position, "open_price", 0.0)) - float(order["entry"])) <= self.distance_price * 0.5
 
+    def state_position_identity_mismatch_reason(self, state_position: dict[str, Any]) -> str | None:
+        state_symbol = str(state_position.get("symbol", "") or "").upper()
+        if state_symbol and state_symbol != self.symbol:
+            return f"state_symbol={state_symbol} expected={self.symbol}"
+        state_magic = state_position.get("magic")
+        if state_magic not in (None, ""):
+            try:
+                if int(state_magic) != int(self.magic):
+                    return f"state_magic={int(state_magic)} expected={int(self.magic)}"
+            except (TypeError, ValueError):
+                return f"state_magic_unreadable={state_magic}"
+        return None
+
+    def live_position_ownership_mismatch_reason(
+        self,
+        live_position: Any,
+        state_position: dict[str, Any] | None = None,
+    ) -> str | None:
+        if state_position is not None:
+            state_mismatch = self.state_position_identity_mismatch_reason(state_position)
+            if state_mismatch:
+                return state_mismatch
+        live_symbol = str(getattr(live_position, "symbol", "") or "").upper()
+        if live_symbol != self.symbol:
+            return f"live_symbol={live_symbol} expected={self.symbol}"
+        try:
+            live_magic = int(getattr(live_position, "magic", -1))
+        except (TypeError, ValueError):
+            return f"live_magic_unreadable={getattr(live_position, 'magic', None)}"
+        if live_magic != int(self.magic):
+            return f"live_magic={live_magic} expected={int(self.magic)}"
+        live_comment = str(getattr(live_position, "comment", "") or "")
+        expected_comment = str((state_position or {}).get("comment", "") or "")
+        if expected_comment and live_comment != expected_comment:
+            return f"live_comment={live_comment} expected={expected_comment}"
+        if not expected_comment:
+            prefix = str(self.params["comment_prefix"])
+            if live_comment and not live_comment.startswith(f"{prefix}_"):
+                return f"live_comment_prefix={live_comment} expected_prefix={prefix}_"
+        return None
+
+    def state_pending_order_identity_mismatch_reason(self, order: dict[str, Any]) -> str | None:
+        state_symbol = str(order.get("symbol", "") or "").upper()
+        if state_symbol and state_symbol != self.symbol:
+            return f"state_symbol={state_symbol} expected={self.symbol}"
+        state_magic = order.get("magic")
+        if state_magic not in (None, ""):
+            try:
+                if int(state_magic) != int(self.magic):
+                    return f"state_magic={int(state_magic)} expected={int(self.magic)}"
+            except (TypeError, ValueError):
+                return f"state_magic_unreadable={state_magic}"
+        return None
+
+    def live_pending_order_ownership_mismatch_reason(self, live_order: Any, order: dict[str, Any] | None = None) -> str | None:
+        if order is not None:
+            state_mismatch = self.state_pending_order_identity_mismatch_reason(order)
+            if state_mismatch:
+                return state_mismatch
+        live_symbol = str(getattr(live_order, "symbol", "") or "").upper()
+        if live_symbol != self.symbol:
+            return f"live_symbol={live_symbol} expected={self.symbol}"
+        try:
+            live_magic = int(getattr(live_order, "magic", -1))
+        except (TypeError, ValueError):
+            return f"live_magic_unreadable={getattr(live_order, 'magic', None)}"
+        if live_magic != int(self.magic):
+            return f"live_magic={live_magic} expected={int(self.magic)}"
+        live_comment = str(getattr(live_order, "comment", "") or "")
+        expected_comment = str((order or {}).get("comment", "") or "")
+        if expected_comment and live_comment != expected_comment:
+            return f"live_comment={live_comment} expected={expected_comment}"
+        if not expected_comment:
+            prefix = str(self.params["comment_prefix"])
+            if live_comment and not live_comment.startswith(f"{prefix}_"):
+                return f"live_comment_prefix={live_comment} expected_prefix={prefix}_"
+        return None
+
+    def confirm_state_ticket_absent_for_assumed_sl(self, ticket: int, state_position: dict[str, Any]) -> bool:
+        state_mismatch = self.state_position_identity_mismatch_reason(state_position)
+        if state_mismatch:
+            self.block_new_entries(f"state position identity mismatch for ticket {ticket}: {state_mismatch}")
+            return False
+        get_position = getattr(self.executor, "get_position", None)
+        confirm_absent = getattr(self.executor, "confirm_position_absent", None)
+        if not callable(get_position) or not callable(confirm_absent):
+            self.block_new_entries(f"ticket owner check unavailable for state ticket {ticket}")
+            return False
+        live_position = get_position(ticket)
+        if live_position is not None:
+            mismatch = self.live_position_ownership_mismatch_reason(live_position, state_position)
+            if mismatch:
+                self.block_new_entries(f"state ticket ownership mismatch for ticket {ticket}: {mismatch}")
+            else:
+                self.block_new_entries(f"state ticket still exists but was missing from bot position list: {ticket}")
+            return False
+        absent = confirm_absent(ticket)
+        if absent is True:
+            return True
+        if absent is False:
+            self.block_new_entries(f"state ticket still exists but could not be read: {ticket}")
+        else:
+            self.block_new_entries(f"state ticket absence not confirmed: {ticket}")
+        return False
+
+    def confirm_state_ticket_owned_for_action(self, state_position: dict[str, Any], action: str) -> bool:
+        ticket = int(state_position["ticket"])
+        state_mismatch = self.state_position_identity_mismatch_reason(state_position)
+        if state_mismatch:
+            self.block_new_entries(f"{action} refused; state position identity mismatch for ticket {ticket}: {state_mismatch}")
+            return False
+        get_position = getattr(self.executor, "get_position", None)
+        confirm_absent = getattr(self.executor, "confirm_position_absent", None)
+        if not callable(get_position) or not callable(confirm_absent):
+            self.block_new_entries(f"{action} refused; ticket owner check unavailable for ticket {ticket}")
+            return False
+        live_position = get_position(ticket)
+        if live_position is None:
+            absent = confirm_absent(ticket)
+            if absent is True:
+                self.block_new_entries(f"state ticket missing on MT5: {ticket}")
+            elif absent is False:
+                self.block_new_entries(f"{action} refused; ticket exists but could not be read: {ticket}")
+            else:
+                self.block_new_entries(f"{action} refused; ticket absence not confirmed: {ticket}")
+            return False
+        mismatch = self.live_position_ownership_mismatch_reason(live_position, state_position)
+        if mismatch:
+            self.block_new_entries(f"{action} refused; ticket ownership mismatch for ticket {ticket}: {mismatch}")
+            return False
+        return True
+
+    def confirm_pending_ticket_owned_for_action(self, order: dict[str, Any], action: str) -> bool:
+        pending_ticket = order.get("pending_ticket")
+        if pending_ticket in (None, ""):
+            return True
+        ticket = int(pending_ticket)
+        state_mismatch = self.state_pending_order_identity_mismatch_reason(order)
+        if state_mismatch:
+            self.block_new_entries(f"{action} refused; state pending identity mismatch for ticket {ticket}: {state_mismatch}")
+            return False
+        live_orders = self.executor.get_orders(self.symbol, self.magic)
+        if live_orders is None:
+            self.block_new_entries(f"{action} refused; pending order owner check failed for ticket {ticket}")
+            return False
+        matches = [live_order for live_order in live_orders if int(getattr(live_order, "ticket", -1)) == ticket]
+        if len(matches) != 1:
+            self.block_new_entries(f"{action} refused; pending ticket not confirmed as bot-owned: {ticket}")
+            return False
+        mismatch = self.live_pending_order_ownership_mismatch_reason(matches[0], order)
+        if mismatch:
+            self.block_new_entries(f"{action} refused; pending ticket ownership mismatch for ticket {ticket}: {mismatch}")
+            return False
+        return True
+
     def normalize_pending_recovery_order(self, raw_order: dict[str, Any], source: str) -> dict[str, Any] | None:
         try:
             direction = direction_name(direction_from_name(str(raw_order["direction"])))
@@ -1170,8 +1329,14 @@ class S19SnowballBot:
                 pending_ticket = int(pending_ticket_raw)
             except (TypeError, ValueError):
                 pending_ticket = None
+        try:
+            raw_magic = int(raw_order.get("magic", self.magic) or self.magic)
+        except (TypeError, ValueError):
+            raw_magic = self.magic
         return {
             "order_id": order_id,
+            "symbol": str(raw_order.get("symbol", self.symbol) or self.symbol).upper(),
+            "magic": raw_magic,
             "direction": direction,
             "entry": entry,
             "stop_loss": stop_loss,
@@ -1463,6 +1628,8 @@ class S19SnowballBot:
         ]
         position = {
             "ticket": ticket,
+            "symbol": self.symbol,
+            "magic": self.magic,
             "direction": direction_name(direction),
             "entry": self.price(float(getattr(live_position, "open_price"))),
             "stop_loss": self.price(float(order["stop_loss"])),
@@ -1500,6 +1667,8 @@ class S19SnowballBot:
         pending_ticket = order.get("pending_ticket")
         if not pending_ticket:
             return True
+        if not self.confirm_pending_ticket_owned_for_action(order, "pending cancel"):
+            return False
         if self.executor.cancel_order(int(pending_ticket)):
             self.log_trade_csv(
                 "PENDING_CANCEL",
@@ -1764,6 +1933,10 @@ class S19SnowballBot:
             ticket = int(getattr(live_order, "ticket", 0))
             if not ticket:
                 continue
+            mismatch = self.live_pending_order_ownership_mismatch_reason(live_order)
+            if mismatch:
+                self.block_new_entries(f"live pending cancel refused; pending ticket ownership mismatch for ticket {ticket}: {mismatch}")
+                return False
             if not self.executor.cancel_order(ticket):
                 self.block_new_entries(f"failed to cancel pending order {ticket}")
                 return False
@@ -1990,6 +2163,8 @@ class S19SnowballBot:
             live_position = live_by_ticket.get(ticket)
             if live_position is None:
                 if bool(self.params["assume_missing_state_position_is_sl"]):
+                    if not self.confirm_state_ticket_absent_for_assumed_sl(ticket, position):
+                        return False
                     exit_price = float(position["stop_loss"])
                     pnl = self.estimate_position_pnl(position, exit_price, tick["info"])
                     self.state["cycle_realized_usd"] = float(self.state["cycle_realized_usd"]) + pnl
@@ -2013,6 +2188,10 @@ class S19SnowballBot:
                     )
                     continue
                 self.block_new_entries(f"state ticket missing on MT5: {ticket}")
+                return False
+            mismatch = self.live_position_ownership_mismatch_reason(live_position, position)
+            if mismatch:
+                self.block_new_entries(f"state ticket ownership mismatch for ticket {ticket}: {mismatch}")
                 return False
             position["entry"] = self.price(float(live_position.open_price))
             position["volume"] = float(live_position.volume)
@@ -2078,6 +2257,8 @@ class S19SnowballBot:
             if not crossed:
                 continue
             ticket = int(position["ticket"])
+            if not self.confirm_state_ticket_owned_for_action(position, "local SL close"):
+                break
             result = self.executor.close_position(ticket, deviation=int(self.params["deviation_points"]))
             if result:
                 close_price = float(getattr(result, "close_price", 0.0) or stop_loss)
@@ -2253,6 +2434,8 @@ class S19SnowballBot:
         self.state["positions"].append(
             {
                 "ticket": int(ticket),
+                "symbol": self.symbol,
+                "magic": self.magic,
                 "direction": direction_name(direction),
                 "entry": self.price(entry),
                 "stop_loss": self.price(float(order["stop_loss"])),
@@ -2326,6 +2509,9 @@ class S19SnowballBot:
 
     def force_close_cycle(self, bid: float, ask: float, info: Any | None, reason: str) -> bool:
         failures = []
+        for position in list(self.state["positions"]):
+            if not self.confirm_state_ticket_owned_for_action(position, "dynamic close"):
+                return False
         for position in list(self.state["positions"]):
             ticket = int(position["ticket"])
             result = self.executor.close_position(ticket, deviation=int(self.params["deviation_points"]))
@@ -2509,6 +2695,9 @@ class S19SnowballBot:
         if not self.auto_tp_profit_guard_passed(bid, ask, info):
             return False
         failures = []
+        for position in list(self.state["positions"]):
+            if not self.confirm_state_ticket_owned_for_action(position, "autoTP close"):
+                return False
         for position in list(self.state["positions"]):
             ticket = int(position["ticket"])
             result = self.executor.close_position(ticket, deviation=int(self.params["deviation_points"]))
@@ -2887,12 +3076,45 @@ class S19SnowballBot:
                         if position.symbol == symbol and int(position.magic) == int(magic)
                     ]
 
+                def get_position(self, ticket: int) -> FakeLivePosition | None:
+                    for position in self.positions:
+                        if int(position.ticket) == int(ticket):
+                            return position
+                    return None
+
+                def confirm_position_absent(self, ticket: int) -> bool:
+                    return self.get_position(ticket) is None
+
                 def get_orders(self, symbol: str, magic: int) -> list[FakePendingOrder]:
                     return [
                         order
                         for order in self.orders
                         if order.symbol == symbol and int(order.magic) == int(magic)
                     ]
+
+                def modify_position_sl_tp(self, ticket: int, sl: float, tp: float = 0.0) -> bool:
+                    del tp
+                    for position in self.positions:
+                        if int(position.ticket) == int(ticket):
+                            position.sl = sl
+                            return True
+                    return False
+
+                def close_position(self, ticket: int, deviation: int = 20) -> Any | None:
+                    del deviation
+                    for index, position in enumerate(list(self.positions)):
+                        if int(position.ticket) != int(ticket):
+                            continue
+                        self.positions.pop(index)
+
+                        class CloseResult:
+                            close_price = position.sl
+                            profit = 0.0
+                            lot = position.volume
+                            status = "OK"
+
+                        return CloseResult()
+                    return None
 
             def seed_pending_grid_state() -> None:
                 self.state = self.default_state()
@@ -2937,6 +3159,57 @@ class S19SnowballBot:
                         "comment": "s19_gbp_1_4",
                     },
                 ]
+
+            tick = {
+                "bid": 1.25000,
+                "ask": 1.25009,
+                "spread_points": 9.0,
+                "info": FakeInfo(),
+            }
+            regime = {"entry_allowed": True, "signal_fresh": True, "reason": "ok"}
+
+            self.state = self.default_state()
+            self.state["positions"] = [
+                {
+                    "ticket": 910001,
+                    "direction": "LONG",
+                    "entry": 1.25100,
+                    "stop_loss": 1.25000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": "foreign_bot_position",
+                }
+            ]
+            self.recalculate_position_counts()
+            self.executor = FakeExecutor()
+            foreign_position = FakeLivePosition(910001, "LONG", 1.25100, 1.25000, "foreign_bot_position")
+            foreign_position.magic = 180218
+            self.executor.positions = [foreign_position]
+            assert not self.sync_live_positions(tick, regime, force=True)
+            assert len(self.state["positions"]) == 1
+            assert self.state["sync_block_new_entries"]
+            assert "ownership mismatch" in str(self.state["sync_block_reason"])
+
+            self.state = self.default_state()
+            self.executor = FakeExecutor()
+            foreign_pending = FakePendingOrder(910101, ORDER_TYPE_BUY_STOP, 1.25100, 1.25000, "foreign_pending")
+            foreign_pending.magic = 180218
+            self.executor.orders = [foreign_pending]
+            assert not self.cancel_server_pending_order(
+                {
+                    "order_id": 1,
+                    "direction": "LONG",
+                    "entry": 1.25100,
+                    "stop_loss": 1.25000,
+                    "pending_ticket": 910101,
+                    "volume": 0.01,
+                    "comment": "foreign_pending",
+                }
+            )
+            assert self.executor.cancelled == []
+            assert self.state["sync_block_new_entries"]
+            assert "pending ticket not confirmed as bot-owned" in str(self.state["sync_block_reason"])
+
             self.params["live_trading_enabled"] = True
             self.params["use_server_pending_entry"] = True
             self.state = self.default_state()
