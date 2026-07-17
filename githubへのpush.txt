@@ -31,6 +31,8 @@ For an existing bot update, stage only the authorized changed files unless the u
 
 Use this only when the local project tree is not suitable for the requested push. Keep clones outside `C:\botter` and `C:\botter\bot`:
 
+Observed on 2026-07-17: `git -C C:\botter status` can fail with `not a git repository` in the managed workspace even when a `.git` entry is visible. If that happens, do not keep probing the broken local tree; use this clean clone route immediately.
+
 ```powershell
 $STAMP = Get-Date -Format yyyyMMdd_HHmmss
 $CLONE_ROOT = 'C:\Users\muuma\Downloads\codex-temp'
