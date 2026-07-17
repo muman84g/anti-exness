@@ -15,19 +15,19 @@ Keep both the service/container name and the CentOS runtime folder name unchange
 
 ## Symbols
 
-- GBPUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.09
-- EURUSD: LightGBM / allow_rate=0.50 / spread_add_points=2.0 / lot=0.07
-- AUDUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.07
+- GBPUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.02
+- EURUSD: LightGBM / allow_rate=0.50 / spread_add_points=2.0 / lot=0.01
+- AUDUSD: CatBoost / allow_rate=0.50 / spread_add_points=2.0 / lot=0.01
 
 USDJPY, USDCHF, NZDUSD, CHFJPY, and USDCAD are not part of this fixed basket.
 
 ## Lot allocation
 
-Entry threshold / allow_rate are unchanged. Only per-symbol lot is changed based on fixed basket portfolio diagnostics.
+Entry threshold / allow_rate are unchanged. Only per-symbol lot is changed. As of 2026-07-17, lots are reduced while live/backtest reproducibility concerns are monitored.
 
-- GBPUSD: `0.09`
-- EURUSD: `0.07`
-- AUDUSD: `0.07`
+- GBPUSD: `0.02`
+- EURUSD: `0.01`
+- AUDUSD: `0.01`
 
 The top-level `lot` remains `0.01` as a fallback; live profiles use each profile's `lot`.
 

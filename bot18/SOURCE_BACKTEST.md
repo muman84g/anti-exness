@@ -63,4 +63,4 @@ Recoverable live-only entry blocks, such as transient position-sync, SL-close, a
 
 ## Live lot allocation
 
-As of 2026-07-15, the live per-symbol profile lots are GBPUSD `0.09`, EURUSD `0.07`, and AUDUSD `0.07`. Entry thresholds, policy artifacts, and allow-rate settings are unchanged.
+As of 2026-07-17, the live per-symbol profile lots are reduced to GBPUSD `0.02`, EURUSD `0.01`, and AUDUSD `0.01` while live/backtest reproducibility concerns are monitored. Entry thresholds, policy artifacts, and allow-rate settings are unchanged. The top-level fallback `lot` remains `0.01`; live profiles use each profile's `lot`.
