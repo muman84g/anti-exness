@@ -71,7 +71,7 @@ DECISION_SNAPSHOT_LOG_FILE = os.path.join(LOG_DIR, "s18_decision_snapshots.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-17-cycle-rearm-v1"
+BOT_SOURCE_REVISION = "2026-07-17-cycle-one-sided-exposure-v1"
 DUPLICATE_M1_DECISION_REASON = "duplicate_m1_decision_bar"
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -2881,12 +2881,16 @@ class S18SnowballBot:
         minimum_pips = float(self.params["base_add_distance_pips"])
         if self.state["positions"] and self.inactive_distance_applies(regime):
             minimum_pips = max(minimum_pips, float(self.params["inactive_add_distance_pips"]))
-        if minimum_pips <= 0.0:
-            return True
-        minimum_price = minimum_pips * self.pip_size
         direction = direction_from_name(order["direction"])
         long_count = int(self.state.get("long_count", 0))
         short_count = int(self.state.get("short_count", 0))
+        if direction == LONG and short_count > 0:
+            return False
+        if direction == SHORT and long_count > 0:
+            return False
+        if minimum_pips <= 0.0:
+            return True
+        minimum_price = minimum_pips * self.pip_size
         if direction == LONG and long_count > 0:
             average_entry = float(self.state.get("long_entry_sum", 0.0)) / long_count
             return ask - average_entry >= minimum_price - 1e-12
@@ -3651,6 +3655,13 @@ class S18SnowballBot:
             1.25285,
             {"entry_allowed": False, "signal_fresh": True},
         )
+        opposite_order = {"direction": "SHORT", "entry": 1.24950, "stop_loss": 1.25000}
+        assert not self.virtual_order_fill_allowed(
+            opposite_order,
+            1.24945,
+            1.24952,
+            {"entry_allowed": True, "signal_fresh": True},
+        )
         assert not self.auto_tp_profit_guard_passed(1.25099, 1.25108)
         assert self.auto_tp_profit_guard_passed(1.26000, 1.26009)
         assert self.broker_reject_definitively_unfilled("ERR|10016")
@@ -3933,6 +3944,34 @@ class S18SnowballBot:
                 "info": FakeInfo(),
             }
             market_regime = {"entry_allowed": True, "signal_fresh": True}
+
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            self.state["positions"] = [
+                {
+                    "ticket": 830001,
+                    "symbol": self.symbol,
+                    "magic": self.magic,
+                    "direction": "LONG",
+                    "entry": 1.25050,
+                    "stop_loss": 1.24000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": "s18_selftest_long",
+                }
+            ]
+            self.recalculate_position_counts()
+            opposite_block_executor = FakeExecutor("OK")
+            self.executor = opposite_block_executor
+            opposite_cross_tick = {
+                "bid": 1.24945,
+                "ask": 1.24952,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            assert self.fill_virtual_orders(opposite_cross_tick, market_regime) == 0
+            assert opposite_block_executor.open_calls == 0
+            assert len(self.state["positions"]) == 1
 
             original_get_tick = self.get_tick
             original_get_regime = self.get_regime
