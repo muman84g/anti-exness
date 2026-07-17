@@ -71,7 +71,7 @@ DECISION_SNAPSHOT_LOG_FILE = os.path.join(LOG_DIR, "s18_decision_snapshots.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s18_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-ticket-owner-guard-v1"
+BOT_SOURCE_REVISION = "2026-07-17-cycle-rearm-v1"
 DUPLICATE_M1_DECISION_REASON = "duplicate_m1_decision_bar"
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -122,18 +122,12 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "monday_start_minute_jst": 0,
     "reanchor_after_weekend_resume": True,
     "short_auto_tp_uses_ask": True,
-    "exact_cycle_equity_auto_tp": False,
-    "carry_unrecovered_cycle_loss": False,
-    "block_rollover_entries": False,
-    "directional_cycle_start": False,
-    "close_on_inactive_regime_cycle_equity": False,
     "use_server_sl": True,
     "repair_missing_sl_on_sync": True,
     "sl_mismatch_tolerance_pips": 0.2,
     "assume_missing_state_position_is_sl": True,
     "market_open_reconcile_enabled": True,
     "market_open_retry_cooldown_seconds": 30,
-    "post_sl_reanchor_cooldown_seconds": 30,
     "max_flat_breakout_entry_drift_pips": 20.0,
     "autotrading_reject_retry_cooldown_seconds": 5,
     "autotrading_reject_notify_after_count": 5,
@@ -144,6 +138,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "policy_decision_log_pass_always": True,
     "policy_decision_log_error_always": True,
     "decision_snapshot_log_enabled": True,
+    "startup_catchup_enabled": True,
+    "startup_catchup_max_m1_bars": 4320,
     "policy_artifacts_dir": ARTIFACTS_DIR,
     "policy_spread_add_points": 2.0,
     "policy_max_entry_spread_points": 9.0,
@@ -211,6 +207,22 @@ def utc_datetime_from_bar_timestamp(value: Any) -> datetime:
     return timestamp.to_pydatetime()
 
 
+def parse_datetime_utc(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        timestamp = pd.Timestamp(str(value))
+    except Exception:
+        return None
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    else:
+        timestamp = timestamp.tz_convert(timezone.utc)
+    return timestamp.to_pydatetime()
+
+
 def load_params() -> dict[str, Any]:
     params = DEFAULT_PARAMS.copy()
     if os.path.exists(PARAMS_FILE):
@@ -246,6 +258,33 @@ def file_sha256(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_sha256_or_status(path: str) -> str:
+    if not os.path.exists(path):
+        return "missing"
+    try:
+        return file_sha256(path)
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
+
+
+def log_runtime_identity(raw_params: dict[str, Any], label: str = "S18") -> None:
+    artifacts_dir = os.path.abspath(str(raw_params.get("policy_artifacts_dir", ARTIFACTS_DIR)))
+    profiles = build_profile_params(raw_params)
+    lots = ",".join(
+        f"{str(profile.get('symbol', '')).upper()}={float(profile.get('lot', raw_params.get('lot', 0.0))):.2f}"
+        for profile in profiles
+    )
+    logging.info(
+        "%s runtime identity: revision=%s params_sha256=%s manifest_sha256=%s thresholds_sha256=%s lots=%s",
+        label,
+        BOT_SOURCE_REVISION,
+        file_sha256_or_status(PARAMS_FILE),
+        file_sha256_or_status(os.path.join(artifacts_dir, "manifest.json")),
+        file_sha256_or_status(os.path.join(artifacts_dir, "thresholds.csv")),
+        lots,
+    )
 
 
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
@@ -548,6 +587,7 @@ class S18SnowballBot:
         self.dm = None
         self.executor = None
         self.state = self.load_state()
+        self.loaded_state_updated_at_jst = self.state.get("updated_at_jst")
         self.last_regime_fetch_epoch = 0.0
         self.cached_regime = self.default_regime()
         self.last_status_log_epoch = 0.0
@@ -611,6 +651,7 @@ class S18SnowballBot:
             "post_sl_reanchor_after_epoch": None,
             "last_post_sl_reanchor": None,
             "last_flat_breakout_reanchor": None,
+            "last_flat_breakout_stale_skip": None,
             "last_market_open_failure": None,
             "autotrading_reject_streak": 0,
             "autotrading_reject_first_at_jst": None,
@@ -622,6 +663,12 @@ class S18SnowballBot:
             "manual_alert_last_reconciliation_signature": None,
             "manual_alert_last_reconciliation_reason": None,
             "manual_alert_last_reconciliation_at_jst": None,
+            "startup_state_reconciled_at_jst": None,
+            "startup_state_recovery": None,
+            "startup_catchup_replayed_at_jst": None,
+            "startup_catchup_replay": None,
+            "startup_flat_reset": None,
+            "last_catchup_m1_decision_time_utc": None,
             "last_cycle_start_policy_m1_decision_time_utc": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
@@ -811,6 +858,459 @@ class S18SnowballBot:
             ",".join(sorted(caps["commands"])),
         )
         return True
+
+    def startup_reconcile_state(self) -> dict[str, Any]:
+        """Reconcile persisted state with MT5 before normal entry processing.
+
+        This is intentionally not a historical trade replay. If local state was
+        lost and MT5 is flat, the bot starts from the current market state. If
+        bot-owned live positions still exist, the existing sync/adoption logic
+        restores them before the runner can start a new cycle.
+        """
+        before = {
+            "cycle_id": int(self.state.get("cycle_id", 0) or 0),
+            "positions": len(self.state.get("positions", [])),
+            "virtual_orders": len(self.state.get("virtual_orders", [])),
+            "sync_block_new_entries": bool(self.state.get("sync_block_new_entries", False)),
+            "reconciliation_required": isinstance(self.state.get("reconciliation_required"), dict),
+        }
+        recovery: dict[str, Any] = {
+            "status": "not_started",
+            "reason": "",
+            "before": before,
+            "after": {},
+            "history_warmup": {},
+            "created_at_jst": jst_now().isoformat(),
+        }
+
+        tick = self.get_tick()
+        if tick is None:
+            recovery["status"] = "deferred"
+            recovery["reason"] = "startup tick unavailable"
+            self.state["startup_state_reconciled_at_jst"] = jst_now().isoformat()
+            self.state["startup_state_recovery"] = recovery
+            logging.warning("S18 startup state reconcile deferred: tick unavailable for %s", self.symbol)
+            return recovery
+
+        sync_ok = self.sync_live_positions(tick)
+        recovery["status"] = "reconciled" if sync_ok else "blocked"
+        recovery["reason"] = "clean startup sync" if sync_ok else str(self.state.get("sync_block_reason") or "")
+
+        if sync_ok and self.state.get("positions") and (
+            self.auto_tp_refresh_due() or self.state.get("auto_tp_price") is None
+        ):
+            self.refresh_auto_tp(float(tick["bid"]), float(tick["ask"]), tick.get("info"))
+
+        try:
+            regime = self.get_regime()
+            recovery["history_warmup"]["regime_ok"] = bool(regime.get("reason") == "ok")
+            recovery["history_warmup"]["regime_reason"] = str(regime.get("reason"))
+        except Exception as exc:
+            recovery["history_warmup"]["regime_ok"] = False
+            recovery["history_warmup"]["regime_reason"] = str(exc)
+            logging.warning("S18 startup regime warmup failed for %s: %s", self.symbol, exc)
+
+        try:
+            features = self.get_m1_policy_features()
+            recovery["history_warmup"]["m1_ok"] = True
+            recovery["history_warmup"]["m1_decision_time_utc"] = str(
+                features.get("m1_decision_time_utc") or ""
+            )
+        except Exception as exc:
+            recovery["history_warmup"]["m1_ok"] = False
+            recovery["history_warmup"]["m1_reason"] = str(exc)
+            logging.warning("S18 startup M1 warmup failed for %s: %s", self.symbol, exc)
+
+        after = {
+            "cycle_id": int(self.state.get("cycle_id", 0) or 0),
+            "positions": len(self.state.get("positions", [])),
+            "virtual_orders": len(self.state.get("virtual_orders", [])),
+            "sync_block_new_entries": bool(self.state.get("sync_block_new_entries", False)),
+            "reconciliation_required": isinstance(self.state.get("reconciliation_required"), dict),
+            "auto_tp_price": self.state.get("auto_tp_price"),
+        }
+        recovery["after"] = after
+        self.state["startup_state_reconciled_at_jst"] = jst_now().isoformat()
+        self.state["startup_state_recovery"] = recovery
+        logging.info(
+            "S18 startup state reconcile: symbol=%s status=%s before_pos=%s before_orders=%s "
+            "after_pos=%s after_orders=%s reason=%s",
+            self.symbol,
+            recovery["status"],
+            before["positions"],
+            before["virtual_orders"],
+            after["positions"],
+            after["virtual_orders"],
+            recovery["reason"],
+        )
+        return recovery
+
+    def cycle_scope(self) -> str:
+        if self.state.get("positions"):
+            return "active_positions"
+        if self.state.get("virtual_orders"):
+            return "armed_virtual_orders"
+        if self.state.get("grid_anchor") is not None or bool(self.state.get("restart_next_tick")):
+            return "flat_cycle_residue"
+        return "flat_outside_cycle"
+
+    def get_bot_owned_orders(self) -> list[Any] | None:
+        get_orders = getattr(self.executor, "get_orders", None)
+        if not callable(get_orders):
+            logging.error("EA bridge executor does not support read-only ORDERS checks")
+            return None
+        return get_orders(self.symbol, self.magic)
+
+    def live_flat_confirmed(self) -> tuple[bool | None, int | None, int | None]:
+        positions = self.executor.get_positions(self.symbol, self.magic)
+        if positions is None:
+            return None, None, None
+        orders = self.get_bot_owned_orders()
+        if orders is None:
+            return None, len(positions), None
+        return len(positions) == 0 and len(orders) == 0, len(positions), len(orders)
+
+    def startup_catchup_marker_time(self) -> datetime | None:
+        for key in (
+            "last_catchup_m1_decision_time_utc",
+            "last_cycle_start_policy_m1_decision_time_utc",
+        ):
+            parsed = parse_datetime_utc(self.state.get(key))
+            if parsed is not None:
+                return parsed
+        loaded_updated_at = parse_datetime_utc(getattr(self, "loaded_state_updated_at_jst", None))
+        if loaded_updated_at is not None:
+            return loaded_updated_at
+        parsed_updated_at = parse_datetime_utc(self.state.get("updated_at_jst"))
+        if parsed_updated_at is not None:
+            return parsed_updated_at
+        return None
+
+    def m1_decision_time_for_bar(self, index_value: Any) -> datetime:
+        return utc_datetime_from_bar_timestamp(pd.Timestamp(index_value) + pd.Timedelta(minutes=1))
+
+    def get_startup_catchup_m1(self) -> pd.DataFrame:
+        self.ensure_bridge()
+        max_replay = max(1, int(self.params.get("startup_catchup_max_m1_bars", 4320) or 4320))
+        warmup = max(20, int(self.params.get("m1_bars", 80) or 80))
+        request_bars = min(5000, warmup + max_replay + 2)
+        m1 = self.dm.get_historical_data(self.symbol, int(self.params["m1_timeframe"]), request_bars)
+        if m1 is None or len(m1) < 2:
+            raise ValueError("not enough M1 bars for startup catch-up")
+        m1 = m1.sort_index()
+        if bool(self.params.get("drop_latest_m1_bar", True)):
+            if len(m1) < 3:
+                raise ValueError("not enough M1 bars after dropping current bar for startup catch-up")
+            m1 = m1.iloc[:-1].copy()
+        return m1
+
+    def confirmed_flat_reset(self, reason: str, details: dict[str, Any] | None = None) -> bool:
+        live_flat, live_positions_count, live_orders_count = self.live_flat_confirmed()
+        if live_flat is not True:
+            self.set_reconciliation_required(
+                f"startup flat reset refused: {reason}",
+                {
+                    "reason": reason,
+                    "details": details or {},
+                    "live_positions_count": live_positions_count,
+                    "live_orders_count": live_orders_count,
+                },
+                reconciliation_type="startup_catchup_replay",
+            )
+            return False
+
+        old_cycle_id = int(self.state.get("cycle_id", 0) or 0)
+        last_policy_bar = self.state.get("last_cycle_start_policy_m1_decision_time_utc")
+        last_catchup_bar = self.state.get("last_catchup_m1_decision_time_utc")
+        reset_state = self.default_state()
+        reset_state["cycle_id"] = old_cycle_id
+        reset_state["last_cycle_start_policy_m1_decision_time_utc"] = last_policy_bar
+        reset_state["last_catchup_m1_decision_time_utc"] = last_catchup_bar
+        reset_state["startup_flat_reset"] = {
+            "reason": reason,
+            "details": details or {},
+            "old_cycle_id": old_cycle_id,
+            "live_positions_count": live_positions_count,
+            "live_orders_count": live_orders_count,
+            "created_at_jst": jst_now().isoformat(),
+        }
+        self.state = reset_state
+        logging.warning(
+            "S18 startup confirmed-flat reset: symbol=%s old_cycle=%s reason=%s",
+            self.symbol,
+            old_cycle_id,
+            reason,
+        )
+        return True
+
+    def virtual_order_crossed_in_bar(self, order: dict[str, Any], bar: pd.Series, spread_price: float) -> bool:
+        direction = direction_from_name(order["direction"])
+        entry = float(order["entry"])
+        if direction == LONG:
+            return float(bar["High"]) + spread_price >= entry - 1e-12
+        return float(bar["Low"]) <= entry + 1e-12
+
+    def auto_tp_crossed_in_bar(self, bar: pd.Series, spread_price: float) -> bool:
+        auto_tp = self.state.get("auto_tp_price")
+        if auto_tp is None or int(self.params["auto_tp_levels"]) < 1:
+            return False
+        level = int(self.state.get("long_count", 0)) - int(self.state.get("short_count", 0))
+        if level > 0:
+            return float(bar["High"]) >= float(auto_tp) - 1e-12
+        if level < 0:
+            low_reference = float(bar["Low"]) + spread_price if bool(self.params["short_auto_tp_uses_ask"]) else float(bar["Low"])
+            return low_reference <= float(auto_tp) + 1e-12
+        return False
+
+    def local_stop_crossed_in_bar(self, position: dict[str, Any], bar: pd.Series, spread_price: float) -> bool:
+        direction = direction_from_name(position["direction"])
+        stop_loss = float(position["stop_loss"])
+        if direction == LONG:
+            return float(bar["Low"]) <= stop_loss + 1e-12
+        return float(bar["High"]) + spread_price >= stop_loss - 1e-12
+
+    def apply_startup_missed_virtual_order_recovery(
+        self,
+        missed_orders: list[dict[str, Any]],
+        tick: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> None:
+        old_virtual_orders_count = len(self.state.get("virtual_orders", []))
+        missed_ids = {int(item.get("order_id", 0) or 0) for item in missed_orders}
+        disarmed = 0
+        for order in self.state.get("virtual_orders", []):
+            if int(order.get("order_id", 0) or 0) not in missed_ids:
+                self.refresh_virtual_order_arming(order, float(tick["bid"]), float(tick["ask"]))
+                continue
+            order["armed"] = False
+            order["disarmed_reason"] = "startup_catchup_missed_trigger_wait_recross"
+            order["last_disarmed_at_jst"] = jst_now().isoformat()
+            order["last_rearm_side"] = "trigger_side"
+            disarmed += 1
+        if not self.state.get("positions"):
+            self.clear_auto_tp()
+        self.state["last_break_even_refresh_epoch"] = None
+        self.state["post_sl_reanchor_after_epoch"] = None
+        self.state["restart_next_tick"] = False
+        self.state["last_flat_breakout_stale_skip"] = {
+            "type": "startup_catchup_missed_trigger_disarmed",
+            "missed_orders": missed_orders,
+            "old_virtual_orders_count": old_virtual_orders_count,
+            "virtual_orders_kept_count": len(self.state.get("virtual_orders", [])),
+            "disarmed_virtual_orders_count": disarmed,
+            "cycle_id": int(self.state.get("cycle_id", 0)),
+            "created_at_jst": jst_now().isoformat(),
+        }
+        self.state["last_flat_breakout_reanchor"] = self.state["last_flat_breakout_stale_skip"]
+        summary["actions"].append("disarmed_missed_virtual_orders_wait_recross")
+        logging.warning(
+            "S18 startup catch-up disarmed missed virtual orders until recross: "
+            "symbol=%s orders=%s kept=%s disarmed=%s",
+            self.symbol,
+            [item.get("order_id") for item in missed_orders],
+            len(self.state.get("virtual_orders", [])),
+            disarmed,
+        )
+
+    def startup_catch_up_replay(self, tick: dict[str, Any] | None = None) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "status": "not_started",
+            "reason": "",
+            "cycle_scope_before": self.cycle_scope(),
+            "cycle_scope_after": None,
+            "bars_seen": 0,
+            "bars_replayed": 0,
+            "missed_virtual_orders": [],
+            "missed_auto_tp_count": 0,
+            "missed_local_stop_count": 0,
+            "actions": [],
+            "created_at_jst": jst_now().isoformat(),
+        }
+        if not bool(self.params.get("startup_catchup_enabled", True)):
+            summary["status"] = "skipped"
+            summary["reason"] = "startup catch-up disabled"
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+        if tick is None:
+            tick = self.get_tick()
+        if tick is None:
+            summary["status"] = "deferred"
+            summary["reason"] = "startup tick unavailable"
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+        if self.state.get("sync_block_new_entries") or isinstance(self.state.get("reconciliation_required"), dict):
+            live_flat, live_positions_count, live_orders_count = self.live_flat_confirmed()
+            if live_flat is True:
+                if self.confirmed_flat_reset(
+                    "startup blocked state with confirmed flat MT5",
+                    {
+                        "sync_block_reason": self.state.get("sync_block_reason"),
+                        "reconciliation_required": self.state.get("reconciliation_required"),
+                    },
+                ):
+                    summary["status"] = "flat_reset"
+                    summary["reason"] = "blocked state reset after confirmed flat MT5"
+                else:
+                    summary["status"] = "blocked"
+                    summary["reason"] = "flat reset confirmation failed"
+            else:
+                summary["status"] = "blocked"
+                summary["reason"] = "startup sync/reconciliation block remains"
+                summary["live_positions_count"] = live_positions_count
+                summary["live_orders_count"] = live_orders_count
+            summary["cycle_scope_after"] = self.cycle_scope()
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+
+        marker = self.startup_catchup_marker_time()
+        try:
+            m1 = self.get_startup_catchup_m1()
+        except Exception as exc:
+            live_flat, live_positions_count, live_orders_count = self.live_flat_confirmed()
+            if self.cycle_scope() != "flat_outside_cycle" and live_flat is True:
+                if self.confirmed_flat_reset("startup catch-up history unavailable", {"error": str(exc)}):
+                    summary["status"] = "flat_reset"
+                    summary["reason"] = "history unavailable and MT5 confirmed flat"
+                else:
+                    summary["status"] = "blocked"
+                    summary["reason"] = "history unavailable and flat reset refused"
+            else:
+                summary["status"] = "blocked" if self.cycle_scope() != "flat_outside_cycle" else "skipped"
+                summary["reason"] = f"startup catch-up history unavailable: {exc}"
+                summary["live_positions_count"] = live_positions_count
+                summary["live_orders_count"] = live_orders_count
+            summary["cycle_scope_after"] = self.cycle_scope()
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+
+        summary["bars_seen"] = int(len(m1))
+        if m1.empty:
+            summary["status"] = "skipped"
+            summary["reason"] = "no closed M1 bars"
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+
+        earliest_decision_time = self.m1_decision_time_for_bar(m1.index[0])
+        latest_decision_time = self.m1_decision_time_for_bar(m1.index[-1])
+        summary["earliest_m1_decision_time_utc"] = earliest_decision_time.isoformat()
+        summary["latest_m1_decision_time_utc"] = latest_decision_time.isoformat()
+        summary["marker_time_utc"] = marker.isoformat() if marker is not None else ""
+
+        if marker is not None and marker < earliest_decision_time and self.cycle_scope() != "flat_outside_cycle":
+            live_flat, live_positions_count, live_orders_count = self.live_flat_confirmed()
+            if live_flat is True:
+                if self.confirmed_flat_reset(
+                    "startup catch-up marker older than available M1 history",
+                    {
+                        "marker_time_utc": marker.isoformat(),
+                        "earliest_m1_decision_time_utc": earliest_decision_time.isoformat(),
+                    },
+                ):
+                    summary["status"] = "flat_reset"
+                    summary["reason"] = "marker older than history and MT5 confirmed flat"
+                else:
+                    summary["status"] = "blocked"
+                    summary["reason"] = "marker older than history and flat reset refused"
+            else:
+                self.set_reconciliation_required(
+                    "startup catch-up history gap with live exposure",
+                    {
+                        "marker_time_utc": marker.isoformat(),
+                        "earliest_m1_decision_time_utc": earliest_decision_time.isoformat(),
+                        "live_positions_count": live_positions_count,
+                        "live_orders_count": live_orders_count,
+                    },
+                    reconciliation_type="startup_catchup_replay",
+                )
+                summary["status"] = "blocked"
+                summary["reason"] = "marker older than available M1 history with live exposure"
+            summary["cycle_scope_after"] = self.cycle_scope()
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+
+        if self.cycle_scope() == "flat_outside_cycle":
+            self.state["last_catchup_m1_decision_time_utc"] = latest_decision_time.isoformat()
+            self.state["last_cycle_start_policy_m1_decision_time_utc"] = latest_decision_time.isoformat()
+            summary["status"] = "skipped"
+            summary["reason"] = "flat outside cycle; no historical cycle start replay"
+            summary["cycle_scope_after"] = self.cycle_scope()
+            self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+            self.state["startup_catchup_replay"] = summary
+            return summary
+
+        spread_price = max(0.0, float(tick["ask"]) - float(tick["bid"]))
+        replayed = 0
+        last_processed: datetime | None = None
+        for bar_time, bar in m1.iterrows():
+            decision_time = self.m1_decision_time_for_bar(bar_time)
+            if marker is not None and decision_time <= marker:
+                continue
+            replayed += 1
+            last_processed = decision_time
+
+            if self.state.get("positions") and self.auto_tp_crossed_in_bar(bar, spread_price):
+                summary["missed_auto_tp_count"] = int(summary["missed_auto_tp_count"]) + 1
+            for position in list(self.state.get("positions", [])):
+                if self.local_stop_crossed_in_bar(position, bar, spread_price):
+                    summary["missed_local_stop_count"] = int(summary["missed_local_stop_count"]) + 1
+
+            missed_orders: list[dict[str, Any]] = []
+            for order in list(self.state.get("virtual_orders", [])):
+                if not self.virtual_order_crossed_in_bar(order, bar, spread_price):
+                    continue
+                missed_orders.append(
+                    {
+                        "order_id": int(order.get("order_id", 0) or 0),
+                        "direction": str(order.get("direction", "")),
+                        "entry": self.price(float(order.get("entry", 0.0) or 0.0)),
+                        "stop_loss": self.price(float(order.get("stop_loss", 0.0) or 0.0)),
+                        "m1_decision_time_utc": decision_time.isoformat(),
+                    }
+                )
+            if missed_orders:
+                summary["missed_virtual_orders"].extend(missed_orders)
+                self.apply_startup_missed_virtual_order_recovery(missed_orders, tick, summary)
+                break
+
+            replay_tick = {
+                "bid": float(bar["Close"]),
+                "ask": float(bar["Close"]) + spread_price,
+                "spread_points": float(tick["spread_points"]),
+                "info": tick.get("info"),
+            }
+            self.manage_orders_and_grid(replay_tick["bid"], replay_tick["ask"])
+
+        summary["bars_replayed"] = replayed
+        if last_processed is not None:
+            self.state["last_catchup_m1_decision_time_utc"] = last_processed.isoformat()
+            self.state["last_cycle_start_policy_m1_decision_time_utc"] = last_processed.isoformat()
+        else:
+            self.state["last_catchup_m1_decision_time_utc"] = latest_decision_time.isoformat()
+        if self.state.get("positions") and (
+            self.auto_tp_refresh_due() or self.state.get("auto_tp_price") is None or summary["actions"]
+        ):
+            self.refresh_auto_tp(float(tick["bid"]), float(tick["ask"]), tick.get("info"))
+
+        summary["status"] = "replayed" if replayed else "skipped"
+        summary["reason"] = "startup catch-up replay complete" if replayed else "no M1 bars after marker"
+        summary["cycle_scope_after"] = self.cycle_scope()
+        self.state["startup_catchup_replayed_at_jst"] = jst_now().isoformat()
+        self.state["startup_catchup_replay"] = summary
+        logging.info(
+            "S18 startup catch-up replay: symbol=%s status=%s bars=%s missed_orders=%s actions=%s",
+            self.symbol,
+            summary["status"],
+            replayed,
+            len(summary["missed_virtual_orders"]),
+            ",".join(summary["actions"]),
+        )
+        return summary
 
     def normalize_lot(self, info: Any) -> float:
         lot = float(self.params["lot"])
@@ -1166,7 +1666,78 @@ class S18SnowballBot:
             coverage[key] = coverage.get(key, 0) + 1
         return coverage
 
-    def add_virtual_order(self, direction: int, entry: float, stop_loss: float) -> None:
+    def virtual_order_on_rearm_side(self, order: dict[str, Any], bid: float, ask: float) -> bool:
+        direction = direction_from_name(order["direction"])
+        entry = float(order["entry"])
+        epsilon = 10 ** (-self.digits - 1)
+        if direction == LONG:
+            return float(ask) < entry - epsilon
+        return float(bid) > entry + epsilon
+
+    def virtual_order_on_trigger_side(self, order: dict[str, Any], bid: float, ask: float) -> bool:
+        direction = direction_from_name(order["direction"])
+        entry = float(order["entry"])
+        epsilon = 10 ** (-self.digits - 1)
+        if direction == LONG:
+            return float(ask) >= entry - epsilon
+        return float(bid) <= entry + epsilon
+
+    def initialize_virtual_order_arming(
+        self,
+        order: dict[str, Any],
+        bid: float | None = None,
+        ask: float | None = None,
+    ) -> None:
+        if bid is None or ask is None:
+            order.setdefault("armed", True)
+            return
+        armed = self.virtual_order_on_rearm_side(order, bid, ask)
+        order["armed"] = bool(armed)
+        order["last_rearm_side"] = "ready" if armed else "trigger_side"
+        if not armed:
+            order["disarmed_reason"] = "created_on_trigger_side"
+
+    def refresh_virtual_order_arming(self, order: dict[str, Any], bid: float, ask: float) -> None:
+        if "armed" not in order:
+            self.initialize_virtual_order_arming(order, bid, ask)
+            return
+        if bool(order.get("armed", True)):
+            return
+        if not self.virtual_order_on_rearm_side(order, bid, ask):
+            return
+        order["armed"] = True
+        order["last_rearmed_at_jst"] = jst_now().isoformat()
+        order["last_rearm_side"] = "ready"
+        order.pop("disarmed_reason", None)
+
+    def disarm_triggered_virtual_orders(self, bid: float, ask: float, reason: str) -> int:
+        disarmed = 0
+        for order in self.state["virtual_orders"]:
+            if not self.virtual_order_on_trigger_side(order, bid, ask):
+                self.refresh_virtual_order_arming(order, bid, ask)
+                continue
+            if bool(order.get("armed", True)):
+                disarmed += 1
+            order["armed"] = False
+            order["disarmed_reason"] = reason
+            order["last_disarmed_at_jst"] = jst_now().isoformat()
+            order["last_rearm_side"] = "trigger_side"
+        return disarmed
+
+    def virtual_order_crossed(self, order: dict[str, Any], bid: float, ask: float) -> bool:
+        self.refresh_virtual_order_arming(order, bid, ask)
+        if not bool(order.get("armed", True)):
+            return False
+        return self.virtual_order_on_trigger_side(order, bid, ask)
+
+    def add_virtual_order(
+        self,
+        direction: int,
+        entry: float,
+        stop_loss: float,
+        bid: float | None = None,
+        ask: float | None = None,
+    ) -> None:
         if len(self.state["virtual_orders"]) >= int(self.params["max_virtual_orders"]):
             self.block_new_entries("max virtual orders reached")
             return
@@ -1183,18 +1754,19 @@ class S18SnowballBot:
             "crossed_while_spread_blocked": False,
             "created_at_jst": jst_now().isoformat(),
         }
+        self.initialize_virtual_order_arming(order, bid, ask)
         self.state["next_order_id"] = int(self.state["next_order_id"]) + 1
         self.state["virtual_orders"].append(order)
 
-    def ensure_orders(self, direction: int) -> None:
+    def ensure_orders(self, direction: int, bid: float | None = None, ask: float | None = None) -> None:
         anchor = float(self.state["grid_anchor"])
         distance = self.distance_price
         if direction == LONG:
-            self.add_virtual_order(LONG, anchor + distance, anchor)
-            self.add_virtual_order(LONG, anchor + 2.0 * distance, anchor + distance)
+            self.add_virtual_order(LONG, anchor + distance, anchor, bid, ask)
+            self.add_virtual_order(LONG, anchor + 2.0 * distance, anchor + distance, bid, ask)
         else:
-            self.add_virtual_order(SHORT, anchor - distance, anchor)
-            self.add_virtual_order(SHORT, anchor - 2.0 * distance, anchor - distance)
+            self.add_virtual_order(SHORT, anchor - distance, anchor, bid, ask)
+            self.add_virtual_order(SHORT, anchor - 2.0 * distance, anchor - distance, bid, ask)
 
     def start_cycle(self, bid: float) -> None:
         if self.state["positions"] or self.state["virtual_orders"]:
@@ -1282,9 +1854,6 @@ class S18SnowballBot:
         self.state["auto_tp_price"] = None
         self.state["estimated_auto_tp_profit_usd"] = 0.0
 
-    def post_sl_reanchor_cooldown(self) -> float:
-        return max(0.0, float(self.params.get("post_sl_reanchor_cooldown_seconds", 30.0) or 0.0))
-
     def post_sl_reanchor_block_reason(self) -> str | None:
         retry_after = self.state.get("post_sl_reanchor_after_epoch")
         if retry_after is None:
@@ -1293,74 +1862,88 @@ class S18SnowballBot:
         if remaining <= 0.0:
             self.state["post_sl_reanchor_after_epoch"] = None
             return None
-        return f"post_sl_reanchor_cooldown remaining_seconds={remaining:.1f}"
+        return f"legacy_post_sl_reanchor_cooldown remaining_seconds={remaining:.1f}"
 
-    def prepare_post_sl_reanchor(
+    def prepare_post_sl_cycle_rearm(
         self,
         ticket: int,
         direction: str,
         exit_price: float,
         pnl: float,
         reason: str,
+        bid: float | None = None,
+        ask: float | None = None,
     ) -> bool:
         remaining_positions_count = len(self.state["positions"])
         old_virtual_orders_count = len(self.state["virtual_orders"])
-        cooldown = self.post_sl_reanchor_cooldown()
-        retry_after = time.time() + cooldown if cooldown > 0.0 else None
-        self.clear_virtual_orders()
-        self.clear_auto_tp()
+        disarmed_virtual_orders_count = 0
         if remaining_positions_count == 0:
-            self.state["grid_anchor"] = None
-            self.state["restart_next_tick"] = True
+            self.clear_auto_tp()
+            if bid is not None and ask is not None:
+                disarmed_virtual_orders_count = self.disarm_triggered_virtual_orders(
+                    float(bid),
+                    float(ask),
+                    "post_sl_flat_trigger_side_wait_recross",
+                )
+        else:
+            for order in self.state["virtual_orders"]:
+                if bid is not None and ask is not None:
+                    self.refresh_virtual_order_arming(order, float(bid), float(ask))
+        if remaining_positions_count == 0:
+            self.state["restart_next_tick"] = False
         self.state["last_break_even_refresh_epoch"] = None
-        self.state["post_sl_reanchor_after_epoch"] = retry_after
+        self.state["post_sl_reanchor_after_epoch"] = None
         self.state["market_open_retry_after_epoch"] = None
         self.state["last_market_open_failure"] = None
         self.reset_autotrading_reject_state()
         self.state["last_post_sl_reanchor"] = {
-            "type": "post_sl_reanchor" if remaining_positions_count == 0 else "post_sl_entry_cooldown",
+            "type": "post_sl_cycle_rearm" if remaining_positions_count == 0 else "post_sl_cycle_continue",
             "ticket": int(ticket),
             "direction": str(direction),
             "exit_price": self.price(float(exit_price)),
             "pnl": float(pnl),
             "reason": reason,
             "old_virtual_orders_count": old_virtual_orders_count,
+            "virtual_orders_kept_count": len(self.state["virtual_orders"]),
+            "disarmed_virtual_orders_count": disarmed_virtual_orders_count,
             "remaining_positions_count": remaining_positions_count,
-            "cooldown_seconds": cooldown,
-            "retry_after_epoch": retry_after,
             "cycle_id": int(self.state.get("cycle_id", 0)),
             "created_at_jst": jst_now().isoformat(),
         }
         if remaining_positions_count == 0:
             logging.warning(
-                "S18 post-SL breakout reanchor prepared: symbol=%s ticket=%s direction=%s "
-                "exit=%.5f pnl=%.2f old_virtual_orders=%s cooldown=%.1fs",
+                "S18 post-SL cycle rearm prepared: symbol=%s ticket=%s direction=%s "
+                "exit=%.5f pnl=%.2f virtual_orders_kept=%s disarmed=%s",
                 self.symbol,
                 int(ticket),
                 str(direction),
                 self.price(float(exit_price)),
                 float(pnl),
-                old_virtual_orders_count,
-                cooldown,
+                len(self.state["virtual_orders"]),
+                disarmed_virtual_orders_count,
             )
         else:
             logging.warning(
-                "S18 post-SL entry cooldown prepared: symbol=%s ticket=%s direction=%s "
-                "exit=%.5f pnl=%.2f remaining_positions=%s old_virtual_orders=%s cooldown=%.1fs",
+                "S18 post-SL cycle continue prepared: symbol=%s ticket=%s direction=%s "
+                "exit=%.5f pnl=%.2f remaining_positions=%s virtual_orders_kept=%s",
                 self.symbol,
                 int(ticket),
                 str(direction),
                 self.price(float(exit_price)),
                 float(pnl),
                 remaining_positions_count,
-                old_virtual_orders_count,
-                cooldown,
+                len(self.state["virtual_orders"]),
             )
         return True
 
-    def set_reconciliation_required(self, reason: str, details: dict[str, Any]) -> None:
+    def set_reconciliation_required(
+        self,
+        reason: str,
+        details: dict[str, Any],
+        reconciliation_type: str = "market_open_result",
+    ) -> None:
         self.state["reconciliation_required"] = {
-            "type": "market_open_result",
+            "type": reconciliation_type,
             "symbol": self.symbol,
             "magic": self.magic,
             "cycle_id": int(self.state.get("cycle_id", 0)),
@@ -1514,7 +2097,7 @@ class S18SnowballBot:
             return max(0.0, (requested_entry - source_entry) / self.pip_size)
         return max(0.0, (source_entry - requested_entry) / self.pip_size)
 
-    def prepare_flat_breakout_reanchor_if_stale(
+    def suppress_flat_breakout_fill_if_stale(
         self,
         order: dict[str, Any],
         tick: dict[str, Any],
@@ -1535,16 +2118,12 @@ class S18SnowballBot:
         direction = direction_from_name(order["direction"])
         requested_entry = self.price(float(tick["ask"] if direction == LONG else tick["bid"]))
 
-        self.clear_virtual_orders()
-        self.clear_auto_tp()
-        self.state["grid_anchor"] = None
-        self.state["last_break_even_refresh_epoch"] = None
-        self.state["restart_next_tick"] = True
-        self.state["market_open_retry_after_epoch"] = None
-        self.state["last_market_open_failure"] = None
-        self.reset_autotrading_reject_state()
-        self.state["last_flat_breakout_reanchor"] = {
-            "type": "flat_breakout_reanchor",
+        order["armed"] = False
+        order["disarmed_reason"] = reason
+        order["last_disarmed_at_jst"] = jst_now().isoformat()
+        order["last_rearm_side"] = "trigger_side"
+        self.state["last_flat_breakout_stale_skip"] = {
+            "type": "flat_breakout_stale_fill_suppressed",
             "order_id": int(order.get("order_id", 0) or 0),
             "direction": direction_name(direction),
             "source_entry": source_entry,
@@ -1557,8 +2136,9 @@ class S18SnowballBot:
             "cycle_id": int(self.state.get("cycle_id", 0)),
             "created_at_jst": jst_now().isoformat(),
         }
+        self.state["last_flat_breakout_reanchor"] = self.state["last_flat_breakout_stale_skip"]
         logging.warning(
-            "S18 stale flat breakout trigger reanchor prepared: symbol=%s order_id=%s direction=%s "
+            "S18 stale flat breakout fill suppressed until recross: symbol=%s order_id=%s direction=%s "
             "source_entry=%.5f requested_entry=%.5f drift_pips=%.1f max_drift_pips=%.1f "
             "old_virtual_orders=%s reason=%s",
             self.symbol,
@@ -2192,12 +2772,14 @@ class S18SnowballBot:
                     logging.warning(
                         f"Ticket {ticket} is absent on MT5; assumed server-side SL at {exit_price}, pnl={pnl:.2f}"
                     )
-                    self.prepare_post_sl_reanchor(
+                    self.prepare_post_sl_cycle_rearm(
                         ticket,
                         str(position.get("direction", "")),
                         exit_price,
                         pnl,
                         "position_missing_on_mt5_assumed_server_sl",
+                        float(tick["bid"]),
+                        float(tick["ask"]),
                     )
                     continue
                 self.block_new_entries(f"state ticket missing on MT5: {ticket}")
@@ -2255,12 +2837,14 @@ class S18SnowballBot:
                 )
                 logging.info(f"SL close ticket={ticket} pnl={pnl:.2f}")
                 closed += 1
-                self.prepare_post_sl_reanchor(
+                self.prepare_post_sl_cycle_rearm(
                     ticket,
                     str(position.get("direction", "")),
                     close_price,
                     pnl,
                     "local_stop_crossed",
+                    float(bid),
+                    float(ask),
                 )
             else:
                 status = getattr(result, "status", "UNKNOWN")
@@ -2322,7 +2906,7 @@ class S18SnowballBot:
         if post_sl_block is not None:
             now = time.time()
             if now - self.last_post_sl_reanchor_log_epoch >= float(self.params["status_log_interval_seconds"]):
-                logging.warning("S18 post-SL virtual-order fill is temporarily blocked: %s", post_sl_block)
+                logging.warning("S18 legacy post-SL cooldown blocks virtual-order fill: %s", post_sl_block)
                 self.last_post_sl_reanchor_log_epoch = now
             return 0
         retry_block = self.market_open_retry_block_reason()
@@ -2335,9 +2919,7 @@ class S18SnowballBot:
         if tick["spread_points"] > float(self.params["max_entry_spread_points"]) + 1e-9:
             for order in self.state["virtual_orders"]:
                 direction = direction_from_name(order["direction"])
-                crossed = (direction == LONG and tick["ask"] >= float(order["entry"])) or (
-                    direction == SHORT and tick["bid"] <= float(order["entry"])
-                )
+                crossed = self.virtual_order_crossed(order, tick["bid"], tick["ask"])
                 if crossed:
                     order["crossed_while_spread_blocked"] = True
             return 0
@@ -2348,10 +2930,17 @@ class S18SnowballBot:
                 [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
                 key=lambda item: float(item["entry"]),
             )
-            order = buy_orders[0] if buy_orders and float(buy_orders[0]["entry"]) <= tick["ask"] + 1e-12 else None
+            order = next(
+                (
+                    candidate
+                    for candidate in buy_orders
+                    if self.virtual_order_crossed(candidate, tick["bid"], tick["ask"])
+                ),
+                None,
+            )
             if order is None or not self.virtual_order_fill_allowed(order, tick["bid"], tick["ask"], regime):
                 break
-            if self.prepare_flat_breakout_reanchor_if_stale(
+            if self.suppress_flat_breakout_fill_if_stale(
                 order,
                 tick,
                 "flat_long_breakout_entry_drift_exceeded",
@@ -2367,10 +2956,17 @@ class S18SnowballBot:
                 key=lambda item: float(item["entry"]),
                 reverse=True,
             )
-            order = sell_orders[0] if sell_orders and float(sell_orders[0]["entry"]) >= tick["bid"] - 1e-12 else None
+            order = next(
+                (
+                    candidate
+                    for candidate in sell_orders
+                    if self.virtual_order_crossed(candidate, tick["bid"], tick["ask"])
+                ),
+                None,
+            )
             if order is None or not self.virtual_order_fill_allowed(order, tick["bid"], tick["ask"], regime):
                 break
-            if self.prepare_flat_breakout_reanchor_if_stale(
+            if self.suppress_flat_breakout_fill_if_stale(
                 order,
                 tick,
                 "flat_short_breakout_entry_drift_exceeded",
@@ -2461,12 +3057,12 @@ class S18SnowballBot:
             return
         level = int(self.state.get("long_count", 0)) - int(self.state.get("short_count", 0))
         if level == 0:
-            self.ensure_orders(LONG)
-            self.ensure_orders(SHORT)
+            self.ensure_orders(LONG, bid, ask)
+            self.ensure_orders(SHORT, bid, ask)
         elif level > 0:
-            self.ensure_orders(LONG)
+            self.ensure_orders(LONG, bid, ask)
         else:
-            self.ensure_orders(SHORT)
+            self.ensure_orders(SHORT, bid, ask)
 
         anchor = float(self.state["grid_anchor"])
         distance = self.distance_price
@@ -2703,7 +3299,7 @@ class S18SnowballBot:
             if post_sl_block is not None:
                 now = time.time()
                 if now - self.last_post_sl_reanchor_log_epoch >= float(self.params["status_log_interval_seconds"]):
-                    logging.warning("S18 post-SL reanchor is temporarily blocked: %s", post_sl_block)
+                    logging.warning("S18 legacy post-SL cooldown is temporarily blocked: %s", post_sl_block)
                     self.last_post_sl_reanchor_log_epoch = now
                 self.log_status(tick, regime)
                 self.save_state()
@@ -2786,6 +3382,9 @@ class S18SnowballBot:
             raise RuntimeError("State persistence is unavailable") from exc
         if not self.connect():
             raise RuntimeError("Failed to connect to MT5 EA bridge")
+        self.startup_reconcile_state()
+        self.startup_catch_up_replay()
+        self.save_state()
         if not live_trading_enabled:
             logging.warning("S18 shadow forward mode: bridge connected, policy decisions logged, no orders")
         logging.info(
@@ -2793,6 +3392,7 @@ class S18SnowballBot:
             f"symbol={self.symbol} magic={self.magic} lot={self.params['lot']} "
             f"distance={self.params['distance_pips']} inactive_add={self.params['inactive_add_distance_pips']}"
         )
+        log_runtime_identity(self.params)
         logging.info("S18 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         while True:
             try:
@@ -3102,6 +3702,7 @@ class S18SnowballBot:
                 self.error = error
                 self.create_position_after_error = create_position_after_error
                 self.positions: list[FakePosition] = []
+                self.orders: list[Any] = []
                 self.open_calls = 0
                 self.position_ticket = 900001
                 self.open_requests: list[dict[str, Any]] = []
@@ -3155,6 +3756,13 @@ class S18SnowballBot:
                     if position.symbol == symbol and int(position.magic) == int(magic)
                 ]
 
+            def get_orders(self, symbol: str, magic: int) -> list[Any]:
+                return [
+                    order
+                    for order in self.orders
+                    if getattr(order, "symbol", symbol) == symbol and int(getattr(order, "magic", magic)) == int(magic)
+                ]
+
             def get_position(self, ticket: int) -> FakePosition | None:
                 for position in self.positions:
                     if int(position.ticket) == int(ticket):
@@ -3193,6 +3801,120 @@ class S18SnowballBot:
                 del symbol, magic
                 return None
 
+        original_get_tick_for_startup = self.get_tick
+        original_get_regime_for_startup = self.get_regime
+        original_get_m1_policy_features_for_startup = self.get_m1_policy_features
+        original_log_trade_csv_for_startup = self.log_trade_csv
+        try:
+            self.state = self.default_state()
+            self.log_trade_csv = lambda *args, **kwargs: True  # type: ignore[method-assign]
+            startup_executor = FakeExecutor("OK")
+            startup_comment = f"{self.sanitized_comment_prefix()}_7_3"
+            startup_executor.positions = [
+                FakePosition(
+                    820001,
+                    self.symbol,
+                    self.magic,
+                    "LONG",
+                    0.01,
+                    1.25050,
+                    1.25000,
+                    startup_comment,
+                )
+            ]
+            self.executor = startup_executor
+            self.get_tick = lambda: {  # type: ignore[method-assign]
+                "bid": 1.25043,
+                "ask": 1.25050,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            self.get_regime = lambda: {"reason": "ok", "entry_allowed": True, "signal_fresh": True}  # type: ignore[method-assign]
+            self.get_m1_policy_features = lambda: {  # type: ignore[method-assign]
+                "m1_decision_time_utc": "2026-07-16T00:01:00+00:00"
+            }
+            startup_recovery = self.startup_reconcile_state()
+            assert startup_recovery["status"] == "reconciled", startup_recovery
+            assert len(self.state["positions"]) == 1
+            assert int(self.state["positions"][0]["ticket"]) == 820001
+            assert self.state["positions"][0]["recovered_from_live"] is True
+            assert self.state["startup_state_recovery"]["after"]["positions"] == 1
+            assert self.state["startup_state_recovery"]["history_warmup"]["m1_ok"] is True
+        finally:
+            self.get_tick = original_get_tick_for_startup  # type: ignore[method-assign]
+            self.get_regime = original_get_regime_for_startup  # type: ignore[method-assign]
+            self.get_m1_policy_features = original_get_m1_policy_features_for_startup  # type: ignore[method-assign]
+            self.log_trade_csv = original_log_trade_csv_for_startup  # type: ignore[method-assign]
+
+        class FakeCatchupDataManager:
+            def get_historical_data(self, mt5_symbol: str, timeframe: int, num_bars: int) -> pd.DataFrame:
+                del mt5_symbol, timeframe, num_bars
+                index = pd.date_range(pd.Timestamp("2026-07-16 00:00:00"), periods=6, freq="min")
+                close = pd.Series([1.25000, 1.25010, 1.25018, 1.25020, 1.25022, 1.25024], index=index)
+                high = close.copy()
+                high.iloc[2] = 1.25045
+                return pd.DataFrame(
+                    {
+                        "Open": close,
+                        "High": high,
+                        "Low": close - 0.00005,
+                        "Close": close,
+                        "Volume": 100,
+                    },
+                    index=index,
+                )
+
+        original_dm_for_catchup = self.dm
+        original_executor_for_catchup = self.executor
+        try:
+            self.dm = FakeCatchupDataManager()  # type: ignore[assignment]
+            self.executor = FakeExecutor("OK")
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            self.state["last_cycle_start_policy_m1_decision_time_utc"] = "2026-07-16T00:01:00+00:00"
+            catchup_tick = {
+                "bid": 1.25013,
+                "ask": 1.25020,
+                "spread_points": 7.0,
+                "info": FakeInfo(),
+            }
+            catchup = self.startup_catch_up_replay(catchup_tick)
+            assert catchup["status"] == "replayed", catchup
+            assert catchup["missed_virtual_orders"], catchup
+            assert len(self.state["positions"]) == 0
+            assert len(self.state["virtual_orders"]) == 4
+            assert not bool(self.state["restart_next_tick"])
+            assert self.state["post_sl_reanchor_after_epoch"] is None
+            assert any(not bool(order.get("armed", True)) for order in self.state["virtual_orders"])
+
+            self.state = self.default_state()
+            self.start_cycle(1.25000)
+            self.state["last_cycle_start_policy_m1_decision_time_utc"] = "2026-07-16T00:01:00+00:00"
+            self.state["positions"] = [
+                {
+                    "ticket": 820002,
+                    "symbol": self.symbol,
+                    "magic": self.magic,
+                    "direction": "LONG",
+                    "entry": 1.25050,
+                    "stop_loss": 1.25000,
+                    "volume": 0.01,
+                    "source_order_id": 1,
+                    "comment": f"{self.sanitized_comment_prefix()}_1_1",
+                }
+            ]
+            self.recalculate_position_counts()
+            active_catchup = self.startup_catch_up_replay(catchup_tick)
+            assert active_catchup["status"] == "replayed", active_catchup
+            assert active_catchup["missed_virtual_orders"], active_catchup
+            assert len(self.state["positions"]) == 1
+            assert len(self.state["virtual_orders"]) == 4
+            assert self.state["grid_anchor"] == self.price(1.25000)
+            assert any(not bool(order.get("armed", True)) for order in self.state["virtual_orders"])
+        finally:
+            self.dm = original_dm_for_catchup
+            self.executor = original_executor_for_catchup
+
         original_log_trade_csv = self.log_trade_csv
         trade_events: list[tuple[str, int, dict[str, Any]]] = []
 
@@ -3219,6 +3941,9 @@ class S18SnowballBot:
             try:
                 self.state = self.default_state()
                 self.start_cycle(1.25000)
+                self.state["virtual_orders"] = [
+                    order for order in self.state["virtual_orders"] if int(order["order_id"]) != 1
+                ]
                 self.state["positions"] = [
                     {
                         "ticket": 800001,
@@ -3239,21 +3964,39 @@ class S18SnowballBot:
                 self.save_state = lambda: None  # type: ignore[method-assign]
                 self.run_once()
                 assert len(self.state["positions"]) == 0
-                assert len(self.state["virtual_orders"]) == 0
-                assert bool(self.state["restart_next_tick"])
-                assert self.state["post_sl_reanchor_after_epoch"] is not None
+                assert len(self.state["virtual_orders"]) == 4
+                assert not bool(self.state["restart_next_tick"])
+                assert self.state["post_sl_reanchor_after_epoch"] is None
+                assert self.state["last_post_sl_reanchor"]["type"] == "post_sl_cycle_rearm"
                 assert post_sl_executor.open_calls == 0
-                self.state["post_sl_reanchor_after_epoch"] = time.time() - 1.0
                 self.run_once()
-                assert int(self.state["cycle_id"]) == 2
+                assert int(self.state["cycle_id"]) == 1
                 assert not self.state["restart_next_tick"]
-                assert self.state["grid_anchor"] == self.price(market_tick["bid"])
+                assert self.state["grid_anchor"] == self.price(1.25050)
                 next_long_order = min(
                     [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
                     key=lambda item: item["entry"],
                 )
-                assert next_long_order["entry"] == self.price(market_tick["bid"] + self.distance_price)
+                assert next_long_order["entry"] == self.price(1.25000 + self.distance_price)
+                assert not bool(next_long_order.get("armed", True))
                 assert post_sl_executor.open_calls == 0
+                below_rearm_tick = {
+                    "bid": 1.25033,
+                    "ask": 1.25040,
+                    "spread_points": 7.0,
+                    "info": FakeInfo(),
+                }
+                self.get_tick = lambda: below_rearm_tick  # type: ignore[method-assign]
+                self.run_once()
+                next_long_order = min(
+                    [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                    key=lambda item: item["entry"],
+                )
+                assert bool(next_long_order.get("armed", False))
+                assert post_sl_executor.open_calls == 0
+                self.get_tick = lambda: market_tick  # type: ignore[method-assign]
+                self.run_once()
+                assert post_sl_executor.open_calls == 1
             finally:
                 self.get_tick = original_get_tick  # type: ignore[method-assign]
                 self.get_regime = original_get_regime  # type: ignore[method-assign]
@@ -3263,6 +4006,7 @@ class S18SnowballBot:
             self.params["live_trading_enabled"] = True
             self.state = self.default_state()
             self.start_cycle(1.25000)
+            self.state["virtual_orders"] = []
             self.state["positions"] = [
                 {
                     "ticket": 800005,
@@ -3302,11 +4046,11 @@ class S18SnowballBot:
             assert len(self.state["positions"]) == 1
             assert int(self.state["positions"][0]["ticket"]) == 800006
             assert len(self.state["virtual_orders"]) == 0
-            assert self.state["post_sl_reanchor_after_epoch"] is not None
-            assert self.state["last_post_sl_reanchor"]["type"] == "post_sl_entry_cooldown"
+            assert self.state["post_sl_reanchor_after_epoch"] is None
+            assert self.state["last_post_sl_reanchor"]["type"] == "post_sl_cycle_continue"
             assert self.fill_virtual_orders(market_tick, market_regime) == 0
             self.manage_orders_and_grid(market_tick["bid"], market_tick["ask"])
-            assert len(self.state["virtual_orders"]) == 0
+            assert len(self.state["virtual_orders"]) == 2
             assert partial_sl_executor.open_calls == 0
 
             self.state = self.default_state()
@@ -3387,10 +4131,16 @@ class S18SnowballBot:
             self.executor = flat_stale_executor
             assert self.fill_virtual_orders(flat_stale_tick, market_regime) == 0
             assert flat_stale_executor.open_calls == 0
-            assert len(self.state["virtual_orders"]) == 0
-            assert bool(self.state["restart_next_tick"])
-            assert self.state["last_flat_breakout_reanchor"]["reason"] == "flat_long_breakout_entry_drift_exceeded"
-            assert self.state["last_flat_breakout_reanchor"]["drift_pips"] == 30.0
+            assert len(self.state["virtual_orders"]) == 4
+            assert not bool(self.state["restart_next_tick"])
+            assert self.state["last_flat_breakout_stale_skip"]["reason"] == "flat_long_breakout_entry_drift_exceeded"
+            assert self.state["last_flat_breakout_stale_skip"]["drift_pips"] == 30.0
+            assert not bool(
+                min(
+                    [o for o in self.state["virtual_orders"] if o["direction"] == "LONG"],
+                    key=lambda item: item["entry"],
+                ).get("armed", True)
+            )
 
             self.state = self.default_state()
             self.start_cycle(1.25000)
@@ -3413,7 +4163,7 @@ class S18SnowballBot:
             assert len(self.state["positions"]) == 0
             assert not self.state["sync_block_new_entries"]
             assert self.state["sync_block_reason"] is None
-            assert self.state["post_sl_reanchor_after_epoch"] is not None
+            assert self.state["post_sl_reanchor_after_epoch"] is None
 
             self.state = self.default_state()
             self.state["cycle_id"] = 2
@@ -3830,10 +4580,70 @@ class S18V2BasketRunner:
 
     def self_test(self, include_policy: bool = False) -> None:
         for bot in self.bots:
-            bot.self_test()
+            original_policy = bot.policy
+            original_policy_enabled = bot.params.get("policy_enabled")
+            bot.policy = None
+            bot.params["policy_enabled"] = False
+            try:
+                bot.self_test()
+            finally:
+                bot.policy = original_policy
+                bot.params["policy_enabled"] = original_policy_enabled
         if include_policy and self.policy is not None:
             self.policy.self_test()
         logging.info("s18 basket self-test passed symbols=%s", [bot.symbol for bot in self.bots])
+
+    def bridge_state_check(self) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        for bot in self.bots:
+            snapshot: dict[str, Any] = {
+                "symbol": bot.symbol,
+                "magic": bot.magic,
+                "connected": False,
+                "positions_count": None,
+                "position_tickets": [],
+                "orders_count": None,
+                "order_tickets": [],
+                "m1_rows": None,
+                "h1_rows": None,
+                "bid": None,
+                "ask": None,
+                "error": "",
+            }
+            try:
+                if not bot.connect():
+                    snapshot["error"] = "connect_failed"
+                    snapshots.append(snapshot)
+                    print(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+                    continue
+                snapshot["connected"] = True
+                info = bot.executor.get_symbol_info(bot.symbol)
+                if info is not None:
+                    snapshot["bid"] = float(getattr(info, "bid", 0.0) or 0.0)
+                    snapshot["ask"] = float(getattr(info, "ask", 0.0) or 0.0)
+                positions = bot.executor.get_positions(bot.symbol, bot.magic)
+                if positions is None:
+                    snapshot["error"] = "positions_failed"
+                else:
+                    snapshot["positions_count"] = len(positions)
+                    snapshot["position_tickets"] = [int(getattr(position, "ticket")) for position in positions]
+                get_orders = getattr(bot.executor, "get_orders", None)
+                if callable(get_orders):
+                    orders = get_orders(bot.symbol, bot.magic)
+                    if orders is None:
+                        snapshot["error"] = "orders_failed"
+                    else:
+                        snapshot["orders_count"] = len(orders)
+                        snapshot["order_tickets"] = [int(getattr(order, "ticket")) for order in orders]
+                m1 = bot.dm.get_historical_data(bot.symbol, int(bot.params["m1_timeframe"]), 5)
+                h1 = bot.dm.get_historical_data(bot.symbol, int(bot.params["regime_timeframe"]), 5)
+                snapshot["m1_rows"] = None if m1 is None else int(len(m1))
+                snapshot["h1_rows"] = None if h1 is None else int(len(h1))
+            except Exception as exc:
+                snapshot["error"] = str(exc)
+            snapshots.append(snapshot)
+            print(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+        return snapshots
 
     def run_forever(self) -> None:
         if not bool(self.raw_params.get("enabled", True)):
@@ -3857,6 +4667,9 @@ class S18V2BasketRunner:
                 raise RuntimeError(f"State persistence is unavailable for {bot.symbol}") from exc
             if not bot.connect():
                 raise RuntimeError(f"Failed to connect to MT5 EA bridge for {bot.symbol}")
+            bot.startup_reconcile_state()
+            bot.startup_catch_up_replay()
+            bot.save_state()
         if not live_trading_enabled:
             logging.warning("S18 basket shadow forward mode: policy decisions logged, no orders")
         logging.info(
@@ -3865,6 +4678,7 @@ class S18V2BasketRunner:
             live_trading_enabled,
             shadow_forward_enabled,
         )
+        log_runtime_identity(self.raw_params, label="S18 basket")
         logging.info("S18 source revision: revision=%s file=%s", BOT_SOURCE_REVISION, __file__)
         sleep_seconds = min(float(bot.params["poll_interval_seconds"]) for bot in self.bots)
         while True:
@@ -3882,13 +4696,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="S18 basket Snowball event-filter live/shadow bot")
     parser.add_argument("--self-test", action="store_true", help="run pure logic checks without bridge connection")
     parser.add_argument("--policy-self-test", action="store_true", help="also load frozen ML artifacts and test predict")
+    parser.add_argument("--bridge-state-check", action="store_true", help="read-only EA bridge info/position/history check")
     args = parser.parse_args()
-    configure_logging(file_enabled=not bool(args.self_test))
+    configure_logging(file_enabled=not bool(args.self_test or args.bridge_state_check))
     raw_params = load_params()
-    if args.self_test and not args.policy_self_test:
+    if (args.self_test and not args.policy_self_test) or args.bridge_state_check:
         raw_params = raw_params.copy()
         raw_params["policy_enabled"] = False
     runner = S18V2BasketRunner(raw_params)
+    if args.bridge_state_check:
+        runner.bridge_state_check()
+        return 0
     if args.self_test:
         runner.self_test(include_policy=bool(args.policy_self_test))
         return 0

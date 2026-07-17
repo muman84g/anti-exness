@@ -43,6 +43,19 @@ The top-level `lot` remains `0.01` as a fallback; live profiles use each profile
 
 `s18_decision_snapshots.csv` is for backtest/live reproducibility checks. It logs one detailed row per closed-M1 cycle-start policy decision while flat, including the M1 decision time, live tick Bid/Ask, effective spread, selected H1/M1 features, model output, threshold, and whether the bot blocked, shadow-allowed, or started a cycle. Duplicate polls inside the same M1 decision bar are skipped. Actual market-entry drift from the virtual trigger is recorded in `s18_trades.csv` as `source_entry`, requested/filled entry, and `source_drift_pips`.
 
+## Startup state recovery
+
+On startup, `live_s18_bot.py` reconciles local state with MT5 before normal entry processing.
+
+- It reads the current tick, bot-owned live positions, H1 regime history, and closed-M1 policy features before entering the main loop.
+- Bot-owned exposure is identified by profile `symbol` + `magic` plus ticket/comment/SL evidence. This is safe for accounts where bot18 and other bots share the same MT5 account.
+- If MT5 still has bot-owned live positions that are missing from local state, the existing sync/adoption path restores them into state before a new cycle can start.
+- After reconciliation, startup catch-up reads up to `startup_catchup_max_m1_bars` closed M1 bars from the last processed/cycle-start decision bar and advances local virtual state without sending orders. If a virtual trigger was crossed while the bot was offline and MT5 has no matching bot-owned position, the bot does not create a historical fill. It keeps the current cycle and virtual trigger set, disarms the missed trigger, and waits for a fresh recross before sending a market order.
+- If local state is blocked or too old to replay, bot18 confirms bot-owned `POSITIONS` and `ORDERS` are both flat before doing a flat reset. If bot-owned exposure exists or the read-only checks fail, it stays fail-closed with `reconciliation_required`.
+- This is not a historical trade replay. If local state is lost and MT5 is flat, missed virtual market-order triggers cannot be reconstructed safely; the bot does not backfill trades. If state is still present, missed triggers are kept but marked unarmed until price returns to the non-trigger side and crosses again.
+- Startup reconciliation status is saved in state as `startup_state_reconciled_at_jst` and `startup_state_recovery`.
+  Startup catch-up status is saved as `startup_catchup_replayed_at_jst`, `startup_catchup_replay`, and `last_catchup_m1_decision_time_utc`.
+
 ## Market order rejection safety
 
 S18 uses local virtual grid orders and sends market `OPEN` commands only after a virtual level is crossed.
@@ -54,8 +67,8 @@ S18 uses local virtual grid orders and sends market `OPEN` commands only after a
 - If an `OPEN` command response is ambiguous, such as timeout or no response, the bot checks live positions first. If no matching position can be confirmed, it logs `ENTRY_UNRESOLVED_MARKET` and blocks new entries with `reconciliation_required` so duplicate market orders are not sent blindly. A later clean position sync that proves the bot is flat and the original virtual order still exists clears the stale reconciliation block, keeps the virtual order, and retries after `market_open_retry_cooldown_seconds`.
 - If a matching live position is found after an error response, the bot adopts that position into state using the entry direction/comment/source order and logs it as a reconciled `ENTRY`.
 - Shared-account isolation is intentional. Position sync is scoped by profile `symbol` + `magic`, and new state positions store `symbol` and `magic`. Before the bot treats a missing state ticket as server-side SL, or sends ticket-only `CLOSE` / `MODIFY`, it verifies that the live ticket belongs to the same bot by symbol, magic, and comment evidence. A same-symbol ticket from another bot remains in state and blocks new entries instead of being closed, modified, adopted, or assumed stopped out.
-- If a server-side or local SL leaves the symbol flat, the bot treats the old breakout trigger set as failed. It clears remaining virtual orders, waits `post_sl_reanchor_cooldown_seconds`, then starts a fresh breakout cycle from the current Bid when regime/policy gates allow. This prevents immediate re-entry from the same stale trigger after a stop loss.
-- If the account is flat and an old breakout trigger is crossed after a large drift, the bot does not chase the stale level. When drift exceeds `max_flat_breakout_entry_drift_pips`, it clears the old virtual orders and reanchors from the current market state instead of sending a late market order.
+- If a server-side or local SL leaves the symbol flat, the bot keeps the current cycle and remaining virtual grid. It does not start a fresh cycle simply because the symbol is flat. A same-level order recreated while price is already on the trigger side is stored as `armed=false`; it can fill only after price first returns to the non-trigger side and then crosses again. Untouched higher/lower grid levels can still fill as normal trend continuation triggers.
+- If the account is flat and an old breakout trigger is crossed after a large drift, the bot does not chase the stale level. When drift exceeds `max_flat_breakout_entry_drift_pips`, it suppresses that fill by disarming the order until a fresh recross instead of clearing the cycle and reanchoring.
 - Temporary new-entry blocks from recoverable states, such as transient position-sync failure, SL close failure, autoTP close failure, SL repair failure, untracked-position recovery, or max-count recovery, are cleared only after a later clean sync proves MT5 live positions and bot state are aligned. Unresolved `reconciliation_required` blocks stay fail-closed.
 
 ## Bridge
@@ -70,6 +83,14 @@ S18 uses local virtual grid orders and sends market `OPEN` commands only after a
 - MT5 EA input `InpResponseFile`: `res_s18.txt`
 
 `live_s18_bot.py` verifies `CAPS` on startup and stops if the attached bridge is not `BotBridge_s18`.
+
+Read-only bridge/state check:
+
+```powershell
+python .\live_s18_bot.py --bridge-state-check
+```
+
+This command only sends `ECHO`, `CAPS`, `INFO`, `POSITIONS`, `ORDERS`, and `HIST`. It does not send `OPEN`, `MODIFY`, `CLOSE`, `PENDING`, or `CANCEL`. If `cmd_s18.txt` updates but `res_s18.txt` is never created, Python is writing to the selected MT5 Files folder but the s18 EA is not processing that IPC lane. Check that `BotBridge_s18` is attached/compiled in the same MT5 terminal that owns the selected `MQL5\Files` directory.
 
 ## Start / recreate
 
@@ -89,4 +110,5 @@ Do not overwrite the existing CentOS `bot18/live_config.py` unless the user expl
 ```powershell
 python .\live_s18_bot.py --self-test
 python .\live_s18_bot.py --self-test --policy-self-test
+python .\live_s18_bot.py --bridge-state-check
 ```

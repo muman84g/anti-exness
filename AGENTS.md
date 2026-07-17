@@ -27,7 +27,7 @@
 - Update `BOT_BACKTEST_MAP_ja.md`, README, params, runner notes, and `SOURCE_BACKTEST.md` together when their mapping changes.
 - Document every unavoidable backtest/live mismatch in `SOURCE_BACKTEST.md`.
 - For local virtual-grid bots that execute market orders, treat virtual levels as trigger/state identity. Recalculate actual market entry and SL/TP from the current tick at every send/retry unless the strategy source explicitly requires fixed absolute prices.
-- For breakout-style local virtual grids, a stop loss that leaves the symbol flat invalidates the old trigger set. Clear remaining virtual orders, apply cooldown, and reanchor from current market state instead of immediately re-entering from the same trigger. If a flat stale breakout trigger is crossed only after excessive drift, clear/reanchor instead of sending a late market order.
+- For breakout-style local virtual grids, do not assume a stop loss that leaves the symbol flat always ends the source cycle. If the source strategy treats flat-after-SL as cycle failure, clear remaining virtual orders, apply cooldown, and reanchor from current market state. If the source strategy keeps the cycle alive, preserve the cycle and use explicit trigger re-arm/recross state so same-level `SL -> immediate re-entry` cannot occur. If a flat stale breakout trigger is crossed only after excessive drift, either reanchor or suppress that fill according to the source strategy; do not chase the stale level with a late market order.
 
 ## Verification
 

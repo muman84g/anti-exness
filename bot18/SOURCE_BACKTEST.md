@@ -57,9 +57,19 @@ this file against backtest event rows before changing thresholds or features.
 
 S18 live execution uses local virtual grid levels as trigger/accounting state. When a virtual level is crossed and a market `OPEN` is sent, the executable request is rebuilt from the current tick on every send/retry: LONG uses current Ask and SHORT uses current Bid, with server SL one grid distance from that current market entry. This avoids carrying an obsolete virtual-level SL into a later fill after Algo Trading rejection, timeout, or broker rejection.
 
-After a server-side or local SL leaves a symbol flat, live execution clears the old virtual breakout triggers and waits `post_sl_reanchor_cooldown_seconds` before starting a fresh cycle from the current Bid. This is an intentional live safety behavior so a stopped-out breakout is not immediately re-entered from the same stale trigger set. If the symbol is flat and an old breakout trigger is crossed only after a large market drift, live execution also clears/reanchors when the drift exceeds `max_flat_breakout_entry_drift_pips`; it does not chase a stale flat trigger with a late market order.
+After a server-side or local SL leaves a symbol flat, live execution keeps the current cycle and remaining virtual grid. It does not start a fresh cycle simply because the symbol is flat. Virtual orders now carry an `armed` flag: if an order is created or restored while price is already on the trigger side, it is not eligible to fill until price returns to the non-trigger side and then crosses again. This preserves the snowball cycle concept while preventing same-level `SL -> immediate re-entry` churn. If the symbol is flat and an old breakout trigger is crossed only after a large market drift, live execution suppresses that stale fill by disarming the order until a fresh recross instead of clearing/reanchoring.
+
+The source exporter `export_bot18_cycle_events.py` has the same `trigger_rearm_on_recross=True` rule. In the default `price_path_mode="close"` diagnostic, this means an order can fill only after the previous evaluated close has returned to the non-trigger side and the current evaluated close crosses the trigger again. Tick-exact live fills can still differ from M1-close diagnostics because live sends market orders from the current Bid/Ask when a trigger is crossed.
 
 Recoverable live-only entry blocks, such as transient position-sync, SL-close, autoTP-close, SL-repair, max-count, or recovered untracked-position blocks, are cleared only after a later clean sync proves MT5 live tickets and bot state tickets are aligned. Ambiguous exposure and unresolved reconciliation remain fail-closed.
+
+## Startup state recovery difference
+
+On live startup, bot18 performs a read-only MT5 sync before normal entry processing: current tick, bot-owned positions/orders, H1 regime history, and closed-M1 policy features are fetched, and any uniquely identifiable bot-owned live positions are restored into state. This reduces restart/state-loss drift for an already-open cycle.
+
+Startup catch-up then reads closed M1 history from the last processed/cycle-start decision bar and advances local virtual state without sending orders. Because bot18 uses local virtual triggers that send market `OPEN` only while the runner is alive, catch-up never creates a historical position for a missed offline trigger. If a trigger was crossed while MT5 has no matching bot-owned position, the trigger is kept but disarmed until a fresh recross. If replay history is insufficient or local state is otherwise unrecoverable, bot18 confirms bot-owned MT5 positions and orders are both flat before resetting local state; otherwise it remains fail-closed with `reconciliation_required`.
+
+This recovery is intentionally not a historical trade replay. If local state is lost while MT5 is flat, the live bot cannot safely infer missed virtual trigger fills from later prices. It does not invent historical entries; with recoverable state it waits for fresh recross, and with unrecoverable flat state it resets only after bot-owned MT5 exposure is confirmed absent.
 
 ## Live lot allocation
 
