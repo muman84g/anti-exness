@@ -10,8 +10,8 @@
 ## 元データ
 
 - 元バックテスト番号: `backtest34`
-- 元キャンペーンフォルダ: `C:\botter\backtest\output\backtest34_bot18_small_range_filter`
-- 元run: `C:\botter\backtest\output\backtest34_bot18_small_range_filter\runs\20260705_2200_pilot_dev_tick_d10_e75_fs_m80_b2k`
+- 元キャンペーンフォルダ: `C:\botter\backtest\output\backtest34_bot19`
+- 元run: `C:\botter\backtest\output\backtest34_bot19\runs\20260705_2200_pilot_dev_tick_d10_e75_fs_m80_b2k`
 - 参照候補: `baseline_recovery_loweff_cap10_short_deep8_extreme6_e75_fs_m80_b2k`
 - variant: `value_d10_tp1`
 
@@ -44,6 +44,10 @@
 この候補は dev tick で固定した候補です。短期の再利用二次評価では未完了サイクル込みでマイナスだったため、未観測forwardの証明ではありません。
 
 entry latency stress では、サーバー側 pending stop 相当のゼロラグだけがプラスで、ローカル検知後の market entry は大きく崩れました。そのため S19 は `Buy Stop` / `Sell Stop` を前提にしています。
+
+live側の起動時復元もこの前提に合わせています。bot19はbroker上のpending/positionを正とし、起動直後にH1/M1特徴量をwarmupしたうえで `symbol` + `magic` の `POSITIONS` / `ORDERS` を同期します。bot18型のlocal virtual market triggerと違い、停止中に過去足がentry水準を跨いだだけではhistorical positionを作りません。server-side pendingが停止中に約定していた場合だけ、保存済みpending情報やrepair履歴と一意に照合できる建玉をstateへ採用します。
+
+SL後に建玉が無くなった場合でも、source simulatorは同一cycleの `grid_anchor` を維持し、不足したpending gridを補充します。live側も通常は同じ `grid_anchor` で `Buy Stop` 2本 + `Sell Stop` 2本を再発行します。spread/regimeがentry不可の間は同じanchorを維持して再発行待ちにします。ブローカーのstop-level/price制約で旧anchorのpending stopが置けず、かつMT5がbot19建玉・pendingともにflatである場合だけ、live側は実運用ガードとして現在価格へreanchorして新cycle扱いで再発行します。これはsource backtest完全一致ではないが、無効価格のpendingを出し続けないためのbroker制約対応です。
 
 ## 2026-07-11 GBPUSDm診断
 

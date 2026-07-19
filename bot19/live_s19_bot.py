@@ -46,7 +46,7 @@ POLICY_LOG_FILE = os.path.join(LOG_DIR, "s19_policy_decisions.csv")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s19_params.json")
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
-BOT_SOURCE_REVISION = "2026-07-16-ticket-owner-guard-v1"
+BOT_SOURCE_REVISION = "2026-07-17-startup-state-reconcile-v1"
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
@@ -567,6 +567,8 @@ class S19SnowballBot:
             "manual_alert_last_reconciliation_signature": None,
             "manual_alert_last_reconciliation_reason": None,
             "manual_alert_last_reconciliation_at_jst": None,
+            "startup_state_reconciled_at_jst": None,
+            "startup_state_recovery": None,
             "last_regime": self.default_regime(),
             "last_policy_decision": None,
             "updated_at_jst": jst_now().isoformat(),
@@ -710,6 +712,82 @@ class S19SnowballBot:
         if bool(self.params.get("use_server_pending_entry", False)):
             if self.executor.get_orders(self.symbol, self.magic) is None:
                 raise RuntimeError(f"Bridge ORDERS preflight failed for {self.symbol}")
+
+    def startup_reconcile_state(self) -> dict[str, Any]:
+        before = {
+            "cycle_id": int(self.state.get("cycle_id", 0) or 0),
+            "positions": len(self.state.get("positions", [])),
+            "virtual_orders": len(self.state.get("virtual_orders", [])),
+            "pending_open": isinstance(self.state.get("pending_open"), dict),
+            "pending_grid_repair_wait": isinstance(self.state.get("pending_grid_repair_wait"), dict),
+            "pending_fill_sync_wait": isinstance(self.state.get("pending_fill_sync_wait"), dict),
+            "sync_block_new_entries": bool(self.state.get("sync_block_new_entries", False)),
+            "reconciliation_required": isinstance(self.state.get("reconciliation_required"), dict),
+        }
+        recovery: dict[str, Any] = {
+            "status": "not_started",
+            "reason": "",
+            "before": before,
+            "after": {},
+            "history_warmup": {},
+            "created_at_jst": jst_now().isoformat(),
+        }
+        tick = self.get_tick()
+        if tick is None:
+            recovery["status"] = "deferred"
+            recovery["reason"] = "startup tick unavailable"
+            self.state["startup_state_reconciled_at_jst"] = jst_now().isoformat()
+            self.state["startup_state_recovery"] = recovery
+            logging.warning("S19 startup state reconcile deferred: tick unavailable for %s", self.symbol)
+            return recovery
+
+        regime = self.get_regime()
+        recovery["history_warmup"]["regime_ok"] = bool(regime.get("reason") == "ok")
+        recovery["history_warmup"]["regime_reason"] = str(regime.get("reason"))
+        try:
+            features = self.get_m1_policy_features()
+            recovery["history_warmup"]["m1_ok"] = True
+            recovery["history_warmup"]["m1_decision_time_utc"] = str(
+                features.get("m1_decision_time_utc") or ""
+            )
+        except Exception as exc:
+            recovery["history_warmup"]["m1_ok"] = False
+            recovery["history_warmup"]["m1_reason"] = str(exc)
+            logging.warning("S19 startup M1 warmup failed for %s: %s", self.symbol, exc)
+
+        sync_ok = self.sync_live_positions(tick, regime, force=True)
+        recovery["status"] = "reconciled" if sync_ok else "blocked"
+        recovery["reason"] = "clean startup sync" if sync_ok else str(self.state.get("sync_block_reason") or "")
+        if sync_ok and self.state.get("positions") and (
+            self.auto_tp_refresh_due() or self.state.get("auto_tp_price") is None
+        ):
+            self.refresh_auto_tp(float(tick["bid"]), float(tick["ask"]), tick.get("info"))
+        after = {
+            "cycle_id": int(self.state.get("cycle_id", 0) or 0),
+            "positions": len(self.state.get("positions", [])),
+            "virtual_orders": len(self.state.get("virtual_orders", [])),
+            "pending_open": isinstance(self.state.get("pending_open"), dict),
+            "pending_grid_repair_wait": isinstance(self.state.get("pending_grid_repair_wait"), dict),
+            "pending_fill_sync_wait": isinstance(self.state.get("pending_fill_sync_wait"), dict),
+            "sync_block_new_entries": bool(self.state.get("sync_block_new_entries", False)),
+            "reconciliation_required": isinstance(self.state.get("reconciliation_required"), dict),
+            "auto_tp_price": self.state.get("auto_tp_price"),
+        }
+        recovery["after"] = after
+        self.state["startup_state_reconciled_at_jst"] = jst_now().isoformat()
+        self.state["startup_state_recovery"] = recovery
+        logging.info(
+            "S19 startup state reconcile: symbol=%s status=%s before_pos=%s before_orders=%s "
+            "after_pos=%s after_orders=%s reason=%s",
+            self.symbol,
+            recovery["status"],
+            before["positions"],
+            before["virtual_orders"],
+            after["positions"],
+            after["virtual_orders"],
+            recovery["reason"],
+        )
+        return recovery
 
     def live_server_pending_enabled(self) -> bool:
         return bool(self.params.get("use_server_pending_entry", False)) and bool(
@@ -1925,7 +2003,10 @@ class S19SnowballBot:
         if not bool(regime.get("signal_fresh", False)):
             return f"regime_stale reason={regime.get('reason')}"
         if not bool(regime.get("entry_allowed", False)):
-            return f"regime_block reason={regime.get('reason')}"
+            reason = str(regime.get("reason") or "unknown")
+            if reason == "ok":
+                return "regime_block entry_allowed=false"
+            return f"regime_block entry_allowed=false reason={reason}"
         return None
 
     def cancel_live_pending_orders(self, live_orders: list[Any], reason: str) -> bool:
@@ -2905,6 +2986,8 @@ class S19SnowballBot:
         if not self.connect():
             raise RuntimeError("Failed to connect to MT5 EA bridge")
         self.verify_bridge_capabilities()
+        self.startup_reconcile_state()
+        self.save_state()
         if not live_trading_enabled:
             logging.warning("S19 shadow forward mode: bridge connected, policy decisions logged, no orders")
         logging.info(
@@ -3167,6 +3250,16 @@ class S19SnowballBot:
                 "info": FakeInfo(),
             }
             regime = {"entry_allowed": True, "signal_fresh": True, "reason": "ok"}
+            blocked_regime = {"entry_allowed": False, "signal_fresh": True, "reason": "ok"}
+            old_live_trading_enabled = self.params.get("live_trading_enabled")
+            self.params["live_trading_enabled"] = True
+            try:
+                assert (
+                    self.flat_pending_grid_reissue_block_reason(tick, blocked_regime)
+                    == "regime_block entry_allowed=false"
+                )
+            finally:
+                self.params["live_trading_enabled"] = old_live_trading_enabled
 
             self.state = self.default_state()
             self.state["positions"] = [
@@ -3451,6 +3544,67 @@ class S19SnowballBot:
             assert self.state["grid_anchor"] is None
             assert self.flat_pending_grid_anomaly([]) is None
             assert not self.state["sync_block_new_entries"]
+
+            original_get_tick = self.get_tick
+            original_get_regime = self.get_regime
+            original_get_m1_policy_features = self.get_m1_policy_features
+            try:
+                self.params["live_trading_enabled"] = True
+                self.params["use_server_pending_entry"] = True
+                self.get_tick = lambda: tick  # type: ignore[method-assign]
+                self.get_regime = lambda: regime  # type: ignore[method-assign]
+                self.get_m1_policy_features = lambda: {  # type: ignore[method-assign]
+                    "m1_decision_time_utc": "2026-07-17T01:00:00+00:00",
+                }
+                self.state = self.default_state()
+                self.state["cycle_id"] = 7
+                self.state["grid_anchor"] = 1.24950
+                self.state["sync_block_new_entries"] = True
+                self.state["sync_block_reason"] = "untracked live positions exist: [333]"
+                self.state["pending_open"] = {
+                    "type": "server_pending_stop",
+                    "symbol": "GBPUSD",
+                    "magic": 190019,
+                    "order_id": 21,
+                    "direction": "SHORT",
+                    "entry": 1.24850,
+                    "stop_loss": 1.24950,
+                    "volume": 0.01,
+                    "comment": "s19_gbp_7_21",
+                    "status": "OPEN_RESPONSE_UNCONFIRMED",
+                }
+                self.state["reconciliation_required"] = {
+                    "type": "flat_pending_grid_repair",
+                    "reason": "flat pending grid reissue failed",
+                    "details": {"state": []},
+                }
+                self.state["pending_grid_repair_wait"] = {
+                    "reason": "flat_pending_grid_integrity_failed",
+                    "details": {"state": []},
+                }
+                self.executor = FakeExecutor()
+                recovery = self.startup_reconcile_state()
+                assert recovery["status"] == "reconciled"
+                assert recovery["before"]["pending_open"] is True
+                assert recovery["history_warmup"]["regime_ok"] is True
+                assert recovery["history_warmup"]["m1_ok"] is True
+                assert self.state["startup_state_recovery"]["status"] == "reconciled"
+                assert self.state["pending_open"] is None
+                assert self.state["reconciliation_required"] is None
+                assert self.state["pending_grid_repair_wait"] is None
+                assert self.state["grid_anchor"] is None
+                assert not self.state["sync_block_new_entries"]
+
+                self.get_tick = lambda: None  # type: ignore[method-assign]
+                self.state = self.default_state()
+                recovery = self.startup_reconcile_state()
+                assert recovery["status"] == "deferred"
+                assert recovery["reason"] == "startup tick unavailable"
+                assert self.state["startup_state_recovery"]["status"] == "deferred"
+            finally:
+                self.get_tick = original_get_tick  # type: ignore[method-assign]
+                self.get_regime = original_get_regime  # type: ignore[method-assign]
+                self.get_m1_policy_features = original_get_m1_policy_features  # type: ignore[method-assign]
         finally:
             self.params = original_params
             self.state = original_state
@@ -3500,6 +3654,8 @@ class S19BasketRunner:
             if not bot.connect():
                 raise RuntimeError(f"Failed to connect to MT5 EA bridge for {bot.symbol}")
             bot.verify_bridge_capabilities()
+            bot.startup_reconcile_state()
+            bot.save_state()
         if not live_trading_enabled:
             logging.warning("S19 basket shadow forward mode: policy decisions logged, no orders")
         logging.info(

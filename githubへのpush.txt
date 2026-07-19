@@ -33,6 +33,15 @@ Use this only when the local project tree is not suitable for the requested push
 
 Observed on 2026-07-17: `git -C C:\botter status` can fail with `not a git repository` in the managed workspace even when a `.git` entry is visible. If that happens, do not keep probing the broken local tree; use this clean clone route immediately.
 
+Fast route observed on 2026-07-20 for bot18/bot19 updates:
+
+- If `git -C C:\botter rev-parse --show-toplevel` fails, stop checking that broken root and use the clean clone route below.
+- `C:\botter\bot` may be the live local source without its own `.git`; push through the clean clone of `https://github.com/muman84g/anti-exness.git`.
+- Copy only the authorized files needed for the change. For a narrow bot19 fix, use `BOT_BACKTEST_MAP_ja.md`, `bot19/live_s19_bot.py`, `bot19/README.md`, `bot19/SOURCE_BACKTEST.md`, and this memo when it changed.
+- Managed sandbox may reject writes into `C:\Users\muuma\Downloads\codex-temp\...` after clone. Do not first run parallel `Copy-Item` probes that will fail; use one approved `Copy-Item` block for the selected files.
+- Avoid relying on `git diff --cached | Select-String ...` for full-diff secret scans in the managed shell; it can degrade into a broken `git diff --no-index` invocation. Use staged file-name checks, `rg` over the selected staged files, `git diff --cached --stat`, `git diff --cached --check`, and targeted diff inspection instead.
+- `C:\botter\backtest` can be a separate local repo with no remote and no commits. Do not try to push those files through `anti-exness` unless the GitHub repo actually contains the matching path. Report any local-only backtest/doc changes separately.
+
 ```powershell
 $STAMP = Get-Date -Format yyyyMMdd_HHmmss
 $CLONE_ROOT = 'C:\Users\muuma\Downloads\codex-temp'
