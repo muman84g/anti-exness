@@ -73,11 +73,19 @@ EA_BRIDGE_LOCK_FILE=ea_bridge_s21.lock
 
 ## Commands
 
-Self-test:
+Local/container self-test:
 
 ```bash
 python3 /app/bot21/live_s21_bot.py --self-test
 ```
+
+Docker compose no-order self-test:
+
+```bash
+sudo docker compose run --rm --no-deps exness-bot-21 python3 /app/bot21/live_s21_bot.py --self-test
+```
+
+For the compose command, `bot21/live_config.py` must exist on the host because it is bind-mounted. Use a local sensitive config file and do not commit it.
 
 One-cycle preflight/run:
 

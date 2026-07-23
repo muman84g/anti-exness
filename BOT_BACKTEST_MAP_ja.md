@@ -17,7 +17,7 @@ Runtime status is intentionally not authoritative in this file. Verify current c
 | bot18_v2GBPUSDm / S18 derivative | not assigned | `bot18_v2GBPUSDm` | `backtest33_bot18\legacy\backtest32_cross_asset_dev` plus the frozen `bot18_v2` GBPUSD CatBoost artifact | Physical `GBPUSDm` uses the frozen GBPUSD policy candidate through an explicit `policy_symbol=GBPUSD` alias. See `SOURCE_BACKTEST.md`. | Shadow-only folder; no compose service assigned. GBPUSDm has only M1 close dev diagnostics, not a completed CatBoost full-policy or tick validation. |
 | bot19 / S19 | `exness-bot-19` | `bot19` | historical D10 source now at `backtest33_bot18\legacy\backtest34_bot18` | `SOURCE_BACKTEST.md`: run `20260705_2200_pilot_dev_tick_d10_e75_fs_m80_b2k`, candidate `baseline_recovery_loweff_cap10_short_deep8_extreme6_e75_fs_m80_b2k`, variant `value_d10_tp1`. `backtest34_bot19` now holds later S19 GBPUSDm diagnostics only. | Historical 2026-07-08 note said running. Uses server-side pending stop. |
 | bot20 / S20 | `exness-bot-20` | `bot20` | `backtest43` | `SOURCE_BACKTEST.md` exists. | Historical 2026-07-08 note said not running; verify current state. |
-| bot21 / S21 | not assigned | `bot21` | `backtest67_1` | `SOURCE_BACKTEST.md`: Ehlers top3 current implementation for `US500_137_1h`, `AUDUSD_021_1h`, `USDJPY_035_1h`. | Shadow-first local folder. No compose service, deployment, bridge attachment, restart, or live switch authorized yet. |
+| bot21 / S21 | `exness-bot-21` | `bot21` | `backtest67_1` | `SOURCE_BACKTEST.md`: Ehlers top3 current implementation for `US500_137_1h`, `AUDUSD_021_1h`, `USDJPY_035_1h`. | Shadow-first folder with compose service defined. No deployment, bridge attachment, restart, or live switch authorized yet. |
 
 ## Rules
 

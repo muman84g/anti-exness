@@ -320,6 +320,50 @@ services:
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s20.txt
       - EA_BRIDGE_LOCK_FILE=ea_bridge_s20.lock
 
+  # ---- Bot 21 (S21 Ehlers top3 shadow-first) ----
+  exness-bot-21:
+    image: exness-bot:latest
+    container_name: exness-bot-21
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot21/state:/app/bot21/state
+      - ./bot21/logs:/app/bot21/logs
+      - ./bot21/live_config.py:/app/bot21/live_config.py:ro
+      - ./bot21/live_s21_bot.py:/app/bot21/live_s21_bot.py:ro
+      - ./bot21/live_data_fetcher.py:/app/bot21/live_data_fetcher.py:ro
+      - ./bot21/live_executor.py:/app/bot21/live_executor.py:ro
+      - ./bot21/live_manual_alerts.py:/app/bot21/live_manual_alerts.py:ro
+      - ./bot21/base_interfaces.py:/app/bot21/base_interfaces.py:ro
+      - ./bot21/ea_bridge.py:/app/bot21/ea_bridge.py:ro
+      - ./bot21/s21_params.json:/app/bot21/s21_params.json:ro
+      - ./bot21/BotBridge_s21.mq5:/app/bot21/BotBridge_s21.mq5:ro
+      - "./bot21/BotBridge_s21.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s21.mq5:ro"
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:114
+      - VNC_PORT=5915
+      - NOVNC_PORT=6095
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot21
+      - EA_BRIDGE_COMMAND_FILE=cmd_s21.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s21.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s21.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s21.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - BOT_MANUAL_ALERT_ENABLED=1
+      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+
   # ---- Bot 19 (S19 GBPUSD pending-stop shadow/live) ----
   exness-bot-19:
     image: exness-bot:latest

@@ -25,6 +25,8 @@ For a first-time bot push, include the generated target bot folder as requested 
 - direct live-config derivatives such as `__pycache__/live_config*.pyc`
 - `.env`, credentials, account data, secrets, and tokens
 
+If the user will test the new bot through Docker Compose, the first-time push must also include the target `exness-bot-<NN>` service in `docker-compose.yml`, the assigned service name in `BOT_BACKTEST_MAP_ja.md`, and README commands that use that exact service. If the compose service is intentionally not added, do not report a `docker compose run ... exness-bot-<NN>` command; give a non-service command or state that compose service creation is still required.
+
 For an existing bot update, stage only the authorized changed files unless the user asks to refresh the whole target folder.
 
 ## Clean Clone Route
@@ -69,6 +71,8 @@ Get-ChildItem -LiteralPath "$DST_BOT\__pycache__" -Force -ErrorAction SilentlyCo
 
 If compose changes are authorized, add or update only `$SERVICE`. Preserve unrelated service blocks and mounts.
 
+Before staging a first-time compose-enabled bot, verify that `$SERVICE` exists in `docker-compose.yml` and mounts the runner, params, bridge, helper files, `live_config.py`, state/log directories, `BOT_MODULE_DIR`, and bot-specific IPC filenames.
+
 ## Stage And Verify
 
 ```powershell
@@ -77,9 +81,10 @@ git add -- BOT_BACKTEST_MAP_ja.md docker-compose.yml github*push.txt
 git add -f -- $BOT
 git diff --cached --name-only
 git diff --cached --name-only | Select-String -Pattern '(^|/)live_config\.py$|__pycache__/live_config|\.env|credential|secret|token'
+docker compose config --services
 ```
 
-The final command must return no matches. Also inspect `git diff --cached` before committing.
+The sensitive-file check must return no matches, and the compose service list must include `$SERVICE` when a compose command will be reported. Use the default compose command, not only `docker compose -f docker-compose.yml ...`, so a tracked `docker-compose.override.yml` cannot silently break the user's next run. Also inspect `git diff --cached` before committing.
 
 Commit and push only when explicitly requested:
 
@@ -108,6 +113,7 @@ For a first deployment, place the local sensitive `botNN/live_config.py` on Cent
 No-order self-test, after replacing `<NN>` and confirming the runner path:
 
 ```bash
+test -f bot<NN>/live_config.py || cp bot<NN>/live_config.example.py bot<NN>/live_config.py
 sudo docker compose run --rm --no-deps exness-bot-<NN> python3 /app/bot<NN>/live_s<NN>_bot.py --self-test
 ```
 
