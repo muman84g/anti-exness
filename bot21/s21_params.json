@@ -23,7 +23,7 @@
       "mt5_symbol": "US500",
       "spec_id": "US500_137_1h",
       "comment_prefix": "s21_us500",
-      "lot": 0.01,
+      "lot": 0.03,
       "period": 31,
       "cycle_atr": 0.18,
       "pip_size": 1.0,
