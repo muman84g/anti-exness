@@ -410,3 +410,47 @@ services:
       - DISCORD_WEBHOOK_URL=https://discordapp.com/api/webhooks/1345956802222624870/vTzmaeF3OVcRuNJ8JheyZL2v9Q2L1YBTVh9reJ0JHBMyWrvu_w6AcgKmekDvY09x9aic
       - BOT_MANUAL_ALERT_ENABLED=1
       - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+
+  # ---- Bot 22 (S22 EURUSD squeeze-pullback shadow-first) ----
+  exness-bot-22:
+    image: exness-bot:latest
+    container_name: exness-bot-22
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot22/state:/app/bot22/state
+      - ./bot22/logs:/app/bot22/logs
+      - ./bot22/live_config.py:/app/bot22/live_config.py:ro
+      - ./bot22/live_s22_bot.py:/app/bot22/live_s22_bot.py:ro
+      - ./bot22/live_data_fetcher.py:/app/bot22/live_data_fetcher.py:ro
+      - ./bot22/live_executor.py:/app/bot22/live_executor.py:ro
+      - ./bot22/live_manual_alerts.py:/app/bot22/live_manual_alerts.py:ro
+      - ./bot22/base_interfaces.py:/app/bot22/base_interfaces.py:ro
+      - ./bot22/ea_bridge.py:/app/bot22/ea_bridge.py:ro
+      - ./bot22/s22_params.json:/app/bot22/s22_params.json:ro
+      - ./bot22/BotBridge_s22.mq5:/app/bot22/BotBridge_s22.mq5:ro
+      - "./bot22/BotBridge_s22.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s22.mq5:ro"
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:115
+      - VNC_PORT=5916
+      - NOVNC_PORT=6096
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot22
+      - EA_BRIDGE_COMMAND_FILE=cmd_s22.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s22.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s22.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s22.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - BOT_MANUAL_ALERT_ENABLED=1
+      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300

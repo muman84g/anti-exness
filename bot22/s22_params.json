@@ -1,0 +1,43 @@
+{
+  "enabled": true,
+  "live_trading_enabled": false,
+  "shadow_forward_enabled": true,
+  "strategy_id": "bot22_man024v002_eurusd005_h1",
+  "magic": 200022,
+  "default_lot": 0.01,
+  "poll_interval_seconds": 5,
+  "status_log_interval_seconds": 60,
+  "max_signal_delay_minutes": 5,
+  "broker_timezone": "Europe/Athens",
+  "max_deviation_points": 20,
+  "open_retry_seconds": 60,
+  "autotrading_reject_notify_after_count": 3,
+  "require_hedging_account": true,
+  "h1_timeframe": 16385,
+  "h1_bars": 240,
+  "drop_latest_h1_bar": true,
+  "symbols": [
+    {
+      "enabled": true,
+      "symbol": "EURUSD",
+      "mt5_symbol": "EURUSD",
+      "spec_id": "EURUSD_005_1h",
+      "params_hash": "f97149f97d028e98",
+      "comment_prefix": "s22_eurusd",
+      "lot": 0.01,
+      "reference_backtest_lot": 0.1,
+      "bb_period": 20,
+      "std_mult": 2.0,
+      "width_lookback": 80,
+      "squeeze_quantile": 0.35,
+      "pullback_window": 8,
+      "pip_size": 0.0001,
+      "point_size": 0.00001,
+      "price_digits": 5,
+      "sl_pips": 43,
+      "tp_pips": 48,
+      "max_hold_bars": 18,
+      "max_entry_spread_points": 40.0
+    }
+  ]
+}
