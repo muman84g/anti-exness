@@ -1,6 +1,6 @@
 # Bot22 / S22 EURUSD H1 Bollinger Squeeze Pullback
 
-S22 is the shadow-first implementation of the fixed backtest108_1 candidate:
+S22 is the live-order implementation of the fixed backtest108_1 candidate:
 
 - `man_024_v002 / EURUSD_005_1h`
 - Params hash: `f97149f97d028e98`
@@ -31,16 +31,16 @@ S22 is the shadow-first implementation of the fixed backtest108_1 candidate:
 - Trades CSV: `logs/s22_trades.csv`
 - Bridge source: `BotBridge_s22.mq5`
 
-## Live Switch
+## Live Mode
 
-Default params are intentionally shadow-forward:
+Default params are intentionally real-order enabled:
 
 ```json
-"live_trading_enabled": false,
-"shadow_forward_enabled": true
+"live_trading_enabled": true,
+"shadow_forward_enabled": false
 ```
 
-Real order placement requires an explicit change to `s22_params.json` and a separate deploy/restart authorization.
+Starting or recreating the service can place real orders when a fresh confirmed H1 signal passes all gates.
 
 Live trading also requires a hedging account. The runner rejects netting/exchange account modes because shared-account ownership cannot be isolated safely by magic/comment there.
 
@@ -95,7 +95,7 @@ One-cycle preflight/run:
 python3 /app/bot22/live_s22_bot.py --once
 ```
 
-Normal shadow run:
+Normal live-order run:
 
 ```bash
 python3 /app/bot22/live_s22_bot.py

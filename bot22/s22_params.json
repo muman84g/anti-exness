@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "live_trading_enabled": false,
-  "shadow_forward_enabled": true,
+  "live_trading_enabled": true,
+  "shadow_forward_enabled": false,
   "strategy_id": "bot22_man024v002_eurusd005_h1",
   "magic": 200022,
   "default_lot": 0.01,

@@ -18,7 +18,7 @@ Runtime status is intentionally not authoritative in this file. Verify current c
 | bot19 / S19 | `exness-bot-19` | `bot19` | historical D10 source now at `backtest33_bot18\legacy\backtest34_bot18` | `SOURCE_BACKTEST.md`: run `20260705_2200_pilot_dev_tick_d10_e75_fs_m80_b2k`, candidate `baseline_recovery_loweff_cap10_short_deep8_extreme6_e75_fs_m80_b2k`, variant `value_d10_tp1`. `backtest34_bot19` now holds later S19 GBPUSDm diagnostics only. | Historical 2026-07-08 note said running. Uses server-side pending stop. |
 | bot20 / S20 | `exness-bot-20` | `bot20` | `backtest43` | `SOURCE_BACKTEST.md` exists. | Historical 2026-07-08 note said not running; verify current state. |
 | bot21 / S21 | `exness-bot-21` | `bot21` | `backtest67_1_bot21` | `SOURCE_BACKTEST.md`: Ehlers top3 current implementation for `US500_137_1h`, `AUDUSD_021_1h`, `USDJPY_035_1h`. | Shadow-first folder with compose service defined. No deployment, bridge attachment, restart, or live switch authorized yet. |
-| bot22 / S22 | `exness-bot-22` | `bot22` | `backtest108_1` | `SOURCE_BACKTEST.md`: Bollinger squeeze-breakout pullback `man_024_v002 / EURUSD_005_1h`, params hash `f97149f97d028e98`. | Shadow-first folder with compose service defined. `clean_reusable_eval=false`; forward/live-shadow only. No deployment, bridge attachment, restart, or live switch authorized yet. |
+| bot22 / S22 | `exness-bot-22` | `bot22` | `backtest108_1` | `SOURCE_BACKTEST.md`: Bollinger squeeze-breakout pullback `man_024_v002 / EURUSD_005_1h`, params hash `f97149f97d028e98`. | Live-order params enabled by explicit user instruction on 2026-07-26. `clean_reusable_eval=false`; forward/live operation only. Service deployment, bridge attachment, or restart are separate runtime actions. |
 
 ## Rules
 

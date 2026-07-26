@@ -35,14 +35,14 @@ Backtest/live mapping:
 - MQL bridge execution must confirm `ResultRetcode()` and deal/order evidence. Python records live active state only after a symbol/magic/comment/side `POSITIONS` re-query uniquely confirms the position.
 - Default market deviation is `max_deviation_points=20`.
 - Real trading preflight requires a hedging account (`require_hedging_account=true`); netting/exchange modes are rejected for shared-account ownership safety.
-- Default mode is shadow-forward. Real trading, service deployment, bridge attachment, or restart were not authorized by this source note.
+- Default mode is live-order enabled by explicit user instruction on 2026-07-26. Service deployment, bridge attachment, or restart are still separate runtime actions.
 
 Known differences and cautions:
 
 - Broker symbol names may need `mt5_symbol` edits if the live account uses suffixes such as `EURUSDm`.
 - Time-close uses actual live entry time plus `max_hold_bars` hours, not the historical intended entry timestamp.
 - The stale-signal guard uses UTC after broker-timezone conversion. If the broker server timezone differs from `Europe/Athens`, update `broker_timezone` before running.
-- Shadow mode checks SL/TP on runner polling snapshots, so it is not a substitute for server-side live SL/TP behavior.
+- Real-order mode uses server-side SL/TP; bot-managed time close still depends on runner cycles and bridge availability.
 - The operational lot is `0.01`; the backtest reference lot was `0.1`.
 - Entry-shift sensitivity is high: an impossible -60 minute entry was much stronger in diagnostics. This is not usable evidence and reinforces strict confirmed-H1-after-close entry.
 - The observed reusable replay was already seen and must not be used for parameter changes or candidate re-ranking.

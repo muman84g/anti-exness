@@ -50,8 +50,8 @@ PARAMS_FILE = os.path.join(SCRIPT_DIR, "s22_params.json")
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "enabled": True,
-    "live_trading_enabled": False,
-    "shadow_forward_enabled": True,
+    "live_trading_enabled": True,
+    "shadow_forward_enabled": False,
     "strategy_id": "bot22_man024v002_eurusd005_h1",
     "magic": 200022,
     "default_lot": 0.01,
