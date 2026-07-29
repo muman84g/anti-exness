@@ -439,6 +439,25 @@ class S22SqueezePullbackRunner:
         st["sync_block_recoverable"] = False
         st["sync_block_details"] = {}
 
+    def _clear_stale_sync_block_if_flat(
+        self,
+        spec: dict[str, Any],
+        positions: list[Any],
+        orders: list[Any],
+    ) -> bool:
+        st = self._sym_state(spec)
+        if not st.get("sync_block_new_entries"):
+            return False
+        if not bool(st.get("sync_block_recoverable")):
+            return False
+        if positions or orders:
+            return False
+        reason = str(st.get("sync_block_reason") or "")
+        self._set_sync_block(spec, None)
+        self._error_row(spec, "sync_block_cleared_flat", reason)
+        self._save_state()
+        return True
+
     def _trade_permission_error(self, error: str | None) -> bool:
         text = str(error or "")
         return any(f"ERR|{code}" in text for code in TRADE_PERMISSION_RETCODES)
@@ -526,6 +545,7 @@ class S22SqueezePullbackRunner:
             if orders is None:
                 logging.critical("S22 ORDERS preflight failed for %s", sym)
                 return False
+            self._clear_stale_sync_block_if_flat(spec, positions, orders)
             if orders:
                 self._set_sync_block(spec, "owned_pending_orders_unsupported", {"tickets": [int(order.ticket) for order in orders]}, recoverable=False)
                 self._save_state()
@@ -1073,6 +1093,8 @@ class S22SqueezePullbackRunner:
             return
         if st.get("sync_block_new_entries") and bool(st.get("sync_block_recoverable")):
             self._set_sync_block(spec, None)
+            self._save_state()
+        self._clear_stale_sync_block_if_flat(spec, positions, orders)
 
         active = st.get("active")
         if active and not bool(active.get("shadow", False)):
@@ -1479,8 +1501,11 @@ def run_self_test() -> int:
         st["sync_block_new_entries"] = True
         st["sync_block_reason"] = "positions_unavailable"
         st["sync_block_recoverable"] = True
+        save_calls = []
+        runner._save_state = lambda: save_calls.append(True)
         runner.run_once()
         assert not runner.state["symbols"]["EURUSD"]["sync_block_new_entries"], "recoverable sync block should clear after clean sync"
+        assert save_calls, "recoverable sync block clear should be saved"
 
         hist_bars = make_no_signal_bars()
         converted = normalize_bars(hist_bars, False, "Europe/Athens")

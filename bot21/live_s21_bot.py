@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import time
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -423,6 +424,37 @@ class S21EhlersRunner:
         st["sync_block_recoverable"] = False
         st["sync_block_details"] = {}
 
+    def _is_broker_sl_residual_block(self, st: dict[str, Any]) -> bool:
+        if st.get("sync_block_reason") != "same_magic_unexpected_order":
+            return False
+        details = st.get("sync_block_details") or {}
+        comments = details.get("comments") or []
+        if not comments:
+            return False
+        return all(re.fullmatch(r"\[sl [0-9]+(?:\.[0-9]+)?\]", str(comment or "")) for comment in comments)
+
+    def _clear_stale_sync_block_if_flat(
+        self,
+        spec: dict[str, Any],
+        positions: list[Any],
+        orders: list[Any],
+    ) -> bool:
+        st = self._sym_state(spec)
+        if not st.get("sync_block_new_entries"):
+            return False
+        if positions or orders:
+            return False
+        if bool(st.get("sync_block_recoverable")):
+            reason = str(st.get("sync_block_reason") or "")
+        elif self._is_broker_sl_residual_block(st):
+            reason = "broker_sl_residual_flat"
+        else:
+            return False
+        self._set_sync_block(spec, None)
+        self._error_row(spec, "sync_block_cleared_flat", reason)
+        self._save_state()
+        return True
+
     def _trade_permission_error(self, error: str | None) -> bool:
         text = str(error or "")
         return any(f"ERR|{code}" in text for code in TRADE_PERMISSION_RETCODES)
@@ -510,6 +542,7 @@ class S21EhlersRunner:
             if orders is None:
                 logging.critical("S21 ORDERS preflight failed for %s", sym)
                 return False
+            self._clear_stale_sync_block_if_flat(spec, positions, orders)
             if orders:
                 self._set_sync_block(spec, "owned_pending_orders_unsupported", {"tickets": [int(order.ticket) for order in orders]}, recoverable=False)
                 self._save_state()
@@ -1057,6 +1090,8 @@ class S21EhlersRunner:
             return
         if st.get("sync_block_new_entries") and bool(st.get("sync_block_recoverable")):
             self._set_sync_block(spec, None)
+            self._save_state()
+        self._clear_stale_sync_block_if_flat(spec, positions, orders)
 
         active = st.get("active")
         if active and not bool(active.get("shadow", False)):
@@ -1451,8 +1486,23 @@ def run_self_test() -> int:
         st["sync_block_new_entries"] = True
         st["sync_block_reason"] = "positions_unavailable"
         st["sync_block_recoverable"] = True
+        save_calls = []
+        runner._save_state = lambda: save_calls.append(True)
         runner.run_once()
         assert not runner.state["symbols"]["AUDUSD"]["sync_block_new_entries"], "recoverable sync block should clear after clean sync"
+        assert save_calls, "recoverable sync block clear should be saved"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["sync_block_new_entries"] = True
+        st["sync_block_reason"] = "same_magic_unexpected_order"
+        st["sync_block_recoverable"] = False
+        st["sync_block_details"] = {"tickets": [9103], "comments": ["[sl 0.69527]"]}
+        save_calls = []
+        runner._save_state = lambda: save_calls.append(True)
+        runner.run_once()
+        assert not runner.state["symbols"]["AUDUSD"]["sync_block_new_entries"], "flat broker SL residual block should clear"
+        assert save_calls, "flat broker SL residual clear should be saved"
 
         hist_bars = make_no_signal_bars()
         converted = normalize_bars(hist_bars, False, "Europe/Athens")
