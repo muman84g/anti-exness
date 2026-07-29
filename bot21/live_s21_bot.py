@@ -186,10 +186,16 @@ def normalize_bars(raw: pd.DataFrame | None, drop_latest: bool, broker_timezone:
     idx = pd.DatetimeIndex(bars.index)
     try:
         if idx.tz is None:
-            idx = idx.tz_localize(str(broker_timezone), ambiguous="infer", nonexistent="shift_forward")
+            # BotBridge_s21 HIST timestamps were verified on CentOS as UTC.
+            idx = idx.tz_localize("UTC", ambiguous="infer", nonexistent="shift_forward")
         idx = idx.tz_convert("UTC")
     except Exception as exc:
-        logging.error("Could not normalize H1 bar timestamps with timezone %s: %s", broker_timezone, exc)
+        logging.error(
+            "Could not normalize H1 HIST timestamps as UTC "
+            "(configured broker_timezone=%s): %s",
+            broker_timezone,
+            exc,
+        )
         return None
     bars.index = idx
     if drop_latest and len(bars) > 1:
@@ -1448,11 +1454,11 @@ def run_self_test() -> int:
         runner.run_once()
         assert not runner.state["symbols"]["AUDUSD"]["sync_block_new_entries"], "recoverable sync block should clear after clean sync"
 
-        athens_bars = make_no_signal_bars()
-        converted = normalize_bars(athens_bars, False, "Europe/Athens")
-        assert converted is not None and converted.index.tz is not None, "broker timezone normalization should produce tz-aware UTC bars"
-        assert str(converted.index.tz) == "UTC", "broker timezone normalization should convert to UTC"
-        assert converted.index[0].hour == 22, "Europe/Athens winter 00:00 should map to UTC 22:00 previous day"
+        hist_bars = make_no_signal_bars()
+        converted = normalize_bars(hist_bars, False, "Europe/Athens")
+        assert converted is not None and converted.index.tz is not None, "HIST normalization should produce tz-aware UTC bars"
+        assert str(converted.index.tz) == "UTC", "HIST normalization should convert to UTC"
+        assert converted.index[0].hour == 0, "naive EA HIST 00:00 should be treated as UTC, not broker local time"
 
         runner = make_self_test_runner(live_params, bars, FakeExecutor(open_error="ERR|10027"))
         runner.run_once()

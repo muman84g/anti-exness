@@ -69,11 +69,13 @@ class MT5DataManager(BaseDataManager):
             idx = pd.DatetimeIndex(pd.to_datetime(df['time']))
         try:
             if idx.tz is None:
-                idx = idx.tz_localize(str(broker_timezone), ambiguous="infer", nonexistent="shift_forward")
+                # BotBridge_s22 HIST timestamps were verified on CentOS as UTC.
+                idx = idx.tz_localize("UTC", ambiguous="infer", nonexistent="shift_forward")
             idx = idx.tz_convert("UTC")
         except Exception as exc:
             logging.error(
-                "Failed to localize MT5 bar timestamps for %s using timezone %s: %s",
+                "Failed to normalize MT5 HIST timestamps for %s as UTC "
+                "(configured broker_timezone=%s): %s",
                 mt5_symbol,
                 broker_timezone,
                 exc,

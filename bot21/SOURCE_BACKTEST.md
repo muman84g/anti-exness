@@ -25,7 +25,9 @@ Backtest/live mapping:
 
 - Backtest signal: completed H1 bar, entry on next H1 open.
 - Live signal: completed H1 bar fetched from MT5; latest possibly incomplete H1 bar is dropped.
-- MT5 `HIST` bar timestamps are treated as broker server time, currently `Europe/Athens`, and converted to UTC before indicator calculation and stale-signal checks.
+- MT5 `HIST` bar timestamps were directly checked on CentOS via read-only EA IPC
+  on 2026-07-30 and are treated as UTC before indicator calculation and
+  stale-signal checks.
 - Live entry: market order on the first runner cycle after the signal is detected. The default stale-signal guard skips entries more than 10 minutes after the intended next-H1 entry time.
 - Backtest execution evidence: H1 resampled OHLC headline plus M1/tick replay diagnostics.
 - Live execution: MT5 Bid/Ask market order, server SL/TP when real trading is enabled, bot-managed time close.
@@ -39,6 +41,8 @@ Known differences and cautions:
 
 - Broker symbol names may need `mt5_symbol` edits if the live account uses suffixes.
 - Time-close uses actual live entry time plus `max_hold_bars` hours, not the historical intended entry timestamp.
-- The stale-signal guard uses UTC after broker-timezone conversion. If the broker server timezone differs from `Europe/Athens`, update `broker_timezone` before running.
+- The stale-signal guard uses UTC after HIST timestamp normalization. Do not
+  assume broker-local time unless a fresh read-only `HIST` check proves the EA
+  changed its timestamp basis.
 - Shadow mode checks SL/TP on runner polling snapshots, so it is not a substitute for server-side live SL/TP behavior.
 - The observed reusable replay was already seen and must not be used for parameter changes or candidate re-ranking.
