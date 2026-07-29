@@ -1990,6 +1990,60 @@ class S19SnowballBot:
             return None
         return details
 
+    def recover_missing_grid_pending_as_filled_position(self, anomaly: dict[str, Any]) -> bool:
+        """Adopt one missing pending ticket when MT5 exposes it as the filled position."""
+        missing_tickets = list(anomaly.get("missing_tickets") or [])
+        if len(missing_tickets) != 1:
+            return False
+        get_position = getattr(self.executor, "get_position", None)
+        if not callable(get_position):
+            return False
+        ticket = int(missing_tickets[0])
+        live_position = get_position(ticket)
+        if live_position is None:
+            return False
+        state_rows = anomaly.get("state")
+        if not isinstance(state_rows, list):
+            return False
+        candidates = [
+            row
+            for row in state_rows
+            if isinstance(row, dict) and int(row.get("ticket") or 0) == ticket
+        ]
+        if len(candidates) != 1:
+            return False
+        order = self.normalize_pending_recovery_order(
+            candidates[0],
+            "flat_pending_grid_anomaly.missing_tickets",
+        )
+        if order is None:
+            return False
+        live_comment = str(getattr(live_position, "comment", "") or "")
+        if live_comment != str(order.get("comment") or ""):
+            return False
+        live_entry = self.price(float(getattr(live_position, "open_price", 0.0)))
+        if abs(live_entry - float(order["entry"])) > self.pip_size * 0.2:
+            return False
+        if self.pending_recovery_order_match_score(order, live_position) < 3:
+            return False
+        self.adopt_filled_pending_order(
+            order,
+            live_position,
+            event="ENTRY_RECOVERED_SYNC",
+            reason="missing pending ticket recovered as filled position before flat repair",
+            recovered=True,
+        )
+        self.state["pending_grid_repair_wait"] = None
+        self.state["reconciliation_required"] = None
+        self.state["sync_block_new_entries"] = False
+        self.state["sync_block_reason"] = None
+        self.recalculate_position_counts()
+        logging.warning(
+            "S19 recovered missing pending ticket as filled position before flat repair: %s",
+            ticket,
+        )
+        return True
+
     def flat_pending_grid_reissue_block_reason(self, tick: dict[str, Any], regime: dict[str, Any]) -> str | None:
         if not bool(self.params.get("live_trading_enabled", False)):
             return "live_trading_disabled"
@@ -2301,6 +2355,8 @@ class S19SnowballBot:
             else:
                 flat_grid_anomaly = self.flat_pending_grid_anomaly(live_orders)
                 if flat_grid_anomaly is not None:
+                    if self.recover_missing_grid_pending_as_filled_position(flat_grid_anomaly):
+                        return True
                     if self.defer_flat_pending_grid_repair_for_fill_sync(flat_grid_anomaly):
                         return False
                     return self.repair_flat_pending_grid(tick, regime, live_orders, flat_grid_anomaly)
@@ -3384,6 +3440,32 @@ class S19SnowballBot:
             assert int(self.state["positions"][0]["ticket"]) == 1001
             assert len(self.state["virtual_orders"]) == 3
             assert self.state["pending_fill_sync_wait"] is None
+
+            seed_pending_grid_state()
+            self.executor = FakeExecutor()
+            self.executor.orders = list(live_orders)
+            direct_position = FakeLivePosition(1001, "LONG", 1.25100, 1.25000, "s19_gbp_1_1")
+            self.executor.get_position = lambda ticket: direct_position if int(ticket) == 1001 else None  # type: ignore[method-assign]
+            assert self.sync_live_positions(tick, regime, force=True)
+            assert self.executor.cancelled == []
+            assert len(self.state["positions"]) == 1
+            assert int(self.state["positions"][0]["ticket"]) == 1001
+            assert self.state["positions"][0]["recovered_from_live"] is True
+            assert self.state["long_count"] == 1
+            assert self.state["pending_fill_sync_wait"] is None
+            assert self.state["reconciliation_required"] is None
+            assert not self.state["sync_block_new_entries"]
+
+            seed_pending_grid_state()
+            self.executor = FakeExecutor()
+            self.executor.orders = list(live_orders)
+            wrong_comment = FakeLivePosition(1001, "LONG", 1.25100, 1.25000, "s19_gbp_1_other")
+            self.executor.get_position = lambda ticket: wrong_comment if int(ticket) == 1001 else None  # type: ignore[method-assign]
+            assert not self.sync_live_positions(tick, regime, force=True)
+            assert self.executor.cancelled == []
+            assert self.state["positions"] == []
+            assert isinstance(self.state.get("pending_fill_sync_wait"), dict)
+
             self.state = self.default_state()
             self.state["cycle_id"] = 1
             self.state["grid_anchor"] = 1.25000
