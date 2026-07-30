@@ -19,6 +19,7 @@ Runtime status is intentionally not authoritative in this file. Verify current c
 | bot20 / S20 | `exness-bot-20` | `bot20` | `backtest43` | `SOURCE_BACKTEST.md` exists. | Historical 2026-07-08 note said not running; verify current state. |
 | bot21 / S21 | `exness-bot-21` | `bot21` | `backtest67_1_bot21` | `SOURCE_BACKTEST.md`: Ehlers top3 current implementation for `US500_137_1h`, `AUDUSD_021_1h`, `USDJPY_035_1h`. | Shadow-first folder with compose service defined. No deployment, bridge attachment, restart, or live switch authorized yet. |
 | bot22 / S22 | `exness-bot-22` | `bot22` | `backtest108_1` | `SOURCE_BACKTEST.md`: Bollinger squeeze-breakout pullback `man_024_v002 / EURUSD_005_1h`, params hash `f97149f97d028e98`. | Live-order params enabled by explicit user instruction on 2026-07-26. `clean_reusable_eval=false`; forward/live operation only. Service deployment, bridge attachment, or restart are separate runtime actions. |
+| bot23 / S23 | not assigned | `bot23` | `chisiki_x_bot_ideas_20260706` | `SOURCE_BACKTEST.md`: Chisiki/ReactVol fixed4 XAUUSD M1 candidates: `visual_loss_abort_g`, `visual_no_adverse_c`, `h14_18_h120_tp12_dd40_vol105_impulseonly_all_all`, `visual_break_reverse_a`. | Shadow-first folder created 2026-07-30. No compose service, deploy, restart, bridge attachment, settings change, or live switch included. |
 
 ## Rules
 
