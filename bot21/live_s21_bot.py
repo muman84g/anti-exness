@@ -287,6 +287,10 @@ class S21EhlersRunner:
                     "manual_alert_last_signature": None,
                     "manual_alert_last_reason": None,
                     "manual_alert_last_at_utc": None,
+                    "last_closed_side": None,
+                    "last_closed_at_utc": None,
+                    "last_closed_reason": None,
+                    "last_closed_signal_bar": None,
                 }
                 for spec in self.params.get("symbols", [])
             },
@@ -709,6 +713,8 @@ class S21EhlersRunner:
     def _clear_active(self, spec: dict[str, Any], reason: str, profit: float = 0.0) -> None:
         st = self._sym_state(spec)
         active = st.get("active") or {}
+        closed_side = str(active.get("side", "") or "")
+        closed_at = utc_now()
         self._trade_row(
             "CLOSE",
             spec,
@@ -724,8 +730,38 @@ class S21EhlersRunner:
         )
         st["active"] = None
         st["open_retry_after_utc"] = None
+        st["last_closed_side"] = closed_side
+        st["last_closed_at_utc"] = dt_text(closed_at)
+        st["last_closed_reason"] = reason
+        st["last_closed_signal_bar"] = active.get("signal_bar_time", "")
         self._reset_trade_permission_rejects(spec)
         self._save_state()
+
+    def _same_direction_reentry_blocked_after_close(
+        self,
+        spec: dict[str, Any],
+        signal: dict[str, Any],
+        side: str,
+    ) -> bool:
+        st = self._sym_state(spec)
+        closed_side = str(st.get("last_closed_side") or "")
+        if not closed_side or closed_side != side:
+            return False
+        closed_at = parse_dt(st.get("last_closed_at_utc"))
+        signal_time = bar_timestamp(str(signal.get("bar_time", "")))
+        if closed_at is None or signal_time is None:
+            return False
+        if signal_time <= closed_at:
+            st["last_signal_bar"] = signal["bar_time"]
+            st["open_retry_after_utc"] = None
+            self._error_row(
+                spec,
+                "same_direction_reentry_after_close_skip",
+                f"side={side} signal_bar={signal['bar_time']} closed_at={dt_text(closed_at)} reason={st.get('last_closed_reason')}",
+            )
+            self._save_state()
+            return True
+        return False
 
     def _manage_active(self, spec: dict[str, Any], info: Any, positions: list[Any]) -> None:
         st = self._sym_state(spec)
@@ -1127,7 +1163,10 @@ class S21EhlersRunner:
                 self._save_state()
                 return
 
+        had_active_before_manage = bool(self._sym_state(spec).get("active"))
         self._manage_active(spec, info, positions)
+        if had_active_before_manage and not self._sym_state(spec).get("active"):
+            return
         if self._sym_state(spec).get("active") or self._sym_state(spec).get("sync_block_new_entries"):
             return
 
@@ -1155,6 +1194,9 @@ class S21EhlersRunner:
                     self._error_row(spec, "stale_signal_skip", f"entry_due_utc={entry_due} latest_allowed_utc={latest_allowed} now_utc={now_utc}")
                     self._save_state()
                     return
+        side = "long" if signal["side"] == "LONG" else "short"
+        if self._same_direction_reentry_blocked_after_close(spec, signal, side):
+            return
         self._open_position(spec, info, signal)
 
     def run_once(self) -> None:
@@ -1522,6 +1564,27 @@ def run_self_test() -> int:
         runner.run_once()
         st = runner.state["symbols"]["AUDUSD"]
         assert st["sync_block_new_entries"] and st["sync_block_reason"] == "ambiguous_open_result", "no-response open result must fail closed"
+
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["last_closed_side"] = "short"
+        st["last_closed_at_utc"] = "2026-01-01T08:00:11+00:00"
+        st["last_closed_reason"] = "live_time_close"
+        blocked = runner._same_direction_reentry_blocked_after_close(
+            spec,
+            {"side": "SHORT", "bar_time": "2026-01-01 07:00:00+00:00"},
+            "short",
+        )
+        assert blocked, "same-direction signal known before close should be skipped"
+        assert st["last_signal_bar"] == "2026-01-01 07:00:00+00:00", "skipped same-direction signal should be consumed"
+
+        st["last_signal_bar"] = None
+        allowed = runner._same_direction_reentry_blocked_after_close(
+            spec,
+            {"side": "LONG", "bar_time": "2026-01-01 07:00:00+00:00"},
+            "long",
+        )
+        assert not allowed, "opposite-direction signal should not be blocked by same-direction close guard"
 
         runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor(account_mode=0))
         assert not runner.connect_and_preflight(), "live preflight must reject non-hedging accounts"
