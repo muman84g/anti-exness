@@ -70,6 +70,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "h1_timeframe": 16385,
     "h1_bars": 240,
     "drop_latest_h1_bar": True,
+    "max_active_positions": 3,
     "symbols": [],
 }
 
@@ -88,6 +89,7 @@ TRADE_FIELDS = [
     "sl",
     "tp",
     "profit",
+    "position_role",
     "reason",
     "signal_bar_time",
     "live",
@@ -269,12 +271,13 @@ class S21EhlersRunner:
 
     def _default_state(self) -> dict[str, Any]:
         return {
-            "version": 2,
+            "version": 4,
             "strategy_id": self.params["strategy_id"],
             "magic": self.magic,
             "shadow_ticket_seq": -200021000,
             "symbols": {
                 symbol_key(spec): {
+                    "active_positions": [],
                     "active": None,
                     "last_signal_bar": None,
                     "sync_block_new_entries": False,
@@ -291,6 +294,8 @@ class S21EhlersRunner:
                     "last_closed_at_utc": None,
                     "last_closed_reason": None,
                     "last_closed_signal_bar": None,
+                    "pending_reversals": [],
+                    "pending_reversal": None,
                 }
                 for spec in self.params.get("symbols", [])
             },
@@ -316,7 +321,8 @@ class S21EhlersRunner:
             for spec in self.params.get("symbols", []):
                 key = symbol_key(spec)
                 base["symbols"][key] = deep_merge(default_symbols[key], base["symbols"].get(key, {}))
-            base["version"] = 2
+            # Normalize legacy single-active and single-pending state into the v4 list schema.
+            base["version"] = 4
             return base
         except Exception as exc:
             raise RuntimeError(f"Could not load state file {STATE_FILE}: {exc}") from exc
@@ -336,7 +342,126 @@ class S21EhlersRunner:
         merged = deep_merge(default, current)
         current.clear()
         current.update(merged)
+        active_positions = current.get("active_positions")
+        if active_positions is None:
+            active_positions = current.get("active_positions") if current.get("active_positions") is not None else None
+        if not isinstance(active_positions, list):
+            active_positions = []
+        if not active_positions:
+            legacy_active = current.get("active")
+            if isinstance(legacy_active, dict):
+                active_positions = [dict(legacy_active)]
+            else:
+                active_positions = []
+        current["active_positions"] = active_positions
+        current["active"] = active_positions[0] if active_positions else None
+        pending_reversals = current.get("pending_reversals")
+        if not isinstance(pending_reversals, list):
+            pending_reversals = []
+        legacy_pending = current.get("pending_reversal")
+        if not pending_reversals and isinstance(legacy_pending, dict):
+            pending_reversals = [dict(legacy_pending)]
+        current["pending_reversals"] = pending_reversals
+        current["pending_reversal"] = pending_reversals[0] if pending_reversals else None
         return current
+
+    def _normalize_side(self, side: str) -> str:
+        return str(side).strip().lower()
+
+    def _normalize_position_role(self, role: Any) -> str:
+        return "reversal" if self._normalize_side(str(role)) == "reversal" else "normal"
+
+    def _position_role_from_comment(self, comment: str | None) -> str:
+        text = str(comment or "")
+        if not text:
+            return "normal"
+        suffix = text.rsplit("_", 1)[-1].lower()
+        if suffix.startswith("r") and suffix[1:].isdigit():
+            return "reversal"
+        if suffix in {"r", "reversal"}:
+            return "reversal"
+        if suffix in {"n", "normal"}:
+            return "normal"
+        return "normal"
+
+    def _reversal_origin_from_comment(self, comment: str | None) -> int | None:
+        suffix = str(comment or "").rsplit("_", 1)[-1].lower()
+        if suffix.startswith("r") and suffix[1:].isdigit():
+            return int(suffix[1:])
+        return None
+
+    def _comment_candidates_for_position(self, spec: dict[str, Any], role: str | None = None) -> list[str]:
+        role_normalized = self._normalize_position_role(role) if role is not None else None
+        candidates = [self._legacy_comment_for_position(spec)]
+        if role_normalized in {"normal", "reversal"}:
+            role_comment = self._comment_for_position(spec, role_normalized)
+            if role_comment not in candidates:
+                candidates.append(role_comment)
+        else:
+            normal_comment = self._comment_for_position(spec, "normal")
+            reversal_comment = self._comment_for_position(spec, "reversal")
+            for comment in (normal_comment, reversal_comment):
+                if comment not in candidates:
+                    candidates.append(comment)
+        return candidates
+
+    def _max_active_positions(self, spec: dict[str, Any]) -> int:
+        try:
+            value = int(self.params.get("max_active_positions", 1))
+        except Exception:
+            value = 1
+        if value <= 0:
+            value = 1
+        return value
+
+    def _opposite_side(self, side: str) -> str:
+        normalized = self._normalize_side(side)
+        return "short" if normalized == "long" else "long"
+
+    def _signal_entry_side(self, signal_side: str) -> str:
+        return self._opposite_side(self._normalize_side(signal_side))
+
+    def _comment_prefix_for_spec(self, spec: dict[str, Any]) -> str:
+        base = comment_prefix(spec)
+        spec_token = str(spec.get("spec_id", "spec")).split("_")[0].lower()
+        return base
+
+    def _comment_for_position(self, spec: dict[str, Any], role: str, reversal_of_ticket: int | None = None) -> str:
+        base = self._comment_prefix_for_spec(spec)
+        role_token = "n" if str(role).lower() == "normal" else "r"
+        if role_token == "r" and reversal_of_ticket is not None:
+            return f"{base}_r{int(reversal_of_ticket)}"[:31]
+        spec_token = str(spec.get("spec_id", "spec")).split("_")[0].lower()
+        return f"{base}_{spec_token}_{role_token}"[:31]
+
+    def _legacy_comment_for_position(self, spec: dict[str, Any]) -> str:
+        base = self._comment_prefix_for_spec(spec)
+        spec_token = str(spec.get("spec_id", "spec")).split("_")[0].lower()
+        return f"{base}_{spec_token}"[:31]
+
+    def _active_positions(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        st = self._sym_state(spec)
+        positions = st.get("active_positions")
+        if not isinstance(positions, list):
+            positions = []
+            st["active_positions"] = positions
+        return positions
+
+    def _set_active_positions(self, spec: dict[str, Any], active_positions: list[dict[str, Any]]) -> None:
+        st = self._sym_state(spec)
+        filtered = [dict(pos) for pos in active_positions]
+        st["active_positions"] = filtered
+        st["active"] = filtered[0] if filtered else None
+
+    def _pending_reversals(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        st = self._sym_state(spec)
+        pending = st.get("pending_reversals")
+        return pending if isinstance(pending, list) else []
+
+    def _set_pending_reversals(self, spec: dict[str, Any], pending: list[dict[str, Any]]) -> None:
+        st = self._sym_state(spec)
+        st["pending_reversals"] = [dict(item) for item in pending]
+        st["pending_reversal"] = st["pending_reversals"][0] if st["pending_reversals"] else None
 
     def _trade_row(self, event: str, spec: dict[str, Any], **kwargs: Any) -> None:
         row = {
@@ -636,7 +761,7 @@ class S21EhlersRunner:
         tp = normalize_price(entry + tp_dist if side == "long" else entry - tp_dist, digits)
         return sl, tp
 
-    def _position_matches_active(self, spec: dict[str, Any], pos: Any, active: dict[str, Any]) -> bool:
+    def _position_matches_record(self, spec: dict[str, Any], pos: Any, active: dict[str, Any]) -> bool:
         if not self._is_owned_position(spec, pos):
             return False
         active_comment = str(active.get("comment", "") or "")
@@ -647,12 +772,19 @@ class S21EhlersRunner:
         active_lot = float(active.get("lot", 0.0) or 0.0)
         return active_lot <= 0 or abs(float(getattr(pos, "volume", 0.0)) - active_lot) <= 1e-9
 
-    def _positions_for_comment_side(self, spec: dict[str, Any], positions: list[Any], comment: str, side: str) -> list[Any]:
+    def _positions_for_comment_side(
+        self,
+        spec: dict[str, Any],
+        positions: list[Any],
+        comment: str | list[str],
+        side: str,
+    ) -> list[Any]:
+        wanted = [comment] if isinstance(comment, str) else list(comment)
         return [
             pos
             for pos in positions
             if self._is_owned_position(spec, pos)
-            and str(getattr(pos, "comment", "") or "") == comment
+            and str(getattr(pos, "comment", "") or "") in wanted
             and self._record_side(pos) == side
         ]
 
@@ -663,13 +795,17 @@ class S21EhlersRunner:
         *,
         signal_bar_time: str | None,
         reason: str,
+        role: str = "normal",
+        reversal_of_ticket: int | None = None,
     ) -> None:
         st = self._sym_state(spec)
-        side = self._record_side(pos)
-        st["active"] = {
+        role_normalized = self._normalize_position_role(role)
+        built = {
             "ticket": int(pos.ticket),
+            "position_identifier": int(getattr(pos, "identifier", pos.ticket)),
             "shadow": False,
-            "side": side,
+            "side": self._record_side(pos),
+            "position_role": role_normalized,
             "lot": float(pos.volume),
             "entry": float(pos.open_price),
             "last_price": float(pos.open_price),
@@ -679,7 +815,19 @@ class S21EhlersRunner:
             "signal_bar_time": signal_bar_time or "",
             "comment": str(pos.comment or ""),
             "recovered_reason": reason,
+            "reversal_of_ticket": int(reversal_of_ticket) if reversal_of_ticket is not None else self._reversal_origin_from_comment(str(pos.comment or "")),
         }
+        active_positions = self._active_positions(spec)
+        replaced = False
+        ticket = int(built["ticket"])
+        for idx, record in enumerate(active_positions):
+            if int(record.get("ticket", 0)) == ticket:
+                active_positions[idx] = built
+                replaced = True
+                break
+        if not replaced:
+            active_positions.append(built)
+        self._set_active_positions(spec, active_positions)
 
     def _repair_live_sl_tp(self, spec: dict[str, Any], pos: Any, digits: int) -> bool:
         side = self._record_side(pos)
@@ -704,15 +852,25 @@ class S21EhlersRunner:
             return False
         pos.sl = desired_sl
         pos.tp = desired_tp
-        active = self._sym_state(spec).get("active")
-        if active and int(active.get("ticket", 0)) == int(pos.ticket):
-            active["sl"] = desired_sl
-            active["tp"] = desired_tp
+        active_positions = self._active_positions(spec)
+        for active in active_positions:
+            if int(active.get("ticket", 0)) == int(pos.ticket):
+                active["sl"] = desired_sl
+                active["tp"] = desired_tp
+                break
+        self._set_active_positions(spec, active_positions)
         return True
 
-    def _clear_active(self, spec: dict[str, Any], reason: str, profit: float = 0.0) -> None:
+    def _clear_position(
+        self,
+        spec: dict[str, Any],
+        active: dict[str, Any],
+        reason: str,
+        profit: float = 0.0,
+    ) -> None:
         st = self._sym_state(spec)
-        active = st.get("active") or {}
+        active_positions = self._active_positions(spec)
+        closed_ticket = int(active.get("ticket", 0))
         closed_side = str(active.get("side", "") or "")
         closed_at = utc_now()
         self._trade_row(
@@ -724,18 +882,75 @@ class S21EhlersRunner:
             price=active.get("last_price", ""),
             sl=active.get("sl", ""),
             tp=active.get("tp", ""),
+            position_role=active.get("position_role", ""),
             profit=profit,
             reason=reason,
             signal_bar_time=active.get("signal_bar_time", ""),
+            note=f"position_identifier={active.get('position_identifier', '')} reversal_of_ticket={active.get('reversal_of_ticket', '')}",
         )
-        st["active"] = None
+        st["active_positions"] = [record for record in active_positions if int(record.get("ticket", 0)) != closed_ticket]
+        self._set_active_positions(spec, st["active_positions"])
         st["open_retry_after_utc"] = None
-        st["last_closed_side"] = closed_side
-        st["last_closed_at_utc"] = dt_text(closed_at)
-        st["last_closed_reason"] = reason
-        st["last_closed_signal_bar"] = active.get("signal_bar_time", "")
+        if str(active.get("position_role", "normal")) == "normal":
+            st["last_closed_side"] = closed_side
+            st["last_closed_at_utc"] = dt_text(closed_at)
+            st["last_closed_reason"] = reason
+            st["last_closed_signal_bar"] = active.get("signal_bar_time", "")
+            if reason in {"shadow_tp", "live_tp", "normal_tp"}:
+                pending_item = {
+                    "origin_ticket": closed_ticket,
+                    "origin_side": closed_side,
+                    "origin_reason": reason,
+                    "origin_role": "normal",
+                    "reversal_side": self._opposite_side(closed_side),
+                    "created_at_utc": dt_text(closed_at),
+                    "created_signal_bar": str(active.get("signal_bar_time", "") or ""),
+                }
+                pending = self._pending_reversals(spec)
+                if not any(int(item.get("origin_ticket", 0)) == closed_ticket for item in pending):
+                    pending.append(pending_item)
+                self._set_pending_reversals(spec, pending)
         self._reset_trade_permission_rejects(spec)
         self._save_state()
+
+    def _confirmed_live_close(self, spec: dict[str, Any], active: dict[str, Any]) -> tuple[str, float, float] | None:
+        lookup = getattr(self.executor, "get_position_close_deal", None)
+        if lookup is None:
+            self._set_sync_block(spec, "close_deal_query_unavailable", {}, recoverable=False)
+            return None
+        position_id = int(active.get("position_identifier") or active.get("ticket") or 0)
+        opened_at = parse_dt(active.get("opened_at"))
+        from_epoch = int(opened_at.timestamp()) - 60 if opened_at is not None else 0
+        deal = lookup(position_id, from_epoch)
+        if not deal:
+            self._set_sync_block(
+                spec,
+                "close_deal_not_confirmed",
+                {"ticket": int(active.get("ticket", 0)), "position_identifier": position_id},
+                recoverable=True,
+            )
+            return None
+        if (
+            int(getattr(deal, "position_id", 0)) != position_id
+            or str(getattr(deal, "symbol", "")) != mt5_symbol(spec)
+            or int(getattr(deal, "magic", -1)) != self.magic
+        ):
+            self._set_sync_block(
+                spec,
+                "close_deal_ownership_mismatch",
+                {
+                    "ticket": int(active.get("ticket", 0)),
+                    "position_identifier": position_id,
+                    "deal_position_id": int(getattr(deal, "position_id", 0)),
+                    "deal_symbol": str(getattr(deal, "symbol", "")),
+                    "deal_magic": int(getattr(deal, "magic", -1)),
+                },
+                recoverable=False,
+            )
+            return None
+        reason_name = str(getattr(deal, "reason", "")).upper()
+        reason = "live_tp" if reason_name == "DEAL_REASON_TP" else "live_sl" if reason_name == "DEAL_REASON_SL" else f"live_{reason_name.lower()}"
+        return reason, float(getattr(deal, "net_profit", 0.0)), float(getattr(deal, "price", 0.0))
 
     def _same_direction_reentry_blocked_after_close(
         self,
@@ -763,133 +978,245 @@ class S21EhlersRunner:
             return True
         return False
 
+    def _pending_reversal_for_origin(self, spec: dict[str, Any], origin_ticket: int | None) -> dict[str, Any] | None:
+        active_positions = self._active_positions(spec)
+        if origin_ticket is None:
+            return None
+        for active in active_positions:
+            if self._normalize_position_role(active.get("position_role")) != "reversal":
+                continue
+            if int(active.get("reversal_of_ticket") or 0) == int(origin_ticket):
+                return active
+        return None
+
+    def _process_pending_reversal(self, spec: dict[str, Any], info: Any) -> None:
+        st = self._sym_state(spec)
+        pending_queue = self._pending_reversals(spec)
+        pending = pending_queue[0] if pending_queue else None
+        if not isinstance(pending, dict):
+            return
+        if st.get("sync_block_new_entries"):
+            return
+        try:
+            origin_ticket = pending.get("origin_ticket")
+            origin_ticket_int = int(origin_ticket) if origin_ticket is not None else None
+        except Exception:
+            self._set_pending_reversals(spec, pending_queue[1:])
+            self._save_state()
+            return
+        if self._pending_reversal_for_origin(spec, origin_ticket_int):
+            self._set_pending_reversals(spec, pending_queue[1:])
+            self._save_state()
+            return
+
+        reversal_side = self._normalize_side(pending.get("reversal_side", ""))
+        if reversal_side not in {"long", "short"}:
+            self._set_pending_reversals(spec, pending_queue[1:])
+            self._save_state()
+            return
+
+        signal_bar_time = str(pending.get("created_signal_bar", "") or st.get("last_signal_bar", "") or "")
+        opened = self._open_position(
+            spec,
+            info,
+            side=reversal_side,
+            signal_bar_time=signal_bar_time,
+            reason="normal_tp_reversal",
+            position_role="reversal",
+            reversal_of_ticket=origin_ticket_int,
+        )
+        if opened:
+            self._set_pending_reversals(spec, pending_queue[1:])
+            self._save_state()
+
     def _manage_active(self, spec: dict[str, Any], info: Any, positions: list[Any]) -> None:
         st = self._sym_state(spec)
-        active = st.get("active")
-        if not active:
+        active_positions = self._active_positions(spec)
+        if not active_positions:
             return
-        side = str(active.get("side"))
-        opened_at = parse_dt(active.get("opened_at"))
-        hold_hours = float(spec["max_hold_bars"])
-        due = opened_at + timedelta(hours=hold_hours) if opened_at else None
-        ticket = int(active.get("ticket", 0))
-
-        if bool(active.get("shadow", False)):
-            price = float(info.bid if side == "long" else info.ask)
-            active["last_price"] = price
-            entry = float(active["entry"])
-            sl = float(active["sl"])
-            tp = float(active["tp"])
-            close_reason = None
-            if side == "long" and price <= sl:
-                close_reason = "shadow_sl"
-            elif side == "long" and price >= tp:
-                close_reason = "shadow_tp"
-            elif side == "short" and price >= sl:
-                close_reason = "shadow_sl"
-            elif side == "short" and price <= tp:
-                close_reason = "shadow_tp"
-            elif due and utc_now() >= due:
-                close_reason = "shadow_time"
-            if close_reason:
-                pnl = (price - entry) / float(spec["pip_size"]) if side == "long" else (entry - price) / float(spec["pip_size"])
-                self._clear_active(spec, close_reason, pnl)
-            else:
+        state_saved = False
+        for active in list(active_positions):
+            side = self._normalize_side(active.get("side", ""))
+            if side not in {"long", "short"}:
+                self._set_sync_block(
+                    spec,
+                    "state_corrupted_position_side",
+                    {"ticket": int(active.get("ticket", 0)), "side": active.get("side")},
+                    recoverable=False,
+                )
+                self._error_row(spec, "state_corrupted_position_side", f"ticket={active.get('ticket', '')}")
                 self._save_state()
-            return
-
-        matching = [pos for pos in positions if int(pos.ticket) == ticket and self._position_matches_active(spec, pos, active)]
-        if matching:
-            pos = matching[0]
-        else:
-            direct = self.executor.get_position(ticket)
-            if direct is not None:
-                if not self._position_matches_active(spec, direct, active):
-                    self._set_sync_block(
-                        spec,
-                        "state_ticket_unowned_or_foreign",
-                        {
-                            "ticket": ticket,
-                            "live_symbol": str(getattr(direct, "symbol", "")),
-                            "live_magic": int(getattr(direct, "magic", -1)),
-                            "live_comment": str(getattr(direct, "comment", "") or ""),
-                        },
-                        recoverable=False,
-                    )
-                    self._error_row(spec, "state_ticket_unowned_or_foreign", f"ticket={ticket}")
-                    self._save_state()
-                    return
-                pos = direct
-            else:
-                comment = str(active.get("comment", "") or "")
-                same_identity = self._positions_for_comment_side(spec, positions, comment, side) if comment else []
-                if len(same_identity) == 1:
-                    pos = same_identity[0]
-                    old_ticket = ticket
-                    self._set_active_from_position(
-                        spec,
-                        pos,
-                        signal_bar_time=str(active.get("signal_bar_time", "") or ""),
-                        reason="ticket_drift_recovered",
-                    )
-                    self._error_row(spec, "ticket_drift_recovered", f"old_ticket={old_ticket} new_ticket={pos.ticket}")
-                    self._save_state()
-                    ticket = int(pos.ticket)
-                    active = st.get("active") or active
-                elif len(same_identity) > 1:
-                    self._set_sync_block(
-                        spec,
-                        "ambiguous_ticket_drift",
-                        {"old_ticket": ticket, "candidates": [int(pos.ticket) for pos in same_identity]},
-                        recoverable=False,
-                    )
-                    self._error_row(spec, "ambiguous_ticket_drift", f"old_ticket={ticket} candidates={[pos.ticket for pos in same_identity]}")
-                    self._save_state()
-                    return
-                else:
-                    absent = self.executor.confirm_position_absent(ticket)
-                    if absent is True and not positions:
-                        self._clear_active(spec, "owned_live_position_absent_confirmed", 0.0)
-                        return
-                    self._set_sync_block(
-                        spec,
-                        "active_position_missing_unconfirmed",
-                        {"ticket": ticket, "owned_tickets": [int(pos.ticket) for pos in positions], "absent_confirmed": absent},
-                        recoverable=False,
-                    )
-                    self._error_row(spec, "active_position_missing_unconfirmed", f"ticket={ticket} absent_confirmed={absent}")
-                    self._save_state()
-                    return
-        if due and utc_now() >= due:
-            if not self._is_owned_position(spec, pos):
-                self._error_row(spec, "time_close_ownership_failed", f"ticket={ticket}")
                 return
-            result = self.executor.close_position(ticket, deviation=int(self.params.get("max_deviation_points", 20)))
-            if result:
-                absent = self.executor.confirm_position_absent(ticket)
-                if absent is True:
-                    close_price = float(getattr(result, "close_price", 0.0) or 0.0)
-                    if close_price > 0:
-                        entry = float(active.get("entry", getattr(result, "open_price", 0.0)) or 0.0)
-                        pnl = (close_price - entry) / float(spec["pip_size"]) if side == "long" else (entry - close_price) / float(spec["pip_size"])
-                    else:
-                        pnl = float(getattr(result, "profit", 0.0))
-                    self._clear_active(spec, "live_time_close", pnl)
-                else:
-                    self._set_sync_block(
-                        spec,
-                        "live_time_close_unconfirmed",
-                        {"ticket": ticket, "absent_confirmed": absent},
-                        recoverable=False,
-                    )
-                    self._error_row(spec, "live_time_close_unconfirmed", f"ticket={ticket} absent_confirmed={absent}")
-                    self._save_state()
-            else:
-                status = str(getattr(result, "status", ""))
-                self._set_sync_block(spec, "live_time_close_failed", {"ticket": ticket, "status": status}, recoverable=False)
-                self._error_row(spec, "live_time_close_failed", status)
-                self._save_state()
+            opened_at = parse_dt(active.get("opened_at"))
+            hold_hours = float(spec["max_hold_bars"])
+            due = opened_at + timedelta(hours=hold_hours) if opened_at else None
+            ticket = int(active.get("ticket", 0))
 
+            if bool(active.get("shadow", False)):
+                price = float(info.bid if side == "long" else info.ask)
+                active["last_price"] = price
+                entry = float(active.get("entry", 0.0))
+                sl = float(active.get("sl", 0.0))
+                tp = float(active.get("tp", 0.0))
+                close_reason = None
+                if side == "long" and sl > 0 and price <= sl:
+                    close_reason = "shadow_sl"
+                elif side == "long" and tp > 0 and price >= tp:
+                    close_reason = "shadow_tp"
+                elif side == "short" and sl > 0 and price >= sl:
+                    close_reason = "shadow_sl"
+                elif side == "short" and tp > 0 and price <= tp:
+                    close_reason = "shadow_tp"
+                elif due and utc_now() >= due:
+                    close_reason = "shadow_time"
+                if close_reason:
+                    pnl = (price - entry) / float(spec["pip_size"]) if side == "long" else (entry - price) / float(spec["pip_size"])
+                    self._clear_position(spec, active, close_reason, pnl)
+                else:
+                    state_saved = True
+                continue
+
+            pos = None
+            matching = [pos for pos in positions if int(pos.ticket) == ticket and self._position_matches_record(spec, pos, active)]
+            if matching:
+                pos = matching[0]
+            else:
+                direct = self.executor.get_position(ticket)
+                if direct is not None:
+                    if not self._position_matches_record(spec, direct, active):
+                        self._set_sync_block(
+                            spec,
+                            "state_ticket_unowned_or_foreign",
+                            {
+                                "ticket": ticket,
+                                "live_symbol": str(getattr(direct, "symbol", "")),
+                                "live_magic": int(getattr(direct, "magic", -1)),
+                                "live_comment": str(getattr(direct, "comment", "") or ""),
+                            },
+                            recoverable=False,
+                        )
+                        self._error_row(spec, "state_ticket_unowned_or_foreign", f"ticket={ticket}")
+                        self._save_state()
+                        return
+                    pos = direct
+                else:
+                    comments = self._comment_candidates_for_position(spec, role=active.get("position_role"))
+                    same_identity = self._positions_for_comment_side(spec, positions, comments, side) if comments else []
+                    if len(same_identity) == 1:
+                        pos = same_identity[0]
+                        old_ticket = ticket
+                        active_positions = [record for record in self._active_positions(spec) if int(record.get("ticket", 0)) != int(old_ticket)]
+                        self._set_active_positions(spec, active_positions)
+                        self._set_active_from_position(
+                            spec,
+                            pos,
+                            signal_bar_time=str(active.get("signal_bar_time", "") or ""),
+                            reason="ticket_drift_recovered",
+                            role=self._position_role_from_comment(active.get("comment")),
+                            reversal_of_ticket=int(active.get("reversal_of_ticket")) if active.get("reversal_of_ticket") is not None else None,
+                        )
+                        self._error_row(spec, "ticket_drift_recovered", f"old_ticket={old_ticket} new_ticket={pos.ticket}")
+                        self._save_state()
+                        state_saved = False
+                        active_positions = self._active_positions(spec)
+                        updated = [
+                            a
+                            for a in active_positions
+                            if int(a.get("ticket", 0)) == int(pos.ticket)
+                        ]
+                        if not updated:
+                            return
+                        active = updated[0]
+                        ticket = int(active.get("ticket", 0))
+                    elif len(same_identity) > 1:
+                        self._set_sync_block(
+                            spec,
+                            "ambiguous_ticket_drift",
+                            {"old_ticket": ticket, "candidates": [int(pos.ticket) for pos in same_identity]},
+                            recoverable=False,
+                        )
+                        self._error_row(spec, "ambiguous_ticket_drift", f"old_ticket={ticket} candidates={[pos.ticket for pos in same_identity]}")
+                        self._save_state()
+                        return
+                    else:
+                        absent = self.executor.confirm_position_absent(ticket)
+                        if absent is True:
+                            confirmed = self._confirmed_live_close(spec, active)
+                            if confirmed is None:
+                                self._save_state()
+                                return
+                            close_reason, pnl, close_price = confirmed
+                            active["last_price"] = close_price
+                            self._clear_position(spec, active, close_reason, pnl)
+                        else:
+                            self._set_sync_block(
+                                spec,
+                                "active_position_missing_unconfirmed",
+                                {"ticket": ticket, "owned_tickets": [int(pos.ticket) for pos in positions], "absent_confirmed": absent},
+                                recoverable=False,
+                            )
+                            self._error_row(spec, "active_position_missing_unconfirmed", f"ticket={ticket} absent_confirmed={absent}")
+                            self._save_state()
+                            return
+                        continue
+
+            if pos is None:
+                continue
+            if not self._position_matches_record(spec, pos, active):
+                self._set_sync_block(
+                    spec,
+                    "active_position_missing_unconfirmed",
+                    {"ticket": ticket, "owned_tickets": [int(pos.ticket) for pos in positions]},
+                    recoverable=False,
+                )
+                self._error_row(spec, "active_position_missing_unconfirmed", f"ticket={ticket}")
+                self._save_state()
+                return
+
+            if due and utc_now() >= due:
+                if not self._is_owned_position(spec, pos):
+                    self._error_row(spec, "time_close_ownership_failed", f"ticket={ticket}")
+                    return
+                result = self.executor.close_position(ticket, deviation=int(self.params.get("max_deviation_points", 20)))
+                if result:
+                    absent = self.executor.confirm_position_absent(ticket)
+                    if absent is True:
+                        close_price = float(getattr(result, "close_price", 0.0) or 0.0)
+                        if close_price > 0:
+                            entry = float(active.get("entry", getattr(result, "open_price", 0.0)) or 0.0)
+                            pnl = (close_price - entry) / float(spec["pip_size"]) if side == "long" else (entry - close_price) / float(spec["pip_size"])
+                        else:
+                            pnl = float(getattr(result, "profit", 0.0))
+                        self._clear_position(spec, active, "live_time_close", pnl)
+                    else:
+                        self._set_sync_block(
+                            spec,
+                            "live_time_close_unconfirmed",
+                            {"ticket": ticket, "absent_confirmed": absent},
+                            recoverable=False,
+                        )
+                        self._error_row(spec, "live_time_close_unconfirmed", f"ticket={ticket} absent_confirmed={absent}")
+                        self._save_state()
+                        return
+                else:
+                    status = str(getattr(result, "status", ""))
+                    self._set_sync_block(spec, "live_time_close_failed", {"ticket": ticket, "status": status}, recoverable=False)
+                    self._error_row(spec, "live_time_close_failed", status)
+                    self._save_state()
+                    return
+                continue
+
+            digits = int(spec.get("price_digits", getattr(info, "digits", 5)))
+            active["position_identifier"] = int(getattr(pos, "identifier", pos.ticket))
+            if not self._repair_live_sl_tp(spec, pos, digits):
+                self._save_state()
+                return
+            active["last_price"] = float(info.bid if side == "long" else info.ask)
+            active["sl"] = float(getattr(pos, "sl", 0.0))
+            active["tp"] = float(getattr(pos, "tp", 0.0))
+            state_saved = True
+        if state_saved:
+            self._save_state()
     def _spread_points(self, info: Any, spec: dict[str, Any]) -> float:
         point = float(getattr(info, "point", 0.0) or spec.get("point_size", 0.0))
         if point <= 0:
@@ -912,6 +1239,8 @@ class S21EhlersRunner:
         side: str,
         signal_bar_time: str,
         reason: str,
+        role: str = "normal",
+        reversal_of_ticket: int | None = None,
     ) -> Any | None:
         positions = self._owned_positions(spec)
         if positions is None:
@@ -919,10 +1248,20 @@ class S21EhlersRunner:
             self._error_row(spec, "open_result_positions_unavailable", f"comment={comment} side={side}")
             self._save_state()
             return None
-        matches = self._positions_for_comment_side(spec, positions, comment, side)
+        candidates = self._comment_candidates_for_position(spec, role=role)
+        if comment not in candidates:
+            candidates.append(comment)
+        matches = self._positions_for_comment_side(spec, positions, candidates, side)
         if len(matches) == 1:
             pos = matches[0]
-            self._set_active_from_position(spec, pos, signal_bar_time=signal_bar_time, reason=reason)
+            self._set_active_from_position(
+                spec,
+                pos,
+                signal_bar_time=signal_bar_time,
+                reason=reason,
+                role=role,
+                reversal_of_ticket=reversal_of_ticket,
+            )
             return pos
         if len(matches) > 1:
             self._set_sync_block(
@@ -936,22 +1275,37 @@ class S21EhlersRunner:
             return None
         return None
 
-    def _handle_live_open_failure(self, spec: dict[str, Any], signal: dict[str, Any], comment: str, side: str, digits: int) -> None:
+    def _handle_live_open_failure(
+        self,
+        spec: dict[str, Any],
+        signal: dict[str, Any] | None,
+        comment: str,
+        side: str,
+        digits: int,
+        *,
+        signal_bar_time: str | None = None,
+        position_role: str = "normal",
+        reversal_of_ticket: int | None = None,
+    ) -> None:
         st = self._sym_state(spec)
         error = str(getattr(self.executor, "last_order_error", "") or "UNKNOWN_OPEN_FAILURE")
+        bar_time = str(signal_bar_time or (signal["bar_time"] if isinstance(signal, dict) else ""))
         recovered = self._confirm_live_open_from_positions(
             spec,
             comment=comment,
             side=side,
-            signal_bar_time=str(signal["bar_time"]),
+            signal_bar_time=bar_time,
             reason="open_failure_recovered_from_positions",
+            role=position_role,
+            reversal_of_ticket=reversal_of_ticket,
         )
         if recovered is not None:
             if not self._repair_live_sl_tp(spec, recovered, digits):
                 self._save_state()
                 return
             st = self._sym_state(spec)
-            st["last_signal_bar"] = signal["bar_time"]
+            if position_role == "normal":
+                st["last_signal_bar"] = bar_time
             st["open_retry_after_utc"] = None
             self._set_sync_block(spec, None)
             self._reset_trade_permission_rejects(spec)
@@ -964,8 +1318,9 @@ class S21EhlersRunner:
                 price=float(recovered.open_price),
                 sl=float(recovered.sl),
                 tp=float(recovered.tp),
+                position_role=position_role,
                 reason="open_failure_recovered_from_positions",
-                signal_bar_time=signal["bar_time"],
+                signal_bar_time=bar_time,
                 note=error,
             )
             self._save_state()
@@ -986,31 +1341,57 @@ class S21EhlersRunner:
         self._error_row(spec, "live_open_failed_retry", error)
         self._save_state()
 
-    def _open_position(self, spec: dict[str, Any], info: Any, signal: dict[str, Any]) -> None:
+    def _open_position(
+        self,
+        spec: dict[str, Any],
+        info: Any,
+        *,
+        side: str,
+        signal_bar_time: str,
+        position_role: str = "normal",
+        reversal_of_ticket: int | None = None,
+        reason: str = "ehlers_cross",
+        signal: dict[str, Any] | None = None,
+    ) -> bool:
         st = self._sym_state(spec)
+        role_normalized = self._normalize_position_role(position_role)
+        active_positions = self._active_positions(spec)
+        if len(active_positions) >= self._max_active_positions(spec):
+            self._error_row(
+                spec,
+                "max_active_positions_reached",
+                f"max={self._max_active_positions(spec)} active={len(active_positions)}",
+            )
+            return False
         if self._open_retry_blocked(spec):
-            return
+            return False
         spread_points = self._spread_points(info, spec)
         if spread_points > float(spec["max_entry_spread_points"]):
-            st["last_signal_bar"] = signal["bar_time"]
+            if signal_bar_time and role_normalized == "normal":
+                st["last_signal_bar"] = signal_bar_time
             self._error_row(spec, "spread_guard", f"spread_points={spread_points:.2f}")
             self._save_state()
-            return
+            return False
 
-        side = signal["side"]
+        side = self._normalize_side(side)
+        if side not in {"long", "short"}:
+            self._error_row(spec, "invalid_open_side", f"side={side}")
+            self._save_state()
+            return False
         digits = int(spec.get("price_digits", getattr(info, "digits", 5)))
         lot = float(spec.get("lot", self.params.get("default_lot", 0.01)))
         entry = float(info.ask if side == "long" else info.bid)
         sl, tp = self._expected_sl_tp(spec, side, entry, digits)
         min_stop_distance = float(getattr(info, "stops_level", 0) or 0) * float(getattr(info, "point", spec["point_size"]))
         if min_stop_distance > 0 and (abs(entry - sl) < min_stop_distance or abs(entry - tp) < min_stop_distance):
-            st["last_signal_bar"] = signal["bar_time"]
+            if signal_bar_time and role_normalized == "normal":
+                st["last_signal_bar"] = signal_bar_time
             self._error_row(spec, "stop_level_guard", f"entry={entry} sl={sl} tp={tp} min_stop_distance={min_stop_distance}")
             self._save_state()
-            return
+            return False
 
         order_type = ORDER_TYPE_BUY if side == "long" else ORDER_TYPE_SELL
-        comment = f"{comment_prefix(spec)}_{str(spec['spec_id']).split('_')[0].lower()}"[:31]
+        comment = self._comment_for_position(spec, role_normalized, reversal_of_ticket)
         ticket: int | None
         executed_price = entry
         opened_at = dt_text(utc_now())
@@ -1028,14 +1409,25 @@ class S21EhlersRunner:
                 digits=digits,
             )
             if ticket_obj is None:
-                self._handle_live_open_failure(spec, signal, comment, side, digits)
-                return
+                self._handle_live_open_failure(
+                    spec,
+                    signal,
+                    comment,
+                    side,
+                    digits,
+                    signal_bar_time=signal_bar_time,
+                    position_role=role_normalized,
+                    reversal_of_ticket=reversal_of_ticket,
+                )
+                return False
             recovered = self._confirm_live_open_from_positions(
                 spec,
                 comment=comment,
                 side=side,
-                signal_bar_time=str(signal["bar_time"]),
+                signal_bar_time=signal_bar_time,
                 reason="live_open_confirmed",
+                role=role_normalized,
+                reversal_of_ticket=reversal_of_ticket,
             )
             if recovered is None:
                 self._set_sync_block(
@@ -1046,39 +1438,65 @@ class S21EhlersRunner:
                 )
                 self._error_row(spec, "open_success_position_not_confirmed", f"order_ticket={int(ticket_obj)}")
                 self._save_state()
-                return
+                return False
             ticket = int(recovered.ticket)
             executed_price = float(recovered.open_price)
             if not self._repair_live_sl_tp(spec, recovered, digits):
                 self._save_state()
-                return
+                return False
             sl = float(recovered.sl)
             tp = float(recovered.tp)
             opened_at = self._position_opened_at(recovered)
         elif self.shadow_enabled:
             ticket = self._next_shadow_ticket()
+            if st.get("sync_block_new_entries"):
+                return False
         else:
-            st["last_signal_bar"] = signal["bar_time"]
+            if signal_bar_time and role_normalized == "normal":
+                st["last_signal_bar"] = signal_bar_time
             self._save_state()
-            return
+            return False
 
-        st["active"] = {
-            "ticket": ticket,
-            "shadow": shadow,
-            "side": side,
-            "lot": lot,
-            "entry": executed_price,
-            "last_price": executed_price,
-            "sl": sl,
-            "tp": tp,
-            "opened_at": opened_at,
-            "signal_bar_time": signal["bar_time"],
-            "comment": comment,
-        }
-        st["last_signal_bar"] = signal["bar_time"]
+        position_identifier = ticket
+        if shadow:
+            active = {
+                "ticket": ticket,
+                "position_identifier": ticket,
+                "shadow": True,
+                "side": side,
+                "position_role": role_normalized,
+                "reversal_of_ticket": int(reversal_of_ticket) if reversal_of_ticket is not None else None,
+                "lot": lot,
+                "entry": executed_price,
+                "last_price": executed_price,
+                "sl": sl,
+                "tp": tp,
+                "opened_at": opened_at,
+                "signal_bar_time": signal_bar_time,
+                "comment": comment,
+            }
+            active_positions.append(active)
+            self._set_active_positions(spec, active_positions)
+            active_positions = self._active_positions(spec)
+        else:
+            pos = self._owned_positions(spec)
+            if pos is not None:
+                matched = [p for p in pos if int(p.ticket) == int(ticket)]
+                if matched:
+                    position_identifier = int(getattr(matched[0], "identifier", matched[0].ticket))
+                    self._set_active_from_position(
+                        spec,
+                        matched[0],
+                        signal_bar_time=signal_bar_time,
+                        reason=reason,
+                        role=role_normalized,
+                        reversal_of_ticket=reversal_of_ticket,
+                    )
         st["open_retry_after_utc"] = None
         self._set_sync_block(spec, None)
         self._reset_trade_permission_rejects(spec)
+        if signal_bar_time and role_normalized == "normal":
+            st["last_signal_bar"] = signal_bar_time
         self._trade_row(
             "OPEN",
             spec,
@@ -1088,11 +1506,13 @@ class S21EhlersRunner:
             price=executed_price,
             sl=sl,
             tp=tp,
-            reason="ehlers_cross",
-            signal_bar_time=signal["bar_time"],
-            note=f"spread_points={spread_points:.2f}",
+            position_role=role_normalized,
+            reason=reason,
+            signal_bar_time=signal_bar_time,
+            note=f"spread_points={spread_points:.2f} position_identifier={position_identifier} reversal_of_ticket={reversal_of_ticket if reversal_of_ticket is not None else ''}",
         )
         self._save_state()
+        return True
 
     def run_symbol_once(self, spec: dict[str, Any]) -> None:
         if not bool(spec.get("enabled", True)):
@@ -1129,30 +1549,9 @@ class S21EhlersRunner:
             self._save_state()
         self._clear_stale_sync_block_if_flat(spec, positions, orders)
 
-        active = st.get("active")
-        if active and not bool(active.get("shadow", False)):
-            if len(positions) > 1:
-                self._set_sync_block(
-                    spec,
-                    "multiple_owned_positions",
-                    {"tickets": [int(pos.ticket) for pos in positions]},
-                    recoverable=False,
-                )
-                self._error_row(spec, "multiple_owned_positions", f"count={len(positions)}")
-                self._save_state()
-                return
-        elif not active and positions:
-            if len(positions) == 1:
-                self._set_active_from_position(
-                    spec,
-                    positions[0],
-                    signal_bar_time=str(st.get("last_signal_bar", "") or ""),
-                    reason="startup_or_state_recovery",
-                )
-                self._error_row(spec, "owned_live_position_adopted", f"ticket={positions[0].ticket}")
-                st = self._sym_state(spec)
-                active = st.get("active")
-            else:
+        active_positions = self._active_positions(spec)
+        if not active_positions and positions:
+            if len(positions) > self._max_active_positions(spec):
                 self._set_sync_block(
                     spec,
                     "owned_live_positions_without_state_ambiguous",
@@ -1162,12 +1561,26 @@ class S21EhlersRunner:
                 self._error_row(spec, "owned_live_positions_without_state_ambiguous", f"tickets={[pos.ticket for pos in positions]}")
                 self._save_state()
                 return
+            for pos in positions:
+                self._set_active_from_position(
+                    spec,
+                    pos,
+                    signal_bar_time=str(st.get("last_signal_bar", "") or ""),
+                    reason="startup_or_state_recovery",
+                    role=self._position_role_from_comment(str(getattr(pos, "comment", "") or "")),
+                    reversal_of_ticket=self._reversal_origin_from_comment(str(getattr(pos, "comment", "") or "")),
+                )
+            self._error_row(spec, "owned_live_positions_adopted", f"tickets={[pos.ticket for pos in positions]}")
+            active_positions = self._active_positions(spec)
 
-        had_active_before_manage = bool(self._sym_state(spec).get("active"))
         self._manage_active(spec, info, positions)
-        if had_active_before_manage and not self._sym_state(spec).get("active"):
+        self._process_pending_reversal(spec, info)
+        if self._sym_state(spec).get("sync_block_new_entries"):
             return
-        if self._sym_state(spec).get("active") or self._sym_state(spec).get("sync_block_new_entries"):
+        active_positions = self._active_positions(spec)
+        if len(active_positions) >= self._max_active_positions(spec):
+            self._error_row(spec, "max_active_positions_reached_pre_signal", f"max={self._max_active_positions(spec)} active={len(active_positions)}")
+            self._save_state()
             return
 
         broker_tz = str(self.params.get("broker_timezone", "UTC"))
@@ -1194,10 +1607,19 @@ class S21EhlersRunner:
                     self._error_row(spec, "stale_signal_skip", f"entry_due_utc={entry_due} latest_allowed_utc={latest_allowed} now_utc={now_utc}")
                     self._save_state()
                     return
-        side = "long" if signal["side"] == "LONG" else "short"
+        signal_side = self._normalize_side(signal.get("side", ""))
+        side = self._signal_entry_side(signal_side)
         if self._same_direction_reentry_blocked_after_close(spec, signal, side):
             return
-        self._open_position(spec, info, signal)
+        self._open_position(
+            spec,
+            info,
+            side=side,
+            signal_bar_time=signal["bar_time"],
+            reason="ehlers_cross",
+            signal=signal,
+            position_role="normal",
+        )
 
     def run_once(self) -> None:
         if not bool(self.params.get("enabled", True)):
@@ -1219,6 +1641,8 @@ class S21EhlersRunner:
         compact = {
             key: {
                 "active": bool(value.get("active")),
+                "active_count": len(value.get("active_positions") or []),
+                "pending_reversal_count": len(value.get("pending_reversals") or []),
                 "last_signal_bar": value.get("last_signal_bar"),
                 "sync_block": value.get("sync_block_new_entries"),
                 "reason": value.get("sync_block_reason"),
@@ -1295,6 +1719,7 @@ class FakePosition:
         magic: int = 200021,
         comment: str = "s21_audusd_audusd",
         open_time: int = 1767225600,
+        identifier: int | None = None,
     ):
         self.ticket = int(ticket)
         self.symbol = symbol
@@ -1307,7 +1732,18 @@ class FakePosition:
         self.profit = 0.0
         self.magic = int(magic)
         self.open_time = int(open_time)
+        self.identifier = int(identifier if identifier is not None else ticket)
         self.comment = comment
+
+
+class FakeCloseDeal:
+    def __init__(self, position_id: int, reason: str, *, symbol: str = "AUDUSD", magic: int = 200021, price: float = 1.10825, net_profit: float = 3.2):
+        self.position_id = int(position_id)
+        self.reason = reason
+        self.symbol = symbol
+        self.magic = int(magic)
+        self.price = float(price)
+        self.net_profit = float(net_profit)
 
 
 class FakeOrder:
@@ -1347,6 +1783,7 @@ class FakeExecutor:
         open_error: str | None = None,
         open_adds_position: bool = False,
         account_mode: int = HEDGING_MARGIN_MODE,
+        close_deal: Any = False,
     ) -> None:
         self.positions = positions if positions is not None else []
         self.orders = orders if orders is not None else []
@@ -1356,6 +1793,7 @@ class FakeExecutor:
         self.open_error = open_error
         self.open_adds_position = open_adds_position
         self.account_mode = int(account_mode)
+        self.close_deal = close_deal
 
     def get_bridge_capabilities(self) -> dict[str, Any]:
         return {"name": S21_BRIDGE_NAME, "version": "selftest", "commands": REQUIRED_S21_COMMANDS}
@@ -1388,14 +1826,27 @@ class FakeExecutor:
     def confirm_position_absent(self, ticket: int) -> bool:
         return self.get_position(ticket) is None
 
+    def get_position_close_deal(self, position_id: int, opened_at_epoch: int) -> Any:
+        return self.close_deal
+
     def open_position(self, *args: Any, **kwargs: Any) -> Any | None:
         self.opened.append({"args": args, "kwargs": kwargs})
         if self.open_error:
             self.last_order_error = self.open_error
             return None
         ticket = 3001
+        order_type = int(args[1]) if len(args) > 1 else ORDER_TYPE_BUY
+        fake_side = "long" if order_type == ORDER_TYPE_BUY else "short"
         if self.open_adds_position:
-            self.positions.append(FakePosition(ticket, comment=kwargs.get("comment", "s21_audusd_audusd"), sl=0.0, tp=0.0))
+            self.positions.append(
+                FakePosition(
+                    ticket,
+                    side=fake_side,
+                    comment=kwargs.get("comment", "s21_audusd_audusd"),
+                    sl=0.0,
+                    tp=0.0,
+                )
+            )
         return FakeTicket(ticket, 1.10505)
 
     def modify_position_sl_tp(self, ticket: int, sl: float = 0.0, tp: float = 0.0, digits: int = 5) -> bool:
@@ -1452,8 +1903,144 @@ def run_self_test() -> int:
         runner = make_self_test_runner(params, bars, FakeExecutor())
         runner.run_once()
         active = runner.state["symbols"]["AUDUSD"]["active"]
-        assert active and active["side"] == "long" and active["shadow"], "shadow long position was not opened"
-        assert float(active["sl"]) < float(active["entry"]) < float(active["tp"]), "shadow SL/TP are not around entry"
+        assert active and active["side"] == "short" and active["shadow"], "shadow short position was not opened"
+        assert active["position_role"] == "normal", "first normal cycle entry must be recorded as normal role"
+        assert float(active["sl"]) > float(active["entry"]) > float(active["tp"]), "shadow SL/TP are not around entry"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["active_positions"] = [
+            {
+                "ticket": 5001,
+                "shadow": True,
+                "side": "short",
+                "position_role": "normal",
+                "lot": 0.01,
+                "entry": 1.10505,
+                "last_price": 1.10505,
+                "sl": 1.10185,
+                "tp": 1.10825,
+                "opened_at": dt_text(utc_now()),
+                "signal_bar_time": "2026-01-01T00:00:00+00:00",
+                "comment": "s21_audusd_audusd_n",
+            }
+        ]
+        st["active"] = st["active_positions"][0]
+        runner._clear_position(spec, st["active_positions"][0], "shadow_tp", 3.2)
+        assert st["pending_reversal"], "normal TP close must prepare a pending reversal"
+        assert st["pending_reversal"]["origin_side"] == "short", "pending reversal should remember origin side"
+        assert st["pending_reversal"]["reversal_side"] == "long", "pending reversal should reverse side"
+        runner.run_once()
+        active = runner.state["symbols"]["AUDUSD"]["active"]
+        assert active and active["position_role"] == "reversal" and active["reversal_of_ticket"] == 5001, "reversal open must be created from pending tp"
+        assert runner.state["symbols"]["AUDUSD"]["pending_reversal"] is None, "pending reversal must be consumed after one execution"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        first = {
+            "ticket": -5002, "shadow": True, "side": "long", "position_role": "normal", "lot": 0.01,
+            "entry": 1.1000, "last_price": 1.1032, "sl": 1.0968, "tp": 1.1032,
+            "opened_at": dt_text(utc_now()), "signal_bar_time": "2026-01-01T01:00:00+00:00", "comment": "s21_audusd_audusd_n",
+        }
+        second = {
+            "ticket": -5003, "shadow": True, "side": "short", "position_role": "normal", "lot": 0.01,
+            "entry": 1.1000, "last_price": 1.0968, "sl": 1.1032, "tp": 1.0968,
+            "opened_at": dt_text(utc_now()), "signal_bar_time": "2026-01-01T02:00:00+00:00", "comment": "s21_audusd_audusd_n",
+        }
+        runner._set_active_positions(spec, [first, second])
+        runner._clear_position(spec, first, "shadow_tp", 3.2)
+        runner._clear_position(spec, second, "shadow_tp", 3.2)
+        assert [item["origin_ticket"] for item in st["pending_reversals"]] == [-5002, -5003], "same-poll TP closes must queue both reversals"
+
+        runner = make_self_test_runner(params, bars, FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["active_positions"] = [
+            {
+                "ticket": -200021100,
+                "shadow": True,
+                "side": "short",
+                "position_role": "normal",
+                "lot": 0.01,
+                "entry": 1.10505,
+                "last_price": 1.10505,
+                "sl": 1.10905,
+                "tp": 1.10105,
+                "opened_at": dt_text(utc_now()),
+                "signal_bar_time": "2026-01-01T00:00:00+00:00",
+                "comment": "s21_audusd_audusd_n",
+            }
+        ]
+        st["active"] = st["active_positions"][0]
+        runner.run_once()
+        st = runner.state["symbols"]["AUDUSD"]
+        assert len(st["active_positions"]) == 2, "existing active should not block cycle entry scheduling"
+        assert not st["sync_block_new_entries"], "existing active should not block cycle entry scheduling"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["active_positions"] = [
+            {
+                "ticket": 5201,
+                "shadow": True,
+                "side": "long",
+                "position_role": "normal",
+                "lot": 0.01,
+                "entry": 1.10505,
+                "last_price": 1.10505,
+                "sl": 1.10185,
+                "tp": 1.10825,
+                "opened_at": dt_text(utc_now()),
+                "signal_bar_time": "2026-01-01T00:00:00+00:00",
+                "comment": "s21_audusd_audusd_n",
+                "reversal_of_ticket": None,
+            },
+            {
+                "ticket": 5202,
+                "shadow": True,
+                "side": "short",
+                "position_role": "reversal",
+                "lot": 0.01,
+                "entry": 1.10505,
+                "last_price": 1.10505,
+                "sl": 1.10825,
+                "tp": 1.10105,
+                "opened_at": dt_text(utc_now()),
+                "signal_bar_time": "2026-01-01T00:00:00+00:00",
+                "comment": "s21_audusd_audusd_r",
+                "reversal_of_ticket": 5201,
+            },
+        ]
+        st["active"] = st["active_positions"][0]
+        st["pending_reversal"] = {
+            "origin_ticket": 5201,
+            "origin_side": "long",
+            "origin_reason": "shadow_tp",
+            "origin_role": "normal",
+            "reversal_side": "short",
+            "created_at_utc": dt_text(utc_now()),
+            "created_signal_bar": "2026-01-01T00:00:00+00:00",
+        }
+        runner.run_once()
+        st = runner.state["symbols"]["AUDUSD"]
+        assert st["pending_reversal"] is None, "pending reversal should be ignored when reversal already exists after restart"
+        assert len(st["active_positions"]) == 2, "restart with stale pending reversal must not create duplicate reversal"
+
+        recovered_reversal = FakePosition(5302, side="short", comment="s21_audusd_r5301", open_time=int(utc_now().timestamp()))
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor(positions=[recovered_reversal]))
+        st = runner.state["symbols"]["AUDUSD"]
+        st["pending_reversal"] = {
+            "origin_ticket": 5301,
+            "origin_side": "long",
+            "origin_reason": "live_tp",
+            "origin_role": "normal",
+            "reversal_side": "short",
+            "created_at_utc": dt_text(utc_now()),
+            "created_signal_bar": "2026-01-01T00:00:00+00:00",
+        }
+        runner.run_once()
+        st = runner.state["symbols"]["AUDUSD"]
+        assert st["pending_reversal"] is None, "broker recovery must consume stale pending reversal by origin comment"
+        assert len(st["active_positions"]) == 1 and st["active_positions"][0]["reversal_of_ticket"] == 5301, "broker recovery must restore reversal origin"
 
         foreign = FakePosition(9101, magic=999999, comment="foreign_bot")
         runner = make_self_test_runner(params, bars, FakeExecutor(positions=[foreign], orders=[FakeOrder(9201, magic=999999)]))
@@ -1482,7 +2069,11 @@ def run_self_test() -> int:
         st = runner.state["symbols"]["AUDUSD"]
         assert st["active"] and not st["active"]["shadow"] and st["active"]["ticket"] == 3001, "live OPEN must be confirmed from POSITIONS before active state"
         assert live_open_executor.modified, "live OPEN should repair SL/TP from confirmed fill when needed"
-        assert float(st["active"]["sl"]) < float(st["active"]["entry"]) < float(st["active"]["tp"]), "confirmed live SL/TP should bracket entry"
+        assert st["active"]["position_role"] == "normal", "live open should be recorded as normal role"
+        if st["active"]["side"] == "long":
+            assert float(st["active"]["sl"]) < float(st["active"]["entry"]) < float(st["active"]["tp"]), "confirmed live SL/TP should bracket entry for long"
+        else:
+            assert float(st["active"]["sl"]) > float(st["active"]["entry"]) > float(st["active"]["tp"]), "confirmed live SL/TP should bracket entry for short"
 
         drift_pos = FakePosition(2200, comment="s21_audusd_audusd")
         runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor(positions=[drift_pos]))
@@ -1585,6 +2176,90 @@ def run_self_test() -> int:
             "long",
         )
         assert not allowed, "opposite-direction signal should not be blocked by same-direction close guard"
+
+        live_tp_executor = FakeExecutor(close_deal=FakeCloseDeal(6101, "DEAL_REASON_TP"))
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), live_tp_executor)
+        runner._set_active_from_position(
+            spec,
+            FakePosition(6101, identifier=6101, comment=runner._comment_for_position(spec, "normal")),
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_live_tp",
+        )
+        runner._manage_active(spec, FakeInfo(), [])
+        st = runner.state["symbols"]["AUDUSD"]
+        assert st["pending_reversal"] and st["pending_reversal"]["origin_ticket"] == 6101, "confirmed MT5 TP deal must prepare reversal"
+
+        manual_executor = FakeExecutor(close_deal=FakeCloseDeal(6201, "DEAL_REASON_CLIENT"))
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), manual_executor)
+        runner._set_active_from_position(
+            spec,
+            FakePosition(6201, identifier=6201, comment=runner._comment_for_position(spec, "normal")),
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_manual_close",
+        )
+        runner._manage_active(spec, FakeInfo(), [])
+        assert runner.state["symbols"]["AUDUSD"]["pending_reversal"] is None, "non-TP close deal must never prepare reversal"
+
+        pending_deal_executor = FakeExecutor(close_deal=False)
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), pending_deal_executor)
+        runner._set_active_from_position(
+            spec,
+            FakePosition(6301, identifier=6301, comment=runner._comment_for_position(spec, "normal")),
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_pending_deal",
+        )
+        runner._manage_active(spec, FakeInfo(), [])
+        st = runner.state["symbols"]["AUDUSD"]
+        assert st["active_positions"] and st["sync_block_reason"] == "close_deal_not_confirmed", "missing close deal must retain state and fail closed"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["last_signal_bar"] = "2026-01-02 07:00:00+00:00"
+        opened = runner._open_position(
+            spec,
+            FakeInfo(),
+            side="long",
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_old_reversal",
+            position_role="reversal",
+            reversal_of_ticket=6401,
+        )
+        assert opened and st["last_signal_bar"] == "2026-01-02 07:00:00+00:00", "reversal must not rewind normal signal consumption"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["pending_reversal"] = {
+            "origin_ticket": 6501,
+            "reversal_side": "long",
+            "created_signal_bar": "2026-01-01 07:00:00+00:00",
+        }
+        wide = FakeInfo()
+        wide.ask = 1.10600
+        wide.bid = 1.10500
+        runner._process_pending_reversal(spec, wide)
+        assert st["pending_reversal"] is not None, "failed reversal OPEN must remain pending"
+
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        st = runner.state["symbols"]["AUDUSD"]
+        st["active_positions"] = [{
+            "ticket": -6601,
+            "position_identifier": -6601,
+            "shadow": True,
+            "side": "long",
+            "position_role": "normal",
+            "lot": 0.01,
+            "entry": 1.10000,
+            "last_price": 1.10000,
+            "sl": 1.09000,
+            "tp": 1.10400,
+            "opened_at": "2026-01-01T00:00:00+00:00",
+            "signal_bar_time": "2026-01-01 00:00:00+00:00",
+            "comment": runner._comment_for_position(spec, "normal"),
+            "reversal_of_ticket": None,
+        }]
+        st["active"] = st["active_positions"][0]
+        runner._manage_active(spec, FakeInfo(), [])
+        assert not st["active_positions"] and st["pending_reversal"], "shadow TP manage path must close once without stale single-active code"
 
         runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor(account_mode=0))
         assert not runner.connect_and_preflight(), "live preflight must reject non-hedging accounts"

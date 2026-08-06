@@ -7,8 +7,8 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s21"
-#define BRIDGE_VERSION "2026-07-23-ehlers-top3-v2-retcode-tz-account"
-#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,MODIFY,CANCEL,CLOSE"
+#define BRIDGE_VERSION "2026-08-06-ehlers-top3-v3-close-deal"
+#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,CLOSEDEAL,MODIFY,CANCEL,CLOSE"
 
 input string InpCommandFile = "cmd_s21.txt";
 input string InpResponseFile = "res_s21.txt";
@@ -52,9 +52,10 @@ string PositionRecord()
    double profit = PositionGetDouble(POSITION_PROFIT);
    long magic = PositionGetInteger(POSITION_MAGIC);
    datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+   ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
    string comment = PositionGetString(POSITION_COMMENT);
-   return StringFormat("%I64u,%s,%d,%.2f,%.10f,%.10f,%.10f,%.2f,%d,%d,%s",
-      ticket, symbol, (int)type, volume, open_price, sl, tp, profit, (int)magic, (int)open_time, comment);
+   return StringFormat("%I64u,%s,%d,%.2f,%.10f,%.10f,%.10f,%.2f,%d,%d,%I64u,%s",
+      ticket, symbol, (int)type, volume, open_price, sl, tp, profit, (int)magic, (int)open_time, identifier, comment);
 }
 
 string OrderRecord()
@@ -282,6 +283,43 @@ string HandleCommand(const string command)
          response += "|" + OrderRecord();
       }
       return response;
+   }
+
+   if(op == "CLOSEDEAL" && n >= 3)
+   {
+      ulong position_id = (ulong)StringToInteger(parts[1]);
+      datetime from_time = (datetime)StringToInteger(parts[2]);
+      if(position_id == 0)
+         return "ERR|BAD_POSITION_ID";
+      if(from_time <= 0)
+         from_time = TimeCurrent() - 86400 * 30;
+      if(!HistorySelect(from_time, TimeCurrent() + 60))
+         return StringFormat("ERR|CLOSEDEAL_HISTORY|%d", GetLastError());
+      int total = HistoryDealsTotal();
+      for(int i = total - 1; i >= 0; --i)
+      {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         if((ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != position_id)
+            continue;
+         long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+            continue;
+         string symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
+         long magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+         long reason = HistoryDealGetInteger(deal, DEAL_REASON);
+         double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+         double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+         double commission = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+         double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+         double fee = HistoryDealGetDouble(deal, DEAL_FEE);
+         datetime deal_time = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+         return StringFormat("OK|FOUND|%I64u|%I64u|%s|%d|%s|%.10f|%.2f|%.2f|%.2f|%.2f|%d",
+            deal, position_id, symbol, (int)magic, EnumToString((ENUM_DEAL_REASON)reason),
+            price, profit, commission, swap, fee, (int)deal_time);
+      }
+      return "OK|NONE";
    }
 
    if(op == "MODIFY" && n >= 4)

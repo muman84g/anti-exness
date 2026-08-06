@@ -318,7 +318,7 @@ services:
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s20.txt
       - EA_BRIDGE_LOCK_FILE=ea_bridge_s20.lock
 
-  # ---- Bot 21 (S21 Ehlers top3 shadow-first) ----
+  # ---- Bot 21 (S21 Ehlers top3 live-order) ----
   exness-bot-21:
     image: exness-bot:latest
     container_name: exness-bot-21

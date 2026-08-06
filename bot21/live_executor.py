@@ -18,6 +18,7 @@ REQUIRED_S21_COMMANDS = {
     "POSITIONS",
     "POSITION",
     "ORDERS",
+    "CLOSEDEAL",
     "MODIFY",
     "CLOSE",
 }
@@ -74,6 +75,7 @@ class PositionInfo:
         profit,
         magic,
         open_time,
+        identifier,
         comment,
     ):
         self.ticket = int(ticket)
@@ -87,14 +89,35 @@ class PositionInfo:
         self.profit = float(profit)
         self.magic = int(magic)
         self.open_time = open_time
+        self.identifier = int(identifier)
         self.comment = comment
 
     @classmethod
     def from_record(cls, record):
-        parts = record.split(",", 10)
-        if len(parts) < 11:
+        parts = record.split(",", 11)
+        if len(parts) == 11:
+            parts.insert(10, parts[0])
+        if len(parts) < 12:
             raise ValueError(f"Invalid position record: {record}")
-        return cls(*parts[:11])
+        return cls(*parts[:12])
+
+class PositionCloseDeal:
+    def __init__(self, deal, position_id, symbol, magic, reason, price, profit, commission, swap, fee, deal_time):
+        self.deal = int(deal)
+        self.position_id = int(position_id)
+        self.symbol = str(symbol)
+        self.magic = int(magic)
+        self.reason = str(reason)
+        self.price = float(price)
+        self.profit = float(profit)
+        self.commission = float(commission)
+        self.swap = float(swap)
+        self.fee = float(fee)
+        self.deal_time = int(deal_time)
+
+    @property
+    def net_profit(self):
+        return self.profit + self.commission + self.swap + self.fee
 
 class OrderInfo:
     def __init__(
@@ -320,6 +343,24 @@ class MT5Executor(BaseExecutor):
                 logging.error(f"Failed to parse order record '{record}': {e}")
                 return None
         return orders
+
+    def get_position_close_deal(self, position_id, opened_at_epoch):
+        """Return the confirmed MT5 exit deal, False when pending, or None on bridge failure."""
+        res = ea_bridge.send_command(f"CLOSEDEAL|{int(position_id)}|{int(opened_at_epoch)}")
+        if not res or not res.startswith("OK|"):
+            logging.error("EA failed to get close deal for position %s: %s", position_id, res)
+            return None
+        parts = res.split("|")
+        if len(parts) >= 2 and parts[1] == "NONE":
+            return False
+        if len(parts) < 13 or parts[1] != "FOUND":
+            logging.error("EA returned malformed close deal for position %s: %s", position_id, res)
+            return None
+        try:
+            return PositionCloseDeal(*parts[2:13])
+        except (TypeError, ValueError) as exc:
+            logging.error("EA returned unparsable close deal for position %s: %s (%s)", position_id, res, exc)
+            return None
 
     def open_position(self, symbol, order_type, lot_size, sl=0.0, tp=0.0, deviation=20, magic=123456, comment="", digits=None):
         """

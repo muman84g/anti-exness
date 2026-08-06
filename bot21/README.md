@@ -1,6 +1,6 @@
 # Bot21 / S21 Ehlers Top3 Multi-Symbol
 
-S21 is the shadow-first implementation of the backtest67_1 Ehlers 1h candidates:
+S21 is the live-order implementation of the backtest67_1_bot21 Ehlers 1h candidates:
 
 - `US500_137_1h`
 - `AUDUSD_021_1h`
@@ -15,10 +15,13 @@ S21 is the shadow-first implementation of the backtest67_1 Ehlers 1h candidates:
   - Long: previous close <= previous trendline and current close > trendline
   - Short: previous close >= previous trendline and current close < trendline
   - Cycle filter: `abs(close - trendline) > ATR14 * cycle_atr`
-- Entry: market order after the H1 signal bar is confirmed
+- Entry: market order after the H1 signal bar is confirmed, in the direction opposite to the Ehlers signal
+- Cycle concurrency: confirmed signal bars may open new normal positions while older positions remain active; normal and reversal positions together are capped by `max_active_positions` per symbol
 - Exit:
   - Server SL/TP when live trading is enabled
   - Bot time close after `max_hold_bars` hours from actual entry time
+  - A confirmed MT5 TP deal on a normal position queues one opposite-side reversal position with the same configured SL/TP distances
+  - SL, time, manual, unknown, and reversal-position closes do not create another reversal
 
 ## Files
 
@@ -31,14 +34,14 @@ S21 is the shadow-first implementation of the backtest67_1 Ehlers 1h candidates:
 
 ## Live Switch
 
-Default params are intentionally shadow-forward:
+Current params are live-order enabled by explicit user instruction on 2026-07-27:
 
 ```json
-"live_trading_enabled": false,
-"shadow_forward_enabled": true
+"live_trading_enabled": true,
+"shadow_forward_enabled": false
 ```
 
-Real order placement requires an explicit change to `s21_params.json` and a separate deploy/restart authorization.
+Service deployment, bridge attachment, or restart are separate runtime actions.
 
 Live trading also requires a hedging account. The runner rejects netting/exchange account modes because shared-account ownership cannot be isolated safely by magic/comment there.
 
@@ -46,6 +49,8 @@ Live trading also requires a hedging account. The runner rejects netting/exchang
 
 - EA trade calls verify `ResultRetcode()` and deal/order evidence; `CTrade` boolean success alone is not accepted.
 - Python re-queries bot-owned `POSITIONS` after live `OPEN` before writing active state.
+- Server-side TP is accepted only from the matching MT5 close deal (`position identifier`, symbol, and magic); current price is not used to infer TP.
+- Reversal comments retain the origin ticket so restart recovery cannot create the same reversal twice.
 - Ticket drift is adopted only when one symbol/magic/comment/side match exists.
 - Transient position/order sync failures block entries only until the next clean sync; ambiguous ownership remains blocked.
 - Market deviation is `max_deviation_points=20` by default.
@@ -54,6 +59,7 @@ Live trading also requires a hedging account. The runner rejects netting/exchang
 ## Bridge
 
 Attach/compile `BotBridge_s21.mq5` in MT5 Expert Advisors.
+The current runner requires bridge capability `CLOSEDEAL`; an older compiled `BotBridge_s21.ex5` is rejected by preflight.
 
 Required EA inputs:
 
@@ -93,8 +99,18 @@ One-cycle preflight/run:
 python3 /app/bot21/live_s21_bot.py --once
 ```
 
-Normal shadow run:
+Normal live-order run:
 
 ```bash
 python3 /app/bot21/live_s21_bot.py
 ```
+
+After pulling an update on the CentOS host, compile/attach the updated bridge in MT5 and recreate only this service before live use:
+
+```bash
+sudo docker compose run --rm --no-deps exness-bot-21 python3 /app/bot21/live_s21_bot.py --self-test
+sudo docker compose up -d --no-deps --force-recreate exness-bot-21
+sudo docker compose logs --tail=100 exness-bot-21
+```
+
+Do not treat `git pull` alone as deployment. Confirm `S21 preflight ok.` in the recreated service logs; a stale bridge must fail at the CAPS check instead of placing orders.

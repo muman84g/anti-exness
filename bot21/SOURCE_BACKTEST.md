@@ -1,6 +1,6 @@
 # Source Backtest
 
-Implemented candidates from `C:\botter\backtest\output\backtest67_1`:
+Implemented candidates from `C:\botter\backtest\output\backtest67_1_bot21`:
 
 | Symbol | Spec | Params | Dev PnL | Dev PF | Dev MDD | Dev Trades |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -23,6 +23,10 @@ Leak and execution audits:
 
 Backtest/live mapping:
 
+- The live normal-entry direction is intentionally inverted from the frozen backtest signal direction.
+- A normal position closed by a confirmed MT5 TP deal creates at most one opposite-side reversal position using its own fill and the same configured SL/TP distances.
+- Multiple confirmed signal cycles may coexist; normal and reversal positions share the `max_active_positions` cap, and reversal opens do not modify normal-signal consumption state.
+- These inversion, reversal, and concurrent-cycle rules are live adaptations, not behavior claimed for the cited source backtest.
 - Backtest signal: completed H1 bar, entry on next H1 open.
 - Live signal: completed H1 bar fetched from MT5; latest possibly incomplete H1 bar is dropped.
 - MT5 `HIST` bar timestamps were directly checked on CentOS via read-only EA IPC
@@ -35,7 +39,7 @@ Backtest/live mapping:
 - MQL bridge execution must confirm `ResultRetcode()` and deal/order evidence. Python records live active state only after a symbol/magic/comment/side `POSITIONS` re-query uniquely confirms the position.
 - Default market deviation is `max_deviation_points=20`.
 - Real trading preflight requires a hedging account (`require_hedging_account=true`); netting/exchange modes are rejected for shared-account ownership safety.
-- Default mode is shadow-forward. Real trading, service deployment, bridge attachment, or restart were not authorized by this source note.
+- Live-order params were enabled by explicit user instruction on 2026-07-27. Service deployment, bridge attachment, or restart are still separate runtime actions.
 
 Known differences and cautions:
 
