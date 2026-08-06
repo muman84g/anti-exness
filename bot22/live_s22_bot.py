@@ -713,7 +713,15 @@ class S22SqueezePullbackRunner:
             active["tp"] = desired_tp
         return True
 
-    def _clear_active(self, spec: dict[str, Any], reason: str, profit: float = 0.0) -> None:
+    def _clear_active(
+        self,
+        spec: dict[str, Any],
+        reason: str,
+        profit: float = 0.0,
+        *,
+        close_price: float | None = None,
+        note: str = "",
+    ) -> None:
         st = self._sym_state(spec)
         active = st.get("active") or {}
         closed_side = str(active.get("side", "") or "")
@@ -724,12 +732,13 @@ class S22SqueezePullbackRunner:
             ticket=active.get("ticket", ""),
             side=active.get("side", ""),
             lot=active.get("lot", ""),
-            price=active.get("last_price", ""),
+            price=close_price if close_price is not None else active.get("last_price", ""),
             sl=active.get("sl", ""),
             tp=active.get("tp", ""),
             profit=profit,
             reason=reason,
             signal_bar_time=active.get("signal_bar_time", ""),
+            note=note,
         )
         st["active"] = None
         st["open_retry_after_utc"] = None
@@ -872,12 +881,19 @@ class S22SqueezePullbackRunner:
                 absent = self.executor.confirm_position_absent(ticket)
                 if absent is True:
                     close_price = float(getattr(result, "close_price", 0.0) or 0.0)
+                    profit_pips = None
                     if close_price > 0:
                         entry = float(active.get("entry", getattr(result, "open_price", 0.0)) or 0.0)
-                        pnl = (close_price - entry) / float(spec["pip_size"]) if side == "long" else (entry - close_price) / float(spec["pip_size"])
-                    else:
-                        pnl = float(getattr(result, "profit", 0.0))
-                    self._clear_active(spec, "live_time_close", pnl)
+                        profit_pips = (close_price - entry) / float(spec["pip_size"]) if side == "long" else (entry - close_price) / float(spec["pip_size"])
+                    broker_profit = float(getattr(result, "profit", 0.0) or 0.0)
+                    note = "" if profit_pips is None else f"profit_pips={profit_pips:.6f}"
+                    self._clear_active(
+                        spec,
+                        "live_time_close",
+                        broker_profit,
+                        close_price=close_price if close_price > 0 else None,
+                        note=note,
+                    )
                 else:
                     self._set_sync_block(
                         spec,
@@ -1588,6 +1604,32 @@ def run_self_test() -> int:
             "long",
         )
         assert not allowed, "opposite-direction signal should not be blocked by same-direction close guard"
+
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor())
+        captured_close: list[dict[str, Any]] = []
+        runner._trade_row = lambda event, event_spec, **kwargs: captured_close.append(
+            {"event": event, "spec": event_spec, **kwargs}
+        )
+        runner.state["symbols"]["EURUSD"]["active"] = {
+            "ticket": 123,
+            "side": "long",
+            "lot": 0.01,
+            "entry": 1.10000,
+            "last_price": 1.10000,
+            "sl": 1.09570,
+            "tp": 1.10480,
+            "signal_bar_time": "2026-01-01 07:00:00+00:00",
+        }
+        runner._clear_active(
+            spec,
+            "live_time_close",
+            4.25,
+            close_price=1.10132,
+            note="profit_pips=13.200000",
+        )
+        assert captured_close[-1]["price"] == 1.10132, "live close must record execution close price"
+        assert captured_close[-1]["profit"] == 4.25, "live close must record broker account-currency profit"
+        assert captured_close[-1]["note"] == "profit_pips=13.200000", "pip result must be separately labelled"
 
         runner = make_self_test_runner(live_params, make_no_signal_bars(), FakeExecutor(account_mode=0))
         assert not runner.connect_and_preflight(), "live preflight must reject non-hedging accounts"

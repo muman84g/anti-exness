@@ -223,6 +223,8 @@ class S20GoldBasketRunner:
             "basket": None,
             "positions": [],
             "last_signal_h1_time": None,
+            "last_h1_evaluation_time": None,
+            "last_h1_evaluation_result": None,
             "pending_entry_signal": None,
             "sync_block_new_entries": False,
             "sync_block_reason": None,
@@ -342,7 +344,8 @@ class S20GoldBasketRunner:
             return cached[1]
         df = self.dm.get_historical_data(self.symbol, timeframe, bars)
         if df is None or df.empty:
-            self._bar_cache[key] = (now_monotonic, None)
+            # Do not replace the last good cache with a synthetic failed value.
+            # Return None for this cycle and retry on the next poll.
             return None
         df = df.sort_index()
         self._bar_cache[key] = (now_monotonic, df)
@@ -887,6 +890,21 @@ class S20GoldBasketRunner:
         if m1_atr is None or m1_atr <= 0:
             return
         signal = self._signal(h1, m1)
+        evaluated_h1 = None
+        if h1 is not None and not h1.empty:
+            evaluated = h1.iloc[:-1] if bool(self.params.get("drop_latest_h1_bar", True)) and len(h1) > 1 else h1
+            if not evaluated.empty:
+                evaluated_h1 = str(evaluated.index[-1])
+        if evaluated_h1 and self.state.get("last_h1_evaluation_time") != evaluated_h1:
+            result = "signal" if signal else "no_signal"
+            self.state["last_h1_evaluation_time"] = evaluated_h1
+            self.state["last_h1_evaluation_result"] = result
+            self._save_state()
+            logging.info(
+                "S20 H1 evaluation: h1_time=%s result=%s data_ready=True block=False",
+                evaluated_h1,
+                result,
+            )
         if not signal:
             return
         if self._entry_confirm_enabled():
@@ -916,6 +934,11 @@ class S20GoldBasketRunner:
             self._set_sync_block("symbol info failed")
             self._save_state()
             return
+
+        # INFO取得が復旧したら、一時的なINFOエラーブロックを解除する
+        if self.state.get("sync_block_reason") == "symbol info failed":
+            self._set_sync_block(None)
+            self._save_state()
 
         h1 = self._get_bars("h1", int(self.params["h1_timeframe"]), int(self.params["h1_bars"]))
         m1 = self._get_bars("m1", int(self.params["m1_timeframe"]), int(self.params["m1_bars"]))

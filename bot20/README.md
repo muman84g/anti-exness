@@ -27,6 +27,8 @@ S20 is the live/shadow implementation of the backtest43 `large_candle_short_bask
 - State: `state/s20_bot_state.json`
 - Log: `logs/s20_bot.log`
 - Trades CSV: `logs/s20_trades.csv`
+- Runtime log records one `S20 H1 evaluation` per newly observed completed H1 bar once H1/M1 data are usable. `result=no_signal` distinguishes a completed strategy evaluation from a cycle skipped because market/bridge data were unavailable.
+- A failed bar refresh is not cached as a synthetic empty result; the next poll retries without consuming the H1 signal identity.
 - Bridge source: `BotBridge_s20.mq5`
 
 ## Live Switch

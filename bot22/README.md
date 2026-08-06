@@ -29,6 +29,8 @@ S22 is the live-order implementation of the fixed backtest108_1 candidate:
 - State: `state/s22_bot_state.json`
 - Log: `logs/s22_bot.log`
 - Trades CSV: `logs/s22_trades.csv`
+- Live `CLOSE` rows record the EA-confirmed close price and broker account-currency profit. Pip movement is separately labelled in `note` as `profit_pips=...`.
+- Malformed or nonnumeric `HIST` rows are skipped with a warning; an all-invalid response fails the cycle closed instead of advancing signal state.
 - Bridge source: `BotBridge_s22.mq5`
 
 ## Live Mode
