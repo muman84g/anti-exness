@@ -23,6 +23,7 @@ Leak and execution audits:
 
 Backtest/live mapping:
 
+- `US500` remains source evidence but is disabled in live params because the observed broker minimum lot exceeded the frozen `0.03`; no automatic lot increase is allowed.
 - The live normal-entry direction is intentionally inverted from the frozen backtest signal direction.
 - A normal position closed by a confirmed MT5 TP deal creates at most one opposite-side reversal position using its own fill and the same configured SL/TP distances.
 - Multiple confirmed signal cycles may coexist; normal and reversal positions share the `max_active_positions` cap, and reversal opens do not modify normal-signal consumption state.

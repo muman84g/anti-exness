@@ -8,7 +8,8 @@ S21 is the live-order implementation of the backtest67_1_bot21 Ehlers 1h candida
 
 ## Strategy
 
-- Symbols: `US500`, `AUDUSD`, `USDJPY`
+- Active symbols: `AUDUSD`, `USDJPY`
+- `US500` is disabled because the live broker minimum increased above the frozen `0.03` lot; the bot must not auto-increase risk to meet it.
 - Timeframe: H1 confirmed bars. MT5 bar timestamps are interpreted as broker server time (`Europe/Athens`) and converted to UTC before signal/stale checks.
 - Signal: Ehlers trendline cross
   - Trendline: EMA of H1 close

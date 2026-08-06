@@ -19,7 +19,7 @@
   "max_active_positions": 3,
   "symbols": [
     {
-      "enabled": true,
+      "enabled": false,
       "symbol": "US500",
       "mt5_symbol": "US500",
       "spec_id": "US500_137_1h",
