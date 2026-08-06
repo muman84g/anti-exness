@@ -50,7 +50,9 @@ Live trading also requires a hedging account. The runner rejects netting/exchang
 
 - EA trade calls verify `ResultRetcode()` and deal/order evidence; `CTrade` boolean success alone is not accepted.
 - Python re-queries bot-owned `POSITIONS` after live `OPEN` before writing active state.
-- Server-side TP is accepted only from the matching MT5 close deal (`position identifier`, symbol, and magic); current price is not used to infer TP.
+- Server-side TP is accepted only from the matching MT5 close deal (`position identifier` and symbol) for a state record whose bot21 ownership was verified at open; current price is not used to infer TP.
+- State reconciliation runs every poll. `POSITION_IDENTIFIER` is the primary identity, with symbol and previously verified bot21 open ownership as supporting evidence.
+- Exit-deal magic identifies the closer and may be `0` after a manual close; it is recorded but does not override an exact verified position-identifier match. Manual and other non-TP closes clear state without reversal.
 - Reversal comments retain the origin ticket so restart recovery cannot create the same reversal twice.
 - Ticket drift is adopted only when one symbol/magic/comment/side match exists.
 - Transient position/order sync failures block entries only until the next clean sync; ambiguous ownership remains blocked.

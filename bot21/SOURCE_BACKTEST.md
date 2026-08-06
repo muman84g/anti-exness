@@ -28,6 +28,7 @@ Backtest/live mapping:
 - A normal position closed by a confirmed MT5 TP deal creates at most one opposite-side reversal position using its own fill and the same configured SL/TP distances.
 - Multiple confirmed signal cycles may coexist; normal and reversal positions share the `max_active_positions` cap, and reversal opens do not modify normal-signal consumption state.
 - These inversion, reversal, and concurrent-cycle rules are live adaptations, not behavior claimed for the cited source backtest.
+- Live state recovery uses exact MT5 position identifiers rather than symbol alone. Manual close deals may carry magic `0`; exact identifier/symbol plus verified open ownership clears state without creating a reversal.
 - Backtest signal: completed H1 bar, entry on next H1 open.
 - Live signal: completed H1 bar fetched from MT5; latest possibly incomplete H1 bar is dropped.
 - MT5 `HIST` bar timestamps were directly checked on CentOS via read-only EA IPC

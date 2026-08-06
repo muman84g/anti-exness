@@ -271,7 +271,7 @@ class S21EhlersRunner:
 
     def _default_state(self) -> dict[str, Any]:
         return {
-            "version": 4,
+            "version": 5,
             "strategy_id": self.params["strategy_id"],
             "magic": self.magic,
             "shadow_ticket_seq": -200021000,
@@ -321,8 +321,8 @@ class S21EhlersRunner:
             for spec in self.params.get("symbols", []):
                 key = symbol_key(spec)
                 base["symbols"][key] = deep_merge(default_symbols[key], base["symbols"].get(key, {}))
-            # Normalize legacy single-active and single-pending state into the v4 list schema.
-            base["version"] = 4
+            # Normalize legacy state into the v5 list and verified-ownership schema.
+            base["version"] = 5
             return base
         except Exception as exc:
             raise RuntimeError(f"Could not load state file {STATE_FILE}: {exc}") from exc
@@ -803,6 +803,10 @@ class S21EhlersRunner:
         built = {
             "ticket": int(pos.ticket),
             "position_identifier": int(getattr(pos, "identifier", pos.ticket)),
+            "ownership_verified": True,
+            "owner_symbol": str(getattr(pos, "symbol", "")),
+            "owner_magic": int(getattr(pos, "magic", -1)),
+            "owner_comment": str(getattr(pos, "comment", "") or ""),
             "shadow": False,
             "side": self._record_side(pos),
             "position_role": role_normalized,
@@ -828,6 +832,23 @@ class S21EhlersRunner:
         if not replaced:
             active_positions.append(built)
         self._set_active_positions(spec, active_positions)
+
+    def _active_ownership_proven(self, spec: dict[str, Any], active: dict[str, Any]) -> bool:
+        if bool(active.get("shadow", False)):
+            return False
+        position_id = int(active.get("position_identifier") or active.get("ticket") or 0)
+        comment = str(active.get("owner_comment") or active.get("comment") or "")
+        side = self._normalize_side(active.get("side", ""))
+        if position_id <= 0 or side not in {"long", "short"} or not comment.startswith(comment_prefix(spec)):
+            return False
+        if bool(active.get("ownership_verified", False)):
+            return (
+                str(active.get("owner_symbol", "")) == mt5_symbol(spec)
+                and int(active.get("owner_magic", -1)) == self.magic
+            )
+        # Legacy state was loaded only after strategy_id/magic validation. Exact position ID,
+        # symbol, side and bot comment still provide a safe migration proof after the position vanishes.
+        return True
 
     def _repair_live_sl_tp(self, spec: dict[str, Any], pos: Any, digits: int) -> bool:
         side = self._record_side(pos)
@@ -886,7 +907,12 @@ class S21EhlersRunner:
             profit=profit,
             reason=reason,
             signal_bar_time=active.get("signal_bar_time", ""),
-            note=f"position_identifier={active.get('position_identifier', '')} reversal_of_ticket={active.get('reversal_of_ticket', '')}",
+            note=(
+                f"position_identifier={active.get('position_identifier', '')} "
+                f"reversal_of_ticket={active.get('reversal_of_ticket', '')} "
+                f"close_deal_magic={active.get('close_deal_magic', '')} "
+                f"close_deal_reason={active.get('close_deal_reason', '')}"
+            ),
         )
         st["active_positions"] = [record for record in active_positions if int(record.get("ticket", 0)) != closed_ticket]
         self._set_active_positions(spec, st["active_positions"])
@@ -930,11 +956,7 @@ class S21EhlersRunner:
                 recoverable=True,
             )
             return None
-        if (
-            int(getattr(deal, "position_id", 0)) != position_id
-            or str(getattr(deal, "symbol", "")) != mt5_symbol(spec)
-            or int(getattr(deal, "magic", -1)) != self.magic
-        ):
+        if int(getattr(deal, "position_id", 0)) != position_id or str(getattr(deal, "symbol", "")) != mt5_symbol(spec):
             self._set_sync_block(
                 spec,
                 "close_deal_ownership_mismatch",
@@ -948,6 +970,26 @@ class S21EhlersRunner:
                 recoverable=False,
             )
             return None
+        if not self._active_ownership_proven(spec, active):
+            self._set_sync_block(
+                spec,
+                "close_deal_state_ownership_unverified",
+                {
+                    "ticket": int(active.get("ticket", 0)),
+                    "position_identifier": position_id,
+                    "deal_magic": int(getattr(deal, "magic", -1)),
+                },
+                recoverable=False,
+            )
+            return None
+        active["close_deal_magic"] = int(getattr(deal, "magic", -1))
+        active["close_deal_reason"] = str(getattr(deal, "reason", ""))
+        if self._sym_state(spec).get("sync_block_reason") in {
+            "close_deal_not_confirmed",
+            "close_deal_ownership_mismatch",
+            "close_deal_state_ownership_unverified",
+        }:
+            self._set_sync_block(spec, None)
         reason_name = str(getattr(deal, "reason", "")).upper()
         reason = "live_tp" if reason_name == "DEAL_REASON_TP" else "live_sl" if reason_name == "DEAL_REASON_SL" else f"live_{reason_name.lower()}"
         return reason, float(getattr(deal, "net_profit", 0.0)), float(getattr(deal, "price", 0.0))
@@ -1208,6 +1250,10 @@ class S21EhlersRunner:
 
             digits = int(spec.get("price_digits", getattr(info, "digits", 5)))
             active["position_identifier"] = int(getattr(pos, "identifier", pos.ticket))
+            active["ownership_verified"] = True
+            active["owner_symbol"] = str(getattr(pos, "symbol", ""))
+            active["owner_magic"] = int(getattr(pos, "magic", -1))
+            active["owner_comment"] = str(getattr(pos, "comment", "") or "")
             if not self._repair_live_sl_tp(spec, pos, digits):
                 self._save_state()
                 return
@@ -2177,7 +2223,7 @@ def run_self_test() -> int:
         )
         assert not allowed, "opposite-direction signal should not be blocked by same-direction close guard"
 
-        live_tp_executor = FakeExecutor(close_deal=FakeCloseDeal(6101, "DEAL_REASON_TP"))
+        live_tp_executor = FakeExecutor(close_deal=FakeCloseDeal(6101, "DEAL_REASON_TP", magic=0))
         runner = make_self_test_runner(live_params, make_no_signal_bars(), live_tp_executor)
         runner._set_active_from_position(
             spec,
@@ -2189,7 +2235,7 @@ def run_self_test() -> int:
         st = runner.state["symbols"]["AUDUSD"]
         assert st["pending_reversal"] and st["pending_reversal"]["origin_ticket"] == 6101, "confirmed MT5 TP deal must prepare reversal"
 
-        manual_executor = FakeExecutor(close_deal=FakeCloseDeal(6201, "DEAL_REASON_CLIENT"))
+        manual_executor = FakeExecutor(close_deal=FakeCloseDeal(6201, "DEAL_REASON_CLIENT", magic=0))
         runner = make_self_test_runner(live_params, make_no_signal_bars(), manual_executor)
         runner._set_active_from_position(
             spec,
@@ -2197,8 +2243,37 @@ def run_self_test() -> int:
             signal_bar_time="2026-01-01 07:00:00+00:00",
             reason="test_manual_close",
         )
+        runner._set_sync_block(spec, "close_deal_ownership_mismatch", {"deal_magic": 0}, recoverable=False)
         runner._manage_active(spec, FakeInfo(), [])
-        assert runner.state["symbols"]["AUDUSD"]["pending_reversal"] is None, "non-TP close deal must never prepare reversal"
+        st = runner.state["symbols"]["AUDUSD"]
+        assert not st["active_positions"] and st["pending_reversal"] is None, "manual magic-zero close must clear active without reversal"
+        assert not st["sync_block_new_entries"], "confirmed manual close must clear the prior close-deal block"
+
+        legacy_executor = FakeExecutor(close_deal=FakeCloseDeal(6251, "DEAL_REASON_CLIENT", magic=0))
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), legacy_executor)
+        runner._set_active_from_position(
+            spec,
+            FakePosition(6251, identifier=6251, comment=runner._comment_for_position(spec, "normal")),
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_legacy_manual_close",
+        )
+        legacy_active = runner.state["symbols"]["AUDUSD"]["active_positions"][0]
+        for key in ("ownership_verified", "owner_symbol", "owner_magic", "owner_comment"):
+            legacy_active.pop(key, None)
+        runner._manage_active(spec, FakeInfo(), [])
+        assert not runner.state["symbols"]["AUDUSD"]["active_positions"], "legacy bot-owned state must recover by exact position ID and bot comment"
+
+        mismatch_executor = FakeExecutor(close_deal=FakeCloseDeal(6299, "DEAL_REASON_CLIENT", magic=0))
+        runner = make_self_test_runner(live_params, make_no_signal_bars(), mismatch_executor)
+        runner._set_active_from_position(
+            spec,
+            FakePosition(6261, identifier=6261, comment=runner._comment_for_position(spec, "normal")),
+            signal_bar_time="2026-01-01 07:00:00+00:00",
+            reason="test_mismatched_close",
+        )
+        runner._manage_active(spec, FakeInfo(), [])
+        st = runner.state["symbols"]["AUDUSD"]
+        assert st["active_positions"] and st["sync_block_reason"] == "close_deal_ownership_mismatch", "different position ID must remain blocked"
 
         pending_deal_executor = FakeExecutor(close_deal=False)
         runner = make_self_test_runner(live_params, make_no_signal_bars(), pending_deal_executor)
