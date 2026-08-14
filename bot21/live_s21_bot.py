@@ -42,6 +42,12 @@ from live_executor import (
 from live_manual_alerts import notify_manual_action_required
 
 UTC = timezone.utc
+EXPECTED_S21_MAGIC = 200021
+FLAT_AUTO_CLEAR_SYNC_REASONS = {
+    "open_success_position_not_confirmed",
+    "live_time_close_failed",
+    "live_time_close_unconfirmed",
+}
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -284,6 +290,8 @@ class S21EhlersRunner:
                     "sync_block_reason": None,
                     "sync_block_recoverable": False,
                     "sync_block_details": {},
+                    "flat_clear_confirmation_count": 0,
+                    "flat_clear_confirmation_reason": None,
                     "open_retry_after_utc": None,
                     "autotrading_reject_streak": 0,
                     "autotrading_reject_notified": False,
@@ -537,6 +545,9 @@ class S21EhlersRunner:
         previous = st.get("sync_block_reason")
         if reason:
             clean_details = details or {}
+            if previous != reason:
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
             st["sync_block_new_entries"] = True
             st["sync_block_reason"] = reason
             st["sync_block_recoverable"] = bool(recoverable)
@@ -552,6 +563,8 @@ class S21EhlersRunner:
         st["sync_block_reason"] = None
         st["sync_block_recoverable"] = False
         st["sync_block_details"] = {}
+        st["flat_clear_confirmation_count"] = 0
+        st["flat_clear_confirmation_reason"] = None
 
     def _is_broker_sl_residual_block(self, st: dict[str, Any]) -> bool:
         if st.get("sync_block_reason") != "same_magic_unexpected_order":
@@ -572,12 +585,46 @@ class S21EhlersRunner:
         if not st.get("sync_block_new_entries"):
             return False
         if positions or orders:
+            if int(st.get("flat_clear_confirmation_count") or 0):
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
+                self._save_state()
             return False
         if bool(st.get("sync_block_recoverable")):
             reason = str(st.get("sync_block_reason") or "")
         elif self._is_broker_sl_residual_block(st):
             reason = "broker_sl_residual_flat"
+        elif (
+            str(st.get("sync_block_reason") or "") in FLAT_AUTO_CLEAR_SYNC_REASONS
+            and not self._active_positions(spec)
+            and not self._pending_reversals(spec)
+        ):
+            reason = f"confirmed_flat_after_{st.get('sync_block_reason')}"
         else:
+            return False
+        current_reason = str(st.get("sync_block_reason") or "")
+        if current_reason not in FLAT_AUTO_CLEAR_SYNC_REASONS:
+            self._set_sync_block(spec, None)
+            self._error_row(spec, "sync_block_cleared_flat", reason)
+            self._save_state()
+            return True
+        details = st.get("sync_block_details") or {}
+        related_ticket = int(details.get("ticket") or details.get("order_ticket") or 0)
+        if related_ticket > 0:
+            absent = self.executor.confirm_position_absent(related_ticket)
+            if absent is not True:
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
+                self._save_state()
+                return False
+        if st.get("flat_clear_confirmation_reason") == current_reason:
+            confirmations = int(st.get("flat_clear_confirmation_count") or 0) + 1
+        else:
+            confirmations = 1
+        st["flat_clear_confirmation_count"] = confirmations
+        st["flat_clear_confirmation_reason"] = current_reason
+        self._save_state()
+        if confirmations < 2:
             return False
         self._set_sync_block(spec, None)
         self._error_row(spec, "sync_block_cleared_flat", reason)
@@ -626,6 +673,10 @@ class S21EhlersRunner:
         return True
 
     def connect_and_preflight(self) -> bool:
+        namespace_error = self._ownership_namespace_error()
+        if namespace_error:
+            logging.critical("S21 ownership namespace invalid: %s", namespace_error)
+            return False
         if not self.dm.connect():
             logging.critical("S21 bridge connection failed.")
             return False
@@ -683,6 +734,16 @@ class S21EhlersRunner:
                 return False
         logging.info("S21 preflight ok.")
         return True
+
+    def _ownership_namespace_error(self) -> str | None:
+        if self.magic != EXPECTED_S21_MAGIC:
+            return f"magic={self.magic} expected={EXPECTED_S21_MAGIC}"
+        prefixes = [comment_prefix(spec) for spec in self.params.get("symbols", []) if bool(spec.get("enabled", True))]
+        if not prefixes or any(not prefix.startswith("s21_") for prefix in prefixes):
+            return f"invalid_comment_prefixes={prefixes}"
+        if len(prefixes) != len(set(prefixes)):
+            return f"duplicate_comment_prefixes={prefixes}"
+        return None
 
     def _next_shadow_ticket(self) -> int:
         ticket = int(self.state.get("shadow_ticket_seq", -200021000))
@@ -1592,6 +1653,8 @@ class S21EhlersRunner:
             self._save_state()
             return
         if orders:
+            st["flat_clear_confirmation_count"] = 0
+            st["flat_clear_confirmation_reason"] = None
             self._set_sync_block(
                 spec,
                 "owned_pending_orders_unsupported",
@@ -1953,6 +2016,28 @@ def run_self_test() -> int:
         params["broker_timezone"] = "UTC"
         bars = make_self_test_bars()
         spec = params["symbols"][0]
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        assert runner._ownership_namespace_error() is None, "valid S21 ownership namespace must pass"
+        runner.magic = 200022
+        assert "expected=200021" in str(runner._ownership_namespace_error()), "wrong bot magic must fail preflight"
+        runner.magic = EXPECTED_S21_MAGIC
+        st = runner._sym_state(spec)
+        runner._set_sync_block(spec, "open_success_position_not_confirmed", recoverable=False)
+        assert not runner._clear_stale_sync_block_if_flat(spec, [], []), "first flat observation must not clear"
+        assert st["flat_clear_confirmation_count"] == 1, "first flat observation must be persisted"
+        assert runner._clear_stale_sync_block_if_flat(spec, [], []), "second consecutive confirmed-flat observation must auto-clear"
+        assert not st["sync_block_new_entries"], "confirmed-flat recovery must re-enable entries"
+        runner._set_sync_block(spec, "live_time_close_failed", recoverable=False)
+        st["active_positions"] = [{"ticket": 9001, "side": "long"}]
+        st["active"] = st["active_positions"][0]
+        assert not runner._clear_stale_sync_block_if_flat(spec, [], []), "local active state must prevent auto-clear"
+        assert st["sync_block_new_entries"], "unsafe close block must remain while local active state exists"
+        related = FakePosition(9002, symbol=mt5_symbol(spec), magic=EXPECTED_S21_MAGIC, comment=runner._comment_for_position(spec, "normal"))
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor(positions=[related]))
+        st = runner._sym_state(spec)
+        runner._set_sync_block(spec, "live_time_close_failed", {"ticket": 9002}, recoverable=False)
+        assert not runner._clear_stale_sync_block_if_flat(spec, [], []), "related live ticket must be confirmed absent before clear"
+        assert st["flat_clear_confirmation_count"] == 0, "present related ticket must reset flat confirmations"
         shared_comment = f"{comment_prefix(spec)}_selftest"[:31]
         existing = FakePosition(6101, symbol=mt5_symbol(spec), side="long", magic=int(params["magic"]), comment=shared_comment)
         opened = FakePosition(6102, symbol=mt5_symbol(spec), side="long", magic=int(params["magic"]), comment=shared_comment)

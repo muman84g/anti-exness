@@ -30,6 +30,7 @@ from live_data_fetcher import MT5DataManager
 from live_executor import MT5Executor, ORDER_TYPE_SELL, REQUIRED_S20_COMMANDS, S20_BRIDGE_NAME
 
 JST = timezone(timedelta(hours=9), "JST")
+EXPECTED_S20_MAGIC = 200020
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -292,6 +293,10 @@ class S20GoldBasketRunner:
         )
 
     def connect_and_preflight(self) -> bool:
+        namespace_error = self._ownership_namespace_error()
+        if namespace_error:
+            logging.critical("S20 ownership namespace invalid: %s", namespace_error)
+            return False
         if not self.dm.connect():
             logging.critical("S20 failed to connect to EA bridge.")
             return False
@@ -335,6 +340,14 @@ class S20GoldBasketRunner:
             self.shadow_enabled,
         )
         return True
+
+    def _ownership_namespace_error(self) -> str | None:
+        prefix = str(self.params.get("comment_prefix") or "")
+        if self.magic != EXPECTED_S20_MAGIC:
+            return f"magic={self.magic} expected={EXPECTED_S20_MAGIC}"
+        if not prefix.startswith("s20_"):
+            return f"invalid_comment_prefix={prefix}"
+        return None
 
     def _get_bars(self, key: str, timeframe: int, bars: int) -> pd.DataFrame | None:
         now_monotonic = time.monotonic()
@@ -1059,6 +1072,14 @@ def run_self_test() -> int:
     m1_confirm = make_m1(10)
     params = dict(DEFAULT_PARAMS)
     runner = S20GoldBasketRunner(params)
+    if runner._ownership_namespace_error() is not None:
+        print("self-test failed: valid S20 ownership namespace was rejected")
+        return 1
+    runner.magic = 200021
+    if "expected=200020" not in str(runner._ownership_namespace_error()):
+        print("self-test failed: wrong S20 magic was not rejected")
+        return 1
+    runner.magic = EXPECTED_S20_MAGIC
     class ConfirmPosition:
         def __init__(self, ticket: int, comment: str):
             self.ticket = ticket

@@ -38,6 +38,8 @@ from live_executor import (
 from live_manual_alerts import notify_manual_action_required
 
 UTC = timezone.utc
+EXPECTED_S22_MAGIC = 200022
+FLAT_AUTO_CLEAR_SYNC_REASONS = {"open_success_position_not_confirmed", "live_time_close_failed", "live_time_close_unconfirmed"}
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -296,6 +298,8 @@ class S22SqueezePullbackRunner:
                     "sync_block_reason": None,
                     "sync_block_recoverable": False,
                     "sync_block_details": {},
+                    "flat_clear_confirmation_count": 0,
+                    "flat_clear_confirmation_reason": None,
                     "open_retry_after_utc": None,
                     "autotrading_reject_streak": 0,
                     "autotrading_reject_notified": False,
@@ -427,6 +431,9 @@ class S22SqueezePullbackRunner:
         previous = st.get("sync_block_reason")
         if reason:
             clean_details = details or {}
+            if previous != reason:
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
             st["sync_block_new_entries"] = True
             st["sync_block_reason"] = reason
             st["sync_block_recoverable"] = bool(recoverable)
@@ -442,6 +449,8 @@ class S22SqueezePullbackRunner:
         st["sync_block_reason"] = None
         st["sync_block_recoverable"] = False
         st["sync_block_details"] = {}
+        st["flat_clear_confirmation_count"] = 0
+        st["flat_clear_confirmation_reason"] = None
 
     def _clear_stale_sync_block_if_flat(
         self,
@@ -452,11 +461,31 @@ class S22SqueezePullbackRunner:
         st = self._sym_state(spec)
         if not st.get("sync_block_new_entries"):
             return False
-        if not bool(st.get("sync_block_recoverable")):
-            return False
         if positions or orders:
+            st["flat_clear_confirmation_count"] = 0
+            st["flat_clear_confirmation_reason"] = None
             return False
         reason = str(st.get("sync_block_reason") or "")
+        if bool(st.get("sync_block_recoverable")):
+            self._set_sync_block(spec, None)
+            self._error_row(spec, "sync_block_cleared_flat", reason)
+            self._save_state()
+            return True
+        if reason not in FLAT_AUTO_CLEAR_SYNC_REASONS or st.get("active"):
+            return False
+        details = st.get("sync_block_details") or {}
+        related_ticket = int(details.get("ticket") or details.get("order_ticket") or 0)
+        if related_ticket > 0 and self.executor.confirm_position_absent(related_ticket) is not True:
+            st["flat_clear_confirmation_count"] = 0
+            st["flat_clear_confirmation_reason"] = None
+            self._save_state()
+            return False
+        confirmations = int(st.get("flat_clear_confirmation_count") or 0) + 1 if st.get("flat_clear_confirmation_reason") == reason else 1
+        st["flat_clear_confirmation_count"] = confirmations
+        st["flat_clear_confirmation_reason"] = reason
+        self._save_state()
+        if confirmations < 2:
+            return False
         self._set_sync_block(spec, None)
         self._error_row(spec, "sync_block_cleared_flat", reason)
         self._save_state()
@@ -504,6 +533,10 @@ class S22SqueezePullbackRunner:
         return True
 
     def connect_and_preflight(self) -> bool:
+        namespace_error = self._ownership_namespace_error()
+        if namespace_error:
+            logging.critical("S22 ownership namespace invalid: %s", namespace_error)
+            return False
         if not self.dm.connect():
             logging.critical("S22 bridge connection failed.")
             return False
@@ -561,6 +594,16 @@ class S22SqueezePullbackRunner:
                 return False
         logging.info("S22 preflight ok.")
         return True
+
+    def _ownership_namespace_error(self) -> str | None:
+        if self.magic != EXPECTED_S22_MAGIC:
+            return f"magic={self.magic} expected={EXPECTED_S22_MAGIC}"
+        prefixes = [comment_prefix(spec) for spec in self.params.get("symbols", []) if bool(spec.get("enabled", True))]
+        if not prefixes or any(not prefix.startswith("s22_") for prefix in prefixes):
+            return f"invalid_comment_prefixes={prefixes}"
+        if len(prefixes) != len(set(prefixes)):
+            return f"duplicate_comment_prefixes={prefixes}"
+        return None
 
     def _next_shadow_ticket(self) -> int:
         ticket = int(self.state.get("shadow_ticket_seq", -200022000))
@@ -1482,6 +1525,15 @@ def run_self_test() -> int:
         params["broker_timezone"] = "UTC"
         bars = make_self_test_bars()
         spec = params["symbols"][0]
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor())
+        assert runner._ownership_namespace_error() is None, "valid S22 ownership namespace must pass"
+        runner.magic = 200021
+        assert "expected=200022" in str(runner._ownership_namespace_error()), "wrong S22 magic must fail preflight"
+        runner.magic = EXPECTED_S22_MAGIC
+        st = runner._sym_state(spec)
+        runner._set_sync_block(spec, "open_success_position_not_confirmed", recoverable=False)
+        assert not runner._clear_stale_sync_block_if_flat(spec, [], []), "first risky flat observation must not clear"
+        assert runner._clear_stale_sync_block_if_flat(spec, [], []), "second risky flat observation must clear"
         comment = "s22_eurusd"
         stale = FakePosition(7101, comment=comment)
         opened = FakePosition(7102, comment=comment)
