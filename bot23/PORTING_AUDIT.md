@@ -73,3 +73,11 @@ performed.
   unchanged version-2 identity.
 - Residual limitation: five-second File IPC polling can miss a shorter
   intrapoll touch and is not identical to every-tick backtest execution.
+
+## 2026-08-15 manual-close reconciliation repair
+
+- Preserved fail-closed ownership checks and required broker deal confirmation.
+- Replaced repeated narrow-window-only lookups with a bounded 30-day fallback
+  when MT5 explicitly reports no matching deal.
+- Added a regression check proving that a manually closed ticket is removed
+  from state without leaving `close_deal_not_confirmed` latched.

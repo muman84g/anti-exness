@@ -75,6 +75,10 @@ failure-to-progress, max-hold, or MTM-DD checks behind a new-bar early return.
 If historical-bar retrieval fails while exposure is open, continue fail-closed
 position sync and close monitoring from current quotes; only new entries/adds
 must stop.
+When an owned position disappears after a manual or broker-side close, retry
+deal reconciliation on later polls. If the exact open-time history window
+explicitly returns no matching deal, retry with a bounded wider history window;
+never clear ownership state merely because the position vanished.
 
 Before any push/deploy/recreate:
 

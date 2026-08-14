@@ -442,6 +442,13 @@ class S23LossAbortRunner:
                 pnl += (float(pos["entry_price"]) - ask) * contract * lot
         return pnl
 
+    def _get_confirmed_close_deal(self, position_id: int, opened_at_epoch: int) -> Any:
+        """Retry an explicit no-deal result with the bridge's bounded history window."""
+        deal = self.executor.get_position_close_deal(position_id, opened_at_epoch)
+        if deal is False and opened_at_epoch > 0:
+            deal = self.executor.get_position_close_deal(position_id, 0)
+        return deal
+
     def _sync_strategy(self, strat: dict[str, Any]) -> bool:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         st = self._st(strat)
@@ -510,7 +517,7 @@ class S23LossAbortRunner:
                     remaining_state.append(state_pos)
                     continue
                 opened_at_epoch = max(0, int(state_pos.get("open_time_epoch") or 0) - 60)
-                deal = self.executor.get_position_close_deal(position_id, opened_at_epoch)
+                deal = self._get_confirmed_close_deal(position_id, opened_at_epoch)
                 if deal is None:
                     self._set_sync_block(strat, "close_deal_query_unavailable", {"ticket": position_id}, recoverable=False)
                     return False
@@ -963,6 +970,32 @@ def self_test() -> None:
     ]
     assert partial_runner._sync_strategy(confirmed_strategy), "partially completed basket close must reconcile owned tickets"
     assert [pos["position_identifier"] for pos in partial_state["basket"]] == [7002], "confirmed closed ticket must be removed without losing remaining owned state"
+
+    class DelayedManualCloseExecutor(FakeExecutor):
+        def __init__(self) -> None:
+            super().__init__(positions=[live_remaining])
+            self.history_windows: list[int] = []
+
+        def get_position_close_deal(self, position_id: int, opened_at_epoch: int) -> Any:
+            self.history_windows.append(opened_at_epoch)
+            if opened_at_epoch > 0:
+                return False
+            return SimpleNamespace(position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, net_profit=-1.25)
+
+    delayed_runner = S23LossAbortRunner(confirmed_params)
+    delayed_runner.state = delayed_runner._default_state()
+    delayed_runner._save_state = lambda: None
+    delayed_runner._trade_row = lambda *_args, **_kwargs: None
+    delayed_state = delayed_runner._st(confirmed_strategy)
+    delayed_state["basket"] = [
+        {"ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00Z", "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
+        {"ticket": 2, "position_identifier": 7002, "side": "LONG", "lot": 0.01, "entry_price": 2065.0, "entry_time_utc": "2026-01-01T13:01:00Z", "open_time_epoch": 1767272460, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
+    ]
+    delayed_runner.executor = DelayedManualCloseExecutor()
+    assert delayed_runner._sync_strategy(confirmed_strategy), "manual close must reconcile through bounded fallback history"
+    assert delayed_runner.executor.history_windows == [1767272340, 0], "manual-close lookup must retry with the bounded fallback window"
+    assert [pos["position_identifier"] for pos in delayed_state["basket"]] == [7002]
+    assert not delayed_state["sync_block_new_entries"], "confirmed manual close must not leave a stale entry block"
 
     fail_runner = S23LossAbortRunner(params)
     fail_runner.state = fail_runner._default_state()
