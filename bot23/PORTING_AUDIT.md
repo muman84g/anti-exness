@@ -53,3 +53,23 @@ that behavior for the frozen `impulse_bars=8` candidate.
 
 No deployment, service restart, bridge attachment, push, or live-mode switch was
 performed.
+
+## 2026-08-15 forward-only true-tick revision
+
+- Candidate: `M_block14_loss27`, registry `man_028_v004_v001`, run
+  `backtest152/runs/20260815_regime_controls_forward_dev_v8`.
+- Preserved: bot number, symbol, magic, comment, bridge, state identity,
+  ownership checks, target USD 10, stop USD 18, failure-to-progress, 70-minute
+  max hold, 8-minute cooldown, and fixed 0.01 lot.
+- Changed intentionally: add distance 0.45 to 0.65 ATR30, maximum positions 8
+  to 2, no add at or above USD 3 basket PnL, no new basket during 14 UTC, and
+  no new basket after confirmed daily realized PnL reaches -USD 27.
+- Execution correction: close branches now use current executable Bid/Ask on
+  every five-second poll, before the confirmed-M1 new-bar guard. Entry/add
+  signals remain confirmed-M1-only. Quote-based close monitoring continues
+  when M1 history retrieval is temporarily unavailable.
+- Daily accounting is bot-owned only and advances from confirmed CLOSEDEAL net
+  PnL in live mode; the state keys are backward-compatible additions under the
+  unchanged version-2 identity.
+- Residual limitation: five-second File IPC polling can miss a shorter
+  intrapoll touch and is not identical to every-tick backtest execution.

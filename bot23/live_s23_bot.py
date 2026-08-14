@@ -178,6 +178,8 @@ class S23LossAbortRunner:
                     "pending_close_signal_bar": None,
                     "cooldown_until_utc": None,
                     "last_evaluated_bar": None,
+                    "daily_realized_date_utc": None,
+                    "daily_realized_pnl_usd": 0.0,
                 }
                 for s in self.params["strategies"]
             },
@@ -217,6 +219,38 @@ class S23LossAbortRunner:
 
     def _st(self, strat: dict[str, Any]) -> dict[str, Any]:
         return self.state["strategies"][strat["id"]]
+
+    def _roll_daily_realized(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> dict[str, Any]:
+        st = self._st(strat)
+        stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        day = stamp.strftime("%Y-%m-%d")
+        if st.get("daily_realized_date_utc") != day:
+            st["daily_realized_date_utc"] = day
+            st["daily_realized_pnl_usd"] = 0.0
+        return st
+
+    def _record_daily_realized(self, strat: dict[str, Any], pnl: float, at_utc: datetime | pd.Timestamp | None = None) -> None:
+        st = self._roll_daily_realized(strat, at_utc)
+        st["daily_realized_pnl_usd"] = float(st.get("daily_realized_pnl_usd", 0.0)) + float(pnl)
+
+    def _new_basket_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp) -> str | None:
+        stamp = pd.Timestamp(at_utc)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        blocked_hours = {int(hour) for hour in self.params.get("new_basket_blocked_hours_utc", [])}
+        if int(stamp.hour) in blocked_hours:
+            return "new_basket_blocked_hour"
+        st = self._roll_daily_realized(strat, stamp)
+        limit = float(self.params.get("daily_realized_loss_limit_usd", 0.0))
+        if limit > 0 and float(st.get("daily_realized_pnl_usd", 0.0)) <= -limit:
+            return "daily_realized_loss_limit"
+        return None
 
     def _trade_row(self, event: str, strat: dict[str, Any], **kwargs: Any) -> None:
         row = {
@@ -495,8 +529,10 @@ class S23LossAbortRunner:
             if confirmed_deals:
                 reason = str(st.get("pending_close_reason") or "broker_or_external_close_confirmed")
                 signal_bar = st.get("pending_close_signal_bar")
+                confirmed_net = sum(float(deal.net_profit) for deal in confirmed_deals)
                 st["basket"] = remaining_state
-                self._trade_row("position_close_confirmed", strat, profit=sum(float(deal.net_profit) for deal in confirmed_deals), reason=reason, signal_bar_time=signal_bar)
+                self._record_daily_realized(strat, confirmed_net)
+                self._trade_row("position_close_confirmed", strat, profit=confirmed_net, reason=reason, signal_bar_time=signal_bar)
                 if not remaining_state:
                     self._clear_basket_state(strat, reason, signal_bar)
                     self._set_sync_block(strat, None)
@@ -536,6 +572,7 @@ class S23LossAbortRunner:
             self._save_state()
             return
         self._trade_row("basket_close", strat, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
+        self._record_daily_realized(strat, pnl, price_row.name)
         self._clear_basket_state(strat, reason, str(price_row.name))
         self._save_state()
 
@@ -615,6 +652,42 @@ class S23LossAbortRunner:
         self._trade_row("entry", strat, ticket=ticket or "", side=side, lot=lot, price=entry_price, signal_bar_time=str(price_row.name), note=note)
         self._save_state()
 
+    def _monitor_open_basket(self, strat: dict[str, Any], info: Any, price_row: pd.Series, poll_time: datetime | None = None) -> bool:
+        st = self._st(strat)
+        if st.get("pending_close_reason"):
+            return True
+        if not st["basket"]:
+            return False
+        at_utc = poll_time or utc_now()
+        bid = float(getattr(info, "bid", price_row["Close"]))
+        ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
+        pnl = self._basket_pnl(strat, bid, ask)
+        entry_times = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
+        valid_entry_times = [ts for ts in entry_times if ts is not None]
+        if not valid_entry_times:
+            self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
+            self._save_state()
+            return True
+        held = max(0, int((at_utc - min(valid_entry_times)).total_seconds() // 60))
+        previous_peak = st.get("basket_peak_pnl_usd")
+        peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
+        st["basket_peak_pnl_usd"] = peak
+        reason = None
+        if pnl >= float(strat["basket_target_usd"]):
+            reason = "basket_target"
+        elif pnl <= -float(strat["basket_stop_usd"]):
+            reason = "basket_stop"
+        elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
+            reason = "failure_to_progress"
+        elif held >= int(strat["max_hold_bars"]):
+            reason = "max_hold"
+        if reason:
+            close_row = price_row.copy()
+            close_row.name = pd.Timestamp(at_utc)
+            self._close_basket(strat, reason, close_row, pnl)
+            return True
+        return False
+
     def _run_strategy(self, strat: dict[str, Any], bars: pd.DataFrame, info: Any) -> None:
         st = self._st(strat)
         if not self._sync_strategy(strat):
@@ -629,35 +702,14 @@ class S23LossAbortRunner:
             self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(now.name)}, recoverable=True)
             self._save_state()
             return
+        poll_time = utc_now()
+        if self._monitor_open_basket(strat, info, now, poll_time):
+            return
+        bid = float(getattr(info, "bid", now["Close"]))
+        ask = float(getattr(info, "ask", now.get("AskOpen", now["Open"])))
         if st.get("last_evaluated_bar") == dt_text(now_bar):
             return
         st["last_evaluated_bar"] = dt_text(now_bar)
-        bid = float(getattr(info, "bid", now["Close"]))
-        ask = float(getattr(info, "ask", now.get("AskOpen", now["Open"])))
-        if st["basket"]:
-            pnl = self._basket_pnl(strat, bid, ask)
-            entry_times = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
-            valid_entry_times = [ts for ts in entry_times if ts is not None]
-            if not valid_entry_times:
-                self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
-                self._save_state()
-                return
-            held = max(0, int((now_bar - min(valid_entry_times)).total_seconds() // 60))
-            previous_peak = st.get("basket_peak_pnl_usd")
-            peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
-            st["basket_peak_pnl_usd"] = peak
-            reason = None
-            if pnl >= float(strat["basket_target_usd"]):
-                reason = "basket_target"
-            elif pnl <= -float(strat["basket_stop_usd"]):
-                reason = "basket_stop"
-            elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
-                reason = "failure_to_progress"
-            elif held >= int(strat["max_hold_bars"]):
-                reason = "max_hold"
-            if reason:
-                self._close_basket(strat, reason, now, pnl)
-                return
         if st.get("sync_block_new_entries"):
             self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
             self._save_state()
@@ -694,6 +746,16 @@ class S23LossAbortRunner:
             )
             if not favorable:
                 return
+            guard_ratio = float(strat.get("add_profit_guard_ratio", 99.0))
+            if self._basket_pnl(strat, bid, ask) >= float(strat["basket_target_usd"]) * guard_ratio:
+                self._trade_row("entry_skip", strat, reason="add_profit_guard", signal_bar_time=str(now.name))
+                return
+        else:
+            block_reason = self._new_basket_block_reason(strat, now_bar)
+            if block_reason:
+                self._trade_row("entry_skip", strat, reason=block_reason, signal_bar_time=str(now.name), note=f"daily_realized={self._st(strat).get('daily_realized_pnl_usd', 0.0)}")
+                self._save_state()
+                return
         self._open_entry(strat, side, now, info)
 
     def run_once(self) -> None:
@@ -711,6 +773,14 @@ class S23LossAbortRunner:
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
                 self._trade_row("entry_skip", strat, reason="m1_bars_unavailable")
+                if not bool(strat.get("enabled", True)) or not self._st(strat)["basket"]:
+                    continue
+                if not self._sync_strategy(strat):
+                    self._save_state()
+                    continue
+                quote_time = utc_now()
+                quote_row = pd.Series({"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)}, name=pd.Timestamp(quote_time))
+                self._monitor_open_basket(strat, info, quote_row, quote_time)
             return
         point = float(self.params.get("point_size", 0.01))
         current_spread_points = max(0.0, (float(getattr(info, "ask", 0.0)) - float(getattr(info, "bid", 0.0))) / point)
@@ -784,9 +854,17 @@ def load_params(path: str = PARAMS_FILE) -> dict[str, Any]:
 
 
 def self_test() -> None:
-    params = load_params()
+    configured_params = load_params()
+    configured_strategy = configured_params["strategies"][0]
+    assert int(configured_strategy["max_positions"]) == 2, "forward candidate must cap the basket at two positions"
+    assert abs(float(configured_strategy["add_atr"]) - 0.65) < 1e-12, "forward candidate add distance must be 0.65 ATR30"
+    assert abs(float(configured_strategy["add_profit_guard_ratio"]) - 0.30) < 1e-12, "adds must stop at 30% of basket target"
+    assert configured_params["new_basket_blocked_hours_utc"] == [14], "14 UTC new baskets must be blocked"
+    assert float(configured_params["daily_realized_loss_limit_usd"]) == 27.0, "daily realized loss limit must be 27 USD"
+    params = json.loads(json.dumps(configured_params))
     params["live_trading_enabled"] = False
     params["shadow_forward_enabled"] = True
+    params["new_basket_blocked_hours_utc"] = []
     params["safety"]["stale_signal_guard"] = False
     params["strategies"][0]["vol_min"] = 0.9
     runner = S23LossAbortRunner(params)
@@ -804,6 +882,14 @@ def self_test() -> None:
     runner.run_once()
     assert any(row[0] == "entry" for row in rows), "expected at least one shadow entry"
     strategy = params["strategies"][0]
+    gate_params = json.loads(json.dumps(params))
+    gate_params["new_basket_blocked_hours_utc"] = [14]
+    gate_runner = S23LossAbortRunner(gate_params)
+    gate_runner.state = gate_runner._default_state()
+    gate_runner._record_daily_realized(strategy, -27.0, pd.Timestamp("2026-01-01T13:30:00Z"))
+    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-01T13:45:00Z")) == "daily_realized_loss_limit"
+    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-01T14:15:00Z")) == "new_basket_blocked_hour"
+    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-02T13:15:00Z")) is None, "daily budget must reset on UTC day change"
     st = runner._st(strategy)
     st["sync_block_new_entries"] = True
     st["sync_block_reason"] = "positions_unavailable"
@@ -892,6 +978,31 @@ def self_test() -> None:
     fail_runner._trade_row = lambda event, *_args, **kw: events.append(str(kw.get("reason") or event))
     fail_runner._run_strategy(strategy, bars, FakeExecutor().get_symbol_info("XAUUSD"))
     assert "failure_to_progress" in events, "failure-to-progress exit must fire after 10 bars without 3 USD peak"
+
+    poll_runner = S23LossAbortRunner(params)
+    poll_runner.state = poll_runner._default_state()
+    poll_runner._save_state = lambda: None
+    poll_events: list[str] = []
+    poll_runner._trade_row = lambda event, *_args, **kw: poll_events.append(str(kw.get("reason") or event))
+    poll_state = poll_runner._st(strategy)
+    poll_state["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00+00:00", "shadow": True}]
+    poll_state["last_evaluated_bar"] = "2026-01-01T13:01:00+00:00"
+    poll_row = pd.Series({"Open": 2075.0, "Close": 2075.0, "AskOpen": 2075.03}, name=pd.Timestamp("2026-01-01T13:01:00Z"))
+    poll_info = type("Info", (), {"bid": 2075.0, "ask": 2075.03})()
+    assert poll_runner._monitor_open_basket(strategy, poll_info, poll_row, pd.Timestamp("2026-01-01T13:01:05Z")), "poll-time TP must trigger without a new M1 bar"
+    assert not poll_state["basket"] and "basket_target" in poll_events, "poll-time TP must close the shadow basket"
+
+    no_bars_runner = S23LossAbortRunner(params)
+    no_bars_runner.state = no_bars_runner._default_state()
+    no_bars_runner.executor = FakeExecutor()
+    no_bars_runner.dm = type("NoBarsDM", (), {"get_historical_data": lambda self, *_args, **_kwargs: None})()
+    no_bars_runner._save_state = lambda: None
+    no_bars_events: list[str] = []
+    no_bars_runner._trade_row = lambda event, *_args, **kw: no_bars_events.append(str(kw.get("reason") or event))
+    no_bars_state = no_bars_runner._st(strategy)
+    no_bars_state["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2050.0, "entry_time_utc": dt_text(utc_now()), "shadow": True}]
+    no_bars_runner.run_once()
+    assert not no_bars_state["basket"] and "basket_target" in no_bars_events, "open exposure must retain quote-based TP monitoring when M1 history is unavailable"
 
 
 def main() -> int:

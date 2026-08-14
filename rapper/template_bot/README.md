@@ -68,6 +68,14 @@ The return contract is:
 
 ## Required Checks
 
+For mixed bar-signal/live execution, keep entry/add signals on confirmed bars
+but evaluate every open-position close branch from the current executable
+Bid/Ask on every runner poll. Do not place TP, SL, trailing,
+failure-to-progress, max-hold, or MTM-DD checks behind a new-bar early return.
+If historical-bar retrieval fails while exposure is open, continue fail-closed
+position sync and close monitoring from current quotes; only new entries/adds
+must stop.
+
 Before any push/deploy/recreate:
 
 ```powershell

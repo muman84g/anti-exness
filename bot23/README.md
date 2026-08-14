@@ -1,12 +1,16 @@
 # Bot23 Loss-Abort Failure-to-Progress
 
 `bot23` is the shadow-first live port of the single frozen XAUUSD M1 candidate
-`visual_loss_abort_g_failure_to_progress`.
+`visual_loss_abort_g_failure_to_progress`, revised by the forward-only
+`M_block14_loss27` dev true-tick candidate.
 
 The entry, add, basket target/stop, maximum hold, cooldown, session, and volume
-rules remain the frozen loss-abort specification. The structural change closes
-a basket from bar 10 onward when its lifetime peak basket PnL has never reached
-USD 3. This check runs after the USD 10 target and USD 18 stop checks.
+entry signal remains the loss-abort specification. Adds use 0.65 ATR30, stop at
+two positions, and are forbidden once pre-add basket PnL reaches USD 3. New
+baskets are blocked during 14:00-14:59 UTC and after the bot's confirmed daily
+realized PnL reaches -USD 27. TP, SL, failure-to-progress, and max-hold are
+checked from the current Bid/Ask every five-second poll; entry/add decisions
+remain confirmed-M1-only.
 
 ## Safety defaults
 
@@ -19,6 +23,8 @@ USD 3. This check runs after the USD 10 target and USD 18 stop checks.
 - High-risk sync blocks clear only after the related ticket is absent and two
   consecutive clean flat confirmations are observed.
 - Foreign positions/orders with the same magic fail closed.
+- The daily loss budget uses confirmed bot-owned close deals and resets at the
+  UTC day boundary; it does not use account-wide PnL.
 
 ## Files and checks
 
