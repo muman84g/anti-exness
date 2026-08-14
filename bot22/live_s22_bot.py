@@ -931,6 +931,7 @@ class S22SqueezePullbackRunner:
         side: str,
         signal_bar_time: str,
         reason: str,
+        order_ticket: int | None = None,
     ) -> Any | None:
         positions = self._owned_positions(spec)
         if positions is None:
@@ -939,6 +940,10 @@ class S22SqueezePullbackRunner:
             self._save_state()
             return None
         matches = self._positions_for_comment_side(spec, positions, comment, side)
+        if order_ticket is not None:
+            ticket_matches = [pos for pos in matches if int(pos.ticket) == int(order_ticket)]
+            if len(ticket_matches) == 1:
+                matches = ticket_matches
         if len(matches) == 1:
             pos = matches[0]
             self._set_active_from_position(spec, pos, signal_bar_time=signal_bar_time, reason=reason)
@@ -1055,6 +1060,7 @@ class S22SqueezePullbackRunner:
                 side=side,
                 signal_bar_time=str(signal["bar_time"]),
                 reason="live_open_confirmed",
+                order_ticket=int(ticket_obj),
             )
             if recovered is None:
                 self._set_sync_block(
@@ -1476,6 +1482,20 @@ def run_self_test() -> int:
         params["broker_timezone"] = "UTC"
         bars = make_self_test_bars()
         spec = params["symbols"][0]
+        comment = "s22_eurusd"
+        stale = FakePosition(7101, comment=comment)
+        opened = FakePosition(7102, comment=comment)
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor(positions=[stale, opened]))
+        confirmed = runner._confirm_live_open_from_positions(
+            spec,
+            comment=comment,
+            side="long",
+            signal_bar_time="2026-01-01 00:00:00+00:00",
+            reason="self_test_open_confirm",
+            order_ticket=7102,
+        )
+        assert confirmed is opened, "open confirmation must prefer the filled ticket over another comment match"
+        assert not runner._sym_state(spec)["sync_block_new_entries"], "ticket-confirmed open must not be blocked"
         closed = normalize_bars(bars, True, "UTC")
         signal = latest_squeeze_pullback_signal(closed, spec) if closed is not None else None
         assert signal and signal["side"] == "long", "Bollinger squeeze-pullback long signal was not detected"

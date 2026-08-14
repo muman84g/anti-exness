@@ -1287,6 +1287,7 @@ class S21EhlersRunner:
         reason: str,
         role: str = "normal",
         reversal_of_ticket: int | None = None,
+        order_ticket: int | None = None,
     ) -> Any | None:
         positions = self._owned_positions(spec)
         if positions is None:
@@ -1298,6 +1299,15 @@ class S21EhlersRunner:
         if comment not in candidates:
             candidates.append(comment)
         matches = self._positions_for_comment_side(spec, positions, candidates, side)
+        if order_ticket is not None:
+            ticket_matches = [pos for pos in matches if int(pos.ticket) == int(order_ticket)]
+            if len(ticket_matches) == 1:
+                matches = ticket_matches
+        if len(matches) > 1:
+            tracked_tickets = {int(row["ticket"]) for row in self._active_positions(spec)}
+            untracked_matches = [pos for pos in matches if int(pos.ticket) not in tracked_tickets]
+            if len(untracked_matches) == 1:
+                matches = untracked_matches
         if len(matches) == 1:
             pos = matches[0]
             self._set_active_from_position(
@@ -1474,6 +1484,7 @@ class S21EhlersRunner:
                 reason="live_open_confirmed",
                 role=role_normalized,
                 reversal_of_ticket=reversal_of_ticket,
+                order_ticket=int(ticket_obj),
             )
             if recovered is None:
                 self._set_sync_block(
@@ -1942,6 +1953,23 @@ def run_self_test() -> int:
         params["broker_timezone"] = "UTC"
         bars = make_self_test_bars()
         spec = params["symbols"][0]
+        shared_comment = f"{comment_prefix(spec)}_selftest"[:31]
+        existing = FakePosition(6101, symbol=mt5_symbol(spec), side="long", magic=int(params["magic"]), comment=shared_comment)
+        opened = FakePosition(6102, symbol=mt5_symbol(spec), side="long", magic=int(params["magic"]), comment=shared_comment)
+        runner = make_self_test_runner(params, make_no_signal_bars(), FakeExecutor(positions=[existing, opened]))
+        st = runner._sym_state(spec)
+        st["active_positions"] = [{"ticket": 6101, "side": "long", "comment": shared_comment}]
+        st["active"] = st["active_positions"][0]
+        confirmed = runner._confirm_live_open_from_positions(
+            spec,
+            comment=shared_comment,
+            side="long",
+            signal_bar_time="2026-01-01 00:00:00+00:00",
+            reason="self_test_open_confirm",
+            order_ticket=6102,
+        )
+        assert confirmed is opened, "open confirmation must prefer the newly filled ticket when comments are shared"
+        assert not st["sync_block_new_entries"], "a uniquely identified new position must not trigger an ambiguity block"
         closed = normalize_bars(bars, True, "UTC")
         signal = latest_ehlers_signal(closed, spec) if closed is not None else None
         assert signal and signal["side"] == "long", "Ehlers long signal was not detected"

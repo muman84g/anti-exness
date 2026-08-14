@@ -669,6 +669,35 @@ class S20GoldBasketRunner:
         self.state["shadow_ticket_seq"] = ticket
         return ticket
 
+    def _confirm_live_open(self, order_ticket: int, comment: str) -> Any | None:
+        positions = self.executor.get_positions(self.symbol, self.magic)
+        if positions is None:
+            self._set_sync_block("open result positions unavailable")
+            self._error_row("OPEN_CONFIRM", "open result positions unavailable", f"order_ticket={order_ticket}")
+            self._save_state()
+            return None
+        tracked_tickets = {int(row["ticket"]) for row in self.state.get("positions", [])}
+        matches = [
+            pos
+            for pos in positions
+            if str(getattr(pos, "comment", "") or "") == comment
+            and int(getattr(pos, "type", -1)) == ORDER_TYPE_SELL
+        ]
+        exact = [pos for pos in matches if int(pos.ticket) == int(order_ticket)]
+        if len(exact) == 1:
+            return exact[0]
+        untracked = [pos for pos in matches if int(pos.ticket) not in tracked_tickets]
+        if len(untracked) == 1:
+            return untracked[0]
+        self._set_sync_block("open success position not confirmed")
+        self._error_row(
+            "OPEN_CONFIRM",
+            "open success position not confirmed",
+            f"order_ticket={order_ticket} matches={[int(pos.ticket) for pos in matches]}",
+        )
+        self._save_state()
+        return None
+
     def _open_short(self, info: Any, m1_atr: float, signal: dict[str, Any] | None, reason: str) -> bool:
         spread_points = self._current_spread_points(info)
         if spread_points > float(self.params["max_entry_spread_points"]):
@@ -706,9 +735,12 @@ class S20GoldBasketRunner:
                 last_error = getattr(self.executor, "last_order_error", "OPEN_FAILED")
                 self._error_row("OPEN_FAILED", str(last_error), reason)
                 return False
-            ticket_id = int(ticket)
+            confirmed = self._confirm_live_open(int(ticket), comment)
+            if confirmed is None:
+                return False
+            ticket_id = int(confirmed.ticket)
             if float(getattr(ticket, "price", 0.0) or 0.0) > 0:
-                entry_price = float(ticket.price)
+                entry_price = float(getattr(confirmed, "open_price", ticket.price))
                 risk = self._risk_usd(info, entry_price, sl, lot)
         else:
             if not self.shadow_enabled:
@@ -1027,6 +1059,23 @@ def run_self_test() -> int:
     m1_confirm = make_m1(10)
     params = dict(DEFAULT_PARAMS)
     runner = S20GoldBasketRunner(params)
+    class ConfirmPosition:
+        def __init__(self, ticket: int, comment: str):
+            self.ticket = ticket
+            self.comment = comment
+            self.type = ORDER_TYPE_SELL
+            self.open_price = 4321.5
+
+    confirm_comment = "s20_live_01"
+    old_position = ConfirmPosition(8101, confirm_comment)
+    new_position = ConfirmPosition(8102, confirm_comment)
+    runner.state["positions"] = [{"ticket": 8101}]
+    runner.executor = type("ConfirmExecutor", (), {"get_positions": lambda self, symbol, magic: [old_position, new_position]})()
+    runner._save_state = lambda: None
+    confirmed = runner._confirm_live_open(8102, confirm_comment)
+    if confirmed is not new_position or runner.state["sync_block_new_entries"]:
+        print("self-test failed: live open confirmation did not select the newly filled ticket")
+        return 1
     runner.state = runner._default_state()
     signal = runner._signal(h1, m1_signal)
     if not signal:
