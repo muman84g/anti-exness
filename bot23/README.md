@@ -1,52 +1,39 @@
-# Bot23 Chisiki/ReactVol Fixed4
+# Bot23 Loss-Abort Failure-to-Progress
 
-`bot23` is a shadow-first live wrapper for four fixed XAUUSD dev candidates:
+`bot23` is the shadow-first live port of the single frozen XAUUSD M1 candidate
+`visual_loss_abort_g_failure_to_progress`.
 
-- `visual_loss_abort_g`
-- `visual_no_adverse_c`
-- `h14_18_h120_tp12_dd40_vol105_impulseonly_all_all`
-- `visual_break_reverse_a`
+The entry, add, basket target/stop, maximum hold, cooldown, session, and volume
+rules remain the frozen loss-abort specification. The structural change closes
+a basket from bar 10 onward when its lifetime peak basket PnL has never reached
+USD 3. This check runs after the USD 10 target and USD 18 stop checks.
 
-The runner is copied from the `bot/rapper/template_bot` safety pattern and keeps
-each candidate isolated by magic, comment prefix, basket state, cooldown, reverse
-guard, and sync block.
+## Safety defaults
 
-## Safety Defaults
+- `live_trading_enabled=true`; `shadow_forward_enabled=false`.
+- One unique namespace: magic `200023`, comment prefix `s23_loss_abort`.
+- Exact bridge identity and required command-capability preflight.
+- Live mode requires an MT5 hedging account.
+- OPEN is accepted only after ticket/position-identifier ownership confirmation.
+- CLOSE remains pending until the matching position close deal is confirmed.
+- High-risk sync blocks clear only after the related ticket is absent and two
+  consecutive clean flat confirmations are observed.
+- Foreign positions/orders with the same magic fail closed.
 
-- `live_trading_enabled=false`
-- `shadow_forward_enabled=true`
-- EA HIST timestamps treated as UTC
-- latest M1 bar dropped
-- per-strategy `POSITIONS` / `ORDERS` clean sync
-- recoverable sync block clear only after positions and orders are confirmed empty
-- immediate state save after clean clear
-- no same-strategy same-bar re-entry after a basket close, except the explicit
-  one-time stop-reverse rule for `visual_break_reverse_a`
-
-## Files
+## Files and checks
 
 - Runner: `live_s23_bot.py`
-- Params: `s23_params.json`
+- Parameters: `s23_params.json`
 - State: `state/s23_bot_state.json`
-- Log: `logs/s23_bot.log`
-- Trades: `logs/s23_trades.csv`
-- IPC default: `cmd_s23.txt` / `res_s23.txt`
-
-## No-Order Checks
+- Log/trades: `logs/s23_bot.log`, `logs/s23_trades.csv`
+- IPC defaults: `cmd_s23.txt`, `res_s23.txt`, `heartbeat_s23.txt`
 
 ```powershell
-py -m py_compile live_s23_bot.py live_safety.py live_data_fetcher.py live_executor.py ea_bridge.py
+py -m py_compile *.py
 py live_s23_bot.py --self-test
 ```
 
-Read-only bridge checks, when an EA is attached:
-
-```text
-CAPS
-INFO|XAUUSD
-HIST|XAUUSD|1|5
-POSITIONS|XAUUSD|230001
-ORDERS|XAUUSD|230001
-```
-
-Repeat `POSITIONS` / `ORDERS` for magics `230002`, `230003`, and `230004`.
+The files are live-enabled, but no deployment, EA attachment, or restart is
+performed by folder creation. Compose automatically prepares the bridge and
+starts a retrying runner; chart attachment remains manual. Place
+`startup.ini` and `live_config.py` as described in `../BOT20_25_CENTOS_STARTUP.md`.

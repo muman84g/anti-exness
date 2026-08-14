@@ -33,18 +33,18 @@ S20 is the live/shadow implementation of the backtest43 `large_candle_short_bask
 
 ## Live Switch
 
-Default params are intentionally shadow-forward:
-
-```json
-"live_trading_enabled": false,
-"shadow_forward_enabled": true
-```
-
-To place real orders, change them to:
+Current params are live-order enabled by explicit user instruction on 2026-07-27:
 
 ```json
 "live_trading_enabled": true,
 "shadow_forward_enabled": false
+```
+
+To return to shadow-forward, change them to:
+
+```json
+"live_trading_enabled": false,
+"shadow_forward_enabled": true
 ```
 
 Use 0.01 lot first. At `max_positions=10`, max exposure is 0.10 lot.

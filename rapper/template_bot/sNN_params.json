@@ -1,0 +1,54 @@
+{
+  "enabled": true,
+  "live_trading_enabled": false,
+  "shadow_forward_enabled": true,
+  "bot_number": "NN",
+  "bot_suffix": "sNN",
+  "strategy_id": "botNN_template_strategy",
+  "magic": 200000,
+  "expected_magic": 200000,
+  "expected_bridge_name": "BotBridge_sNN",
+  "require_hedging_account": true,
+  "default_lot": 0.01,
+  "poll_interval_seconds": 5,
+  "status_log_interval_seconds": 60,
+  "broker_timezone": "UTC",
+  "max_deviation_points": 20,
+  "safety": {
+    "hist_timestamps_are_utc": true,
+    "stale_signal_guard": true,
+    "preflight_clean_sync": true,
+    "periodic_clean_sync": true,
+    "clear_recoverable_sync_block": true,
+    "save_state_after_clear": true,
+    "broker_sl_residual_clear": false,
+    "audit_log": true
+  },
+  "timeframe_profile": {
+    "signal_timeframe": "H1",
+    "execution_timeframe": "M1",
+    "history_source": "DIRECT_HIST",
+    "hist_timeframe_name": "H1",
+    "hist_bars": 240,
+    "drop_latest_signal_bar": true,
+    "max_signal_delay_minutes": 5
+  },
+  "symbols": [
+    {
+      "enabled": true,
+      "symbol": "EURUSD",
+      "mt5_symbol": "EURUSD",
+      "spec_id": "EURUSD_TEMPLATE_1h",
+      "comment_prefix": "sNN_eurusd",
+      "signal_adapter": "NONE",
+      "signal_params": {},
+      "lot": 0.01,
+      "point_size": 0.00001,
+      "pip_size": 0.0001,
+      "price_digits": 5,
+      "max_entry_spread_points": 30,
+      "sl_pips": 30,
+      "tp_pips": 60
+    }
+  ]
+}

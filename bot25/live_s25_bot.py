@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
-"""S23 loss-abort failure-to-progress shadow/live runner."""
+﻿# -*- coding: utf-8 -*-
+"""S25 ReactVol H14-18 shadow/live runner."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-os.environ.setdefault("BOT_SUFFIX", "s23")
+os.environ.setdefault("BOT_SUFFIX", "s25")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -35,7 +35,7 @@ from live_safety import LiveSafetyOptions, clean_sync_block_if_flat, stale_signa
 
 
 UTC = timezone.utc
-EXPECTED_S23_MAGIC = 200023
+EXPECTED_S25_MAGIC = 200025
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
     "live_time_close_failed",
@@ -43,10 +43,10 @@ FLAT_AUTO_CLEAR_SYNC_REASONS = {
 }
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
-LOG_FILE = os.path.join(LOG_DIR, "s23_bot.log")
-TRADE_LOG_FILE = os.path.join(LOG_DIR, "s23_trades.csv")
-STATE_FILE = os.path.join(STATE_DIR, "s23_bot_state.json")
-PARAMS_FILE = os.path.join(SCRIPT_DIR, "s23_params.json")
+LOG_FILE = os.path.join(LOG_DIR, "s25_bot.log")
+TRADE_LOG_FILE = os.path.join(LOG_DIR, "s25_trades.csv")
+STATE_FILE = os.path.join(STATE_DIR, "s25_bot_state.json")
+PARAMS_FILE = os.path.join(SCRIPT_DIR, "s25_params.json")
 
 TRADE_FIELDS = [
     "timestamp_utc",
@@ -123,8 +123,14 @@ def add_features(bars: pd.DataFrame, point_size: float) -> pd.DataFrame:
     close = out["Close"].astype(float)
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
     out["atr30"] = tr.rolling(30, min_periods=30).mean()
+    out["atr60"] = tr.rolling(60, min_periods=60).mean()
     out["atr90"] = tr.rolling(90, min_periods=90).mean()
+    out["atr120"] = tr.rolling(120, min_periods=120).mean()
     out["vol_ratio"] = out["atr30"] / out["atr90"]
+    out["react_vol_ratio"] = out["atr30"] / out["atr120"]
+    out["h1_slope"] = close - close.shift(60)
+    out["h4_slope"] = close - close.shift(240)
+    out["ret20"] = close - close.shift(20)
     out["ret5"] = close - close.shift(5)
     out["ret10"] = close - close.shift(10)
     out["roll_high30"] = high.shift(1).rolling(30, min_periods=30).max()
@@ -140,7 +146,7 @@ def in_session(ts: pd.Timestamp, start: int, end: int) -> bool:
     return hour >= start or hour < end
 
 
-class S23LossAbortRunner:
+class S25ReactVolRunner:
     def __init__(self, params: dict[str, Any]):
         self.params = params
         self.live_enabled = bool(params.get("live_trading_enabled", False))
@@ -154,7 +160,7 @@ class S23LossAbortRunner:
     def _default_state(self) -> dict[str, Any]:
         return {
             "version": 2,
-            "bot": "bot23",
+            "bot": "bot25",
             "strategy_id": self.params["strategy_id"],
             "last_saved_utc": None,
             "strategies": {
@@ -195,7 +201,7 @@ class S23LossAbortRunner:
         default = self._default_state()
         if state.get("bot") != default["bot"] or state.get("strategy_id") != default["strategy_id"] or int(state.get("version", 0)) != int(default["version"]):
             logging.critical(
-                "S23 state identity mismatch; refusing legacy or foreign state: bot=%s strategy_id=%s version=%s",
+                "S25 state identity mismatch; refusing legacy or foreign state: bot=%s strategy_id=%s version=%s",
                 state.get("bot"), state.get("strategy_id"), state.get("version"),
             )
             state = default
@@ -244,14 +250,14 @@ class S23LossAbortRunner:
             if previous != reason:
                 st["flat_clear_confirmation_count"] = 0
                 st["flat_clear_confirmation_reason"] = None
-                logging.error("S23 new entries blocked for %s: %s", strat["id"], reason)
+                logging.error("S25 new entries blocked for %s: %s", strat["id"], reason)
             st["sync_block_new_entries"] = True
             st["sync_block_reason"] = reason
             st["sync_block_recoverable"] = bool(recoverable)
             st["sync_block_details"] = details or {}
             return
         if st.get("sync_block_new_entries"):
-            logging.warning("S23 new-entry block cleared for %s after clean sync: %s", strat["id"], previous)
+            logging.warning("S25 new-entry block cleared for %s after clean sync: %s", strat["id"], previous)
         st["sync_block_new_entries"] = False
         st["sync_block_reason"] = None
         st["sync_block_recoverable"] = False
@@ -306,37 +312,37 @@ class S23LossAbortRunner:
     def connect_and_preflight(self) -> bool:
         namespace_error = self._ownership_namespace_error()
         if namespace_error:
-            logging.critical("S23 ownership namespace invalid: %s", namespace_error)
+            logging.critical("S25 ownership namespace invalid: %s", namespace_error)
             return False
         if any(self._st(strat).get("sync_block_reason") == "state_identity_mismatch" for strat in self.params.get("strategies", [])):
-            logging.critical("S23 legacy/foreign state must be archived before this runner can start.")
+            logging.critical("S25 legacy/foreign state must be archived before this runner can start.")
             return False
         if not bool(self.params.get("enabled", True)):
-            logging.info("S23 disabled by params.")
+            logging.info("S25 disabled by params.")
             return False
         if not self.dm.connect():
-            logging.error("S23 EA bridge connect failed.")
+            logging.error("S25 EA bridge connect failed.")
             return False
         caps = self.executor.get_bridge_capabilities()
-        logging.info("S23 bridge caps: %s", caps)
+        logging.info("S25 bridge caps: %s", caps)
         if not caps:
-            logging.critical("S23 bridge capability query failed.")
+            logging.critical("S25 bridge capability query failed.")
             return False
-        expected_bridge = str(self.params.get("expected_bridge_name") or "BotBridge_s23")
+        expected_bridge = str(self.params.get("expected_bridge_name") or "BotBridge_s25")
         if str(caps.get("name") or "") != expected_bridge:
-            logging.critical("S23 wrong bridge attached: got=%s expected=%s", caps.get("name"), expected_bridge)
+            logging.critical("S25 wrong bridge attached: got=%s expected=%s", caps.get("name"), expected_bridge)
             return False
         missing = REQUIRED_SHARED_ACCOUNT_COMMANDS - {str(x).upper() for x in caps.get("commands", set())}
         if missing:
-            logging.critical("S23 bridge missing required commands: %s", sorted(missing))
+            logging.critical("S25 bridge missing required commands: %s", sorted(missing))
             return False
         if self.live_enabled:
             account = self.executor.get_account_info()
             if account is None:
-                logging.critical("S23 account execution metadata unavailable.")
+                logging.critical("S25 account execution metadata unavailable.")
                 return False
             if bool(self.params.get("require_hedging_account", True)) and int(account.get("margin_mode", -1)) != HEDGING_MARGIN_MODE:
-                logging.critical("S23 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
+                logging.critical("S25 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
                 return False
         return True
 
@@ -344,11 +350,11 @@ class S23LossAbortRunner:
         strategies = [row for row in self.params.get("strategies", []) if bool(row.get("enabled", True))]
         magics = [int(row.get("magic") or 0) for row in strategies]
         prefixes = [str(row.get("comment_prefix") or "") for row in strategies]
-        if len(magics) != 1 or magics[0] != EXPECTED_S23_MAGIC:
-            return f"invalid_magics={magics} expected={[EXPECTED_S23_MAGIC]}"
+        if len(magics) != 1 or magics[0] != EXPECTED_S25_MAGIC:
+            return f"invalid_magics={magics} expected={[EXPECTED_S25_MAGIC]}"
         if len(magics) != len(set(magics)):
             return f"duplicate_magics={magics}"
-        if any(not prefix.startswith("s23_") for prefix in prefixes) or len(prefixes) != len(set(prefixes)):
+        if any(not prefix.startswith("s25_") for prefix in prefixes) or len(prefixes) != len(set(prefixes)):
             return f"invalid_or_duplicate_comment_prefixes={prefixes}"
         return None
 
@@ -375,6 +381,17 @@ class S23LossAbortRunner:
             return None
         if float(row.get("spread_points", 0.0)) > float(self.params.get("max_entry_spread_points", 300.0)):
             return None
+        if str(strat.get("engine", "visual")) == "reactvol":
+            atr120 = float(row.get("atr120", math.nan))
+            atr60 = float(row.get("atr60", math.nan))
+            vol_ratio = float(row.get("react_vol_ratio", math.nan))
+            h1 = float(row.get("h1_slope", math.nan))
+            h4 = float(row.get("h4_slope", math.nan))
+            impulse = float(row.get("ret20", math.nan))
+            if not all(math.isfinite(value) for value in (atr120, atr60, vol_ratio, h1, h4, impulse)):
+                return None
+            threshold = float(strat.get("trend_atr_mult", 0.6)) * atr120
+            return "LONG" if vol_ratio >= float(strat.get("vol_min", 1.0)) and h1 > threshold and h4 > threshold and impulse >= float(strat.get("impulse_atr", 0.6)) * atr60 else None
         atr30 = float(row.get("atr30", math.nan))
         vol_ratio = float(row.get("vol_ratio", math.nan))
         if not math.isfinite(atr30) or not math.isfinite(vol_ratio) or vol_ratio < float(strat.get("vol_min", 1.0)):
@@ -437,7 +454,7 @@ class S23LossAbortRunner:
             confirm_position_absent=self.executor.confirm_position_absent,
             required_flat_confirmations=2,
         ):
-            logging.info("S23 clean sync cleared: %s", strat["id"])
+            logging.info("S25 clean sync cleared: %s", strat["id"])
         if orders:
             self._set_sync_block(strat, "same_magic_unexpected_order", {"tickets": [int(o.ticket) for o in orders]}, recoverable=False)
             return False
@@ -647,14 +664,33 @@ class S23LossAbortRunner:
             peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
             st["basket_peak_pnl_usd"] = peak
             reason = None
-            if pnl >= float(strat["basket_target_usd"]):
-                reason = "basket_target"
-            elif pnl <= -float(strat["basket_stop_usd"]):
-                reason = "basket_stop"
-            elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
-                reason = "failure_to_progress"
-            elif held >= int(strat["max_hold_bars"]):
-                reason = "max_hold"
+            if str(strat.get("engine", "visual")) == "reactvol":
+                exposure = float(len(st["basket"]))
+                target = float(strat["target_per_position_usd"]) * exposure
+                dd_limit = float(strat["basket_stop_usd"]) * math.sqrt(exposure)
+                giveback = float(strat.get("trail_giveback_usd", 0.0)) * math.sqrt(exposure)
+                atr120 = float(now.get("atr120", math.nan))
+                threshold = float(strat.get("trend_atr_mult", 0.6)) * atr120
+                trend_flipped = math.isfinite(threshold) and float(now.get("h1_slope", math.nan)) < -threshold and float(now.get("h4_slope", math.nan)) < -threshold
+                if pnl <= -dd_limit:
+                    reason = "basket_dd_stop"
+                elif pnl >= target:
+                    reason = "basket_target"
+                elif float(strat.get("trail_start_per_position_usd", 0.0)) > 0 and peak >= float(strat["trail_start_per_position_usd"]) * exposure and pnl <= peak - giveback:
+                    reason = "basket_trailing"
+                elif held >= int(strat["max_hold_bars"]):
+                    reason = "max_hold"
+                elif trend_flipped and pnl > 0:
+                    reason = "trend_flip_profit"
+            else:
+                if pnl >= float(strat["basket_target_usd"]):
+                    reason = "basket_target"
+                elif pnl <= -float(strat["basket_stop_usd"]):
+                    reason = "basket_stop"
+                elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
+                    reason = "failure_to_progress"
+                elif held >= int(strat["max_hold_bars"]):
+                    reason = "max_hold"
             if reason:
                 self._close_basket(strat, reason, now, pnl)
                 return
@@ -662,7 +698,15 @@ class S23LossAbortRunner:
             self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
             self._save_state()
             return
-        side = self._signal(now, strat)
+        if st["basket"] and str(strat.get("engine", "visual")) == "reactvol":
+            side = str(st["basket"][0]["side"])
+            atr120 = float(now.get("atr120", math.nan))
+            threshold = float(strat.get("trend_atr_mult", 0.6)) * atr120
+            direction_ok = math.isfinite(threshold) and side == "LONG" and float(now.get("h1_slope", math.nan)) > threshold and float(now.get("h4_slope", math.nan)) > threshold
+            add_session_ok = in_session(now_bar, int(strat.get("add_session_start_utc", 13)), int(strat.get("add_session_end_utc", 22)))
+            side = side if direction_ok and add_session_ok and self._basket_pnl(strat, bid, ask) > 0 else None
+        else:
+            side = self._signal(now, strat)
         if not side:
             return
         stale = stale_signal_decision(
@@ -720,7 +764,7 @@ class S23LossAbortRunner:
                 self._run_strategy(strat, bars, info)
         now = time.time()
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 60)):
-            logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self.params["strategies"]})
+            logging.info("S25 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self.params["strategies"]})
             self._last_status_log = now
 
 
@@ -732,8 +776,8 @@ class FakeDM:
         return True
 
     def get_historical_data(self, *_: Any, **__: Any) -> pd.DataFrame:
-        idx = pd.date_range("2026-01-01 12:00:00", periods=160, freq="1min", tz="UTC")
-        close = pd.Series([2000.0 + i * 0.4 for i in range(160)], index=idx)
+        idx = pd.date_range("2026-01-01 12:00:00", periods=330, freq="1min", tz="UTC")
+        close = pd.Series([2000.0 + i * 0.4 for i in range(len(idx))], index=idx)
         return pd.DataFrame({"Open": close, "High": close + 0.2, "Low": close - 0.2, "Close": close, "AskOpen": close + 0.03, "Volume": 10}, index=idx)
 
 
@@ -745,7 +789,7 @@ class FakeExecutor:
         self.last_order_error = None
 
     def get_bridge_capabilities(self) -> dict[str, Any]:
-        return {"name": "BotBridge_s23", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
+        return {"name": "BotBridge_s25", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
 
     def get_account_info(self) -> dict[str, Any]:
         return {"margin_mode": self.margin_mode, "margin_mode_name": "RETAIL_HEDGING" if self.margin_mode == HEDGING_MARGIN_MODE else "RETAIL_NETTING"}
@@ -769,7 +813,7 @@ class FakeExecutor:
         return self.get_position(ticket) is False
 
     def get_position_close_deal(self, position_id: int, *_: Any) -> Any:
-        return SimpleNamespace(position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, net_profit=0.0)
+        return SimpleNamespace(position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S25_MAGIC, net_profit=0.0)
 
     def open_position(self, *_: Any, **__: Any) -> int:
         return 1
@@ -789,13 +833,13 @@ def self_test() -> None:
     params["shadow_forward_enabled"] = True
     params["safety"]["stale_signal_guard"] = False
     params["strategies"][0]["vol_min"] = 0.9
-    runner = S23LossAbortRunner(params)
+    runner = S25ReactVolRunner(params)
     runner.state = runner._default_state()
-    assert runner._ownership_namespace_error() is None, "valid S23 ownership namespaces must pass"
+    assert runner._ownership_namespace_error() is None, "valid S25 ownership namespaces must pass"
     params["strategies"][0]["magic"] = 200022
-    wrong_magic_runner = S23LossAbortRunner(params)
-    assert "expected=[200023]" in str(wrong_magic_runner._ownership_namespace_error()), "wrong S23 magic must fail preflight"
-    params["strategies"][0]["magic"] = EXPECTED_S23_MAGIC
+    wrong_magic_runner = S25ReactVolRunner(params)
+    assert "expected=[200025]" in str(wrong_magic_runner._ownership_namespace_error()), "wrong S25 magic must fail preflight"
+    params["strategies"][0]["magic"] = EXPECTED_S25_MAGIC
     runner.dm = FakeDM()
     runner.executor = FakeExecutor()
     runner._save_state = lambda: None
@@ -823,7 +867,7 @@ def self_test() -> None:
     runner._sync_strategy(strategy)
     assert not st["sync_block_new_entries"], "high-risk open block should clear after two proven-flat confirmations"
 
-    foreign = SimpleNamespace(ticket=9100, identifier=9100, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, comment="s22_foreign", type=ORDER_TYPE_BUY)
+    foreign = SimpleNamespace(ticket=9100, identifier=9100, symbol="XAUUSD", magic=EXPECTED_S25_MAGIC, comment="s22_foreign", type=ORDER_TYPE_BUY)
     runner.executor = FakeExecutor(positions=[foreign])
     assert not runner._sync_strategy(strategy), "same-magic foreign comment must block"
     assert st["sync_block_reason"] == "same_magic_unexpected_position_or_order"
@@ -831,20 +875,20 @@ def self_test() -> None:
     live_params = json.loads(json.dumps(params))
     live_params["live_trading_enabled"] = True
     live_params["shadow_forward_enabled"] = False
-    live_runner = S23LossAbortRunner(live_params)
+    live_runner = S25ReactVolRunner(live_params)
     live_runner.state = live_runner._default_state()
     live_runner.dm = FakeDM()
     live_runner.executor = FakeExecutor(margin_mode=0)
-    assert not live_runner.connect_and_preflight(), "live S23 must reject netting accounts"
+    assert not live_runner.connect_and_preflight(), "live S25 must reject netting accounts"
 
     confirmed_params = json.loads(json.dumps(live_params))
-    confirmed_runner = S23LossAbortRunner(confirmed_params)
+    confirmed_runner = S25ReactVolRunner(confirmed_params)
     confirmed_runner.state = confirmed_runner._default_state()
     confirmed_runner._save_state = lambda: None
     confirmed_strategy = confirmed_params["strategies"][0]
     owned = SimpleNamespace(
-        ticket=1, identifier=7001, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
-        comment="s23_loss_abort", type=ORDER_TYPE_BUY, volume=0.01,
+        ticket=1, identifier=7001, symbol="XAUUSD", magic=EXPECTED_S25_MAGIC,
+        comment="s25_reactvol", type=ORDER_TYPE_BUY, volume=0.01,
         open_price=2064.03, open_time=1767272400,
     )
     confirmed_runner.executor = FakeExecutor(positions=[owned])
@@ -854,44 +898,47 @@ def self_test() -> None:
     confirmed_state = confirmed_runner._st(confirmed_strategy)
     assert len(confirmed_state["basket"]) == 1 and confirmed_state["basket"][0]["position_identifier"] == 7001, "OPEN must persist broker-confirmed position ownership"
 
-    ambiguous_runner = S23LossAbortRunner(confirmed_params)
+    ambiguous_runner = S25ReactVolRunner(confirmed_params)
     ambiguous_runner.state = ambiguous_runner._default_state()
     ambiguous_runner._save_state = lambda: None
     ambiguous_runner.executor = FakeExecutor(positions=[])
     ambiguous_runner._open_entry(confirmed_strategy, "LONG", sample_row, ambiguous_runner.executor.get_symbol_info("XAUUSD"))
     assert ambiguous_runner._st(confirmed_strategy)["sync_block_reason"] == "open_success_position_not_confirmed", "unconfirmed successful OPEN must fail closed"
 
-    partial_runner = S23LossAbortRunner(confirmed_params)
+    partial_runner = S25ReactVolRunner(confirmed_params)
     partial_runner.state = partial_runner._default_state()
     partial_runner._save_state = lambda: None
     live_remaining = SimpleNamespace(
-        ticket=2, identifier=7002, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
-        comment="s23_loss_abort", type=ORDER_TYPE_BUY, volume=0.01,
+        ticket=2, identifier=7002, symbol="XAUUSD", magic=EXPECTED_S25_MAGIC,
+        comment="s25_reactvol", type=ORDER_TYPE_BUY, volume=0.01,
         open_price=2065.0, open_time=1767272460,
     )
     partial_runner.executor = FakeExecutor(positions=[live_remaining])
     partial_state = partial_runner._st(confirmed_strategy)
     partial_state["basket"] = [
-        {"ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00Z", "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
-        {"ticket": 2, "position_identifier": 7002, "side": "LONG", "lot": 0.01, "entry_price": 2065.0, "entry_time_utc": "2026-01-01T13:01:00Z", "open_time_epoch": 1767272460, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
+        {"ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00Z", "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S25_MAGIC, "owner_comment": "s25_reactvol"},
+        {"ticket": 2, "position_identifier": 7002, "side": "LONG", "lot": 0.01, "entry_price": 2065.0, "entry_time_utc": "2026-01-01T13:01:00Z", "open_time_epoch": 1767272460, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S25_MAGIC, "owner_comment": "s25_reactvol"},
     ]
     assert partial_runner._sync_strategy(confirmed_strategy), "partially completed basket close must reconcile owned tickets"
     assert [pos["position_identifier"] for pos in partial_state["basket"]] == [7002], "confirmed closed ticket must be removed without losing remaining owned state"
 
-    fail_runner = S23LossAbortRunner(params)
+    fail_runner = S25ReactVolRunner(params)
     fail_runner.state = fail_runner._default_state()
     fail_runner.executor = FakeExecutor()
     fail_runner._save_state = lambda: None
     fail_st = fail_runner._st(strategy)
     fail_st["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00+00:00", "shadow": True}]
     fail_st["basket_peak_pnl_usd"] = 1.0
+    original_max_hold = strategy["max_hold_bars"]
+    strategy["max_hold_bars"] = 10
     bars = add_features(FakeDM().get_historical_data(), float(params["point_size"]))
     bars["spread_points"] = 3.0
     bars = bars.loc[bars.index <= pd.Timestamp("2026-01-01T13:11:00Z")]
     events: list[str] = []
     fail_runner._trade_row = lambda event, *_args, **kw: events.append(str(kw.get("reason") or event))
     fail_runner._run_strategy(strategy, bars, FakeExecutor().get_symbol_info("XAUUSD"))
-    assert "failure_to_progress" in events, "failure-to-progress exit must fire after 10 bars without 3 USD peak"
+    assert "max_hold" in events, "reactvol candidate must retain its max-hold exit"
+    strategy["max_hold_bars"] = original_max_hold
 
 
 def main() -> int:
@@ -904,10 +951,10 @@ def main() -> int:
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     if args.self_test:
         self_test()
-        print("s23 self-test ok")
+        print("s25 self-test ok")
         return 0
     params = load_params()
-    runner = S23LossAbortRunner(params)
+    runner = S25ReactVolRunner(params)
     if not runner.connect_and_preflight():
         return 1
     if args.once:

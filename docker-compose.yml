@@ -253,9 +253,9 @@ services:
       - ./bot18/logs:/app/bot18/logs
       - ./bot18/live_config.py:/app/bot18/live_config.py:ro
       - ./bot18/live_s18_bot.py:/app/bot18/live_s18_bot.py:ro
+      - ./bot18/live_manual_alerts.py:/app/bot18/live_manual_alerts.py:ro
       - ./bot18/live_data_fetcher.py:/app/bot18/live_data_fetcher.py:ro
       - ./bot18/live_executor.py:/app/bot18/live_executor.py:ro
-      - ./bot18/live_manual_alerts.py:/app/bot18/live_manual_alerts.py:ro
       - ./bot18/base_interfaces.py:/app/bot18/base_interfaces.py:ro
       - ./bot18/ea_bridge.py:/app/bot18/ea_bridge.py:ro
       - ./bot18/s18_params.json:/app/bot18/s18_params.json:ro
@@ -275,18 +275,50 @@ services:
       - EA_BRIDGE_RESPONSE_FILE=res_s18.txt
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s18.txt
       - EA_BRIDGE_LOCK_FILE=ea_bridge_s18.lock
-      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
-      - EA_BRIDGE_COMMAND_RETRIES=1
-      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
-      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
-      - DISCORD_WEBHOOK_URL=https://discordapp.com/api/webhooks/1345956802222624870/vTzmaeF3OVcRuNJ8JheyZL2v9Q2L1YBTVh9reJ0JHBMyWrvu_w6AcgKmekDvY09x9aic
-      - BOT_MANUAL_ALERT_ENABLED=1
-      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+
+  # ---- Bot 19 (S19 GBPUSD pending-stop shadow/live) ----
+  exness-bot-19:
+    image: exness-bot:latest
+    container_name: exness-bot-19
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot19/state:/app/bot19/state
+      - ./bot19/logs:/app/bot19/logs
+      - ./bot19/live_config.py:/app/bot19/live_config.py:ro
+      - ./bot19/live_s19_bot.py:/app/bot19/s19_base.py:ro
+      - ./bot19/new/bot19_A_snowball_v2_verified.py:/app/bot19/live_s19_bot.py:ro
+      - ./bot19/live_data_fetcher.py:/app/bot19/live_data_fetcher.py:ro
+      - ./bot19/live_executor.py:/app/bot19/live_executor.py:ro
+      - ./bot19/base_interfaces.py:/app/bot19/base_interfaces.py:ro
+      - ./bot19/ea_bridge.py:/app/bot19/ea_bridge.py:ro
+      - ./bot19/bot19_A_params.json:/app/bot19/bot19_A_params.json:ro
+      - ./bot19/artifacts:/app/bot19/artifacts:ro
+      - ./bot19/macro_events_2026.json:/app/bot19/macro_events_2026.json:ro
+      - ./bot19/BotBridge_s19.mq5:/app/bot19/BotBridge_s19.mq5:ro
+      - "./bot19/BotBridge_s19.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s19.mq5:ro"
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:112
+      - VNC_PORT=5913
+      - NOVNC_PORT=6093
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot19
+      - EA_BRIDGE_COMMAND_FILE=cmd_s19.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s19.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s19.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s19.lock
 
   # ---- Bot 20 (S20 XAUUSD H1 large-candle short basket) ----
   exness-bot-20:
     image: exness-bot:latest
     container_name: exness-bot-20
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
     restart: always
     logging:
       driver: "json-file"
@@ -297,6 +329,8 @@ services:
       - ./bot20/state:/app/bot20/state
       - ./bot20/logs:/app/bot20/logs
       - ./bot20/live_config.py:/app/bot20/live_config.py:ro
+      - ./bot20/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot20/live_s20_bot.py:/app/bot20/live_s20_bot.py:ro
       - ./bot20/live_data_fetcher.py:/app/bot20/live_data_fetcher.py:ro
       - ./bot20/live_executor.py:/app/bot20/live_executor.py:ro
@@ -304,7 +338,6 @@ services:
       - ./bot20/ea_bridge.py:/app/bot20/ea_bridge.py:ro
       - ./bot20/s20_params.json:/app/bot20/s20_params.json:ro
       - ./bot20/BotBridge_s20.mq5:/app/bot20/BotBridge_s20.mq5:ro
-      - "./bot20/BotBridge_s20.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s20.mq5:ro"
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
@@ -313,6 +346,9 @@ services:
       - NOVNC_PORT=6094
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot20
+      - BOT_RUNNER_FILE=live_s20_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s20
+      - EA_BRIDGE_SOURCE_FILE=/app/bot20/BotBridge_s20.mq5
       - EA_BRIDGE_COMMAND_FILE=cmd_s20.txt
       - EA_BRIDGE_RESPONSE_FILE=res_s20.txt
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s20.txt
@@ -322,6 +358,7 @@ services:
   exness-bot-21:
     image: exness-bot:latest
     container_name: exness-bot-21
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
     restart: always
     logging:
       driver: "json-file"
@@ -332,6 +369,8 @@ services:
       - ./bot21/state:/app/bot21/state
       - ./bot21/logs:/app/bot21/logs
       - ./bot21/live_config.py:/app/bot21/live_config.py:ro
+      - ./bot21/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot21/live_s21_bot.py:/app/bot21/live_s21_bot.py:ro
       - ./bot21/live_data_fetcher.py:/app/bot21/live_data_fetcher.py:ro
       - ./bot21/live_executor.py:/app/bot21/live_executor.py:ro
@@ -340,7 +379,6 @@ services:
       - ./bot21/ea_bridge.py:/app/bot21/ea_bridge.py:ro
       - ./bot21/s21_params.json:/app/bot21/s21_params.json:ro
       - ./bot21/BotBridge_s21.mq5:/app/bot21/BotBridge_s21.mq5:ro
-      - "./bot21/BotBridge_s21.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s21.mq5:ro"
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
@@ -349,6 +387,9 @@ services:
       - NOVNC_PORT=6095
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot21
+      - BOT_RUNNER_FILE=live_s21_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s21
+      - EA_BRIDGE_SOURCE_FILE=/app/bot21/BotBridge_s21.mq5
       - EA_BRIDGE_COMMAND_FILE=cmd_s21.txt
       - EA_BRIDGE_RESPONSE_FILE=res_s21.txt
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s21.txt
@@ -362,10 +403,10 @@ services:
       - BOT_MANUAL_ALERT_ENABLED=1
       - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
 
-  # ---- Bot 19 (S19 GBPUSD pending-stop shadow/live) ----
-  exness-bot-19:
+  # ---- Bot 23 (S23 XAUUSD shadow-first) ----
+  exness-bot-23:
     image: exness-bot:latest
-    container_name: exness-bot-19
+    container_name: exness-bot-23
     entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
     restart: always
     logging:
@@ -374,47 +415,131 @@ services:
         max-size: "10m"
         max-file: "5"
     volumes:
+      - ./bot23/state:/app/bot23/state
+      - ./bot23/logs:/app/bot23/logs
+      - ./bot23/startup.ini:/app/startup.ini:ro
       - ./entrypoint.sh:/app/entrypoint.sh:ro
-      - ./bot19/state:/app/bot19/state
-      - ./bot19/logs:/app/bot19/logs
-      - ./bot19/live_config.py:/app/bot19/live_config.py:ro
-      - ./bot19/live_s19_bot.py:/app/bot19/live_s19_bot.py:ro
-      - ./bot19/live_data_fetcher.py:/app/bot19/live_data_fetcher.py:ro
-      - ./bot19/live_executor.py:/app/bot19/live_executor.py:ro
-      - ./bot19/live_manual_alerts.py:/app/bot19/live_manual_alerts.py:ro
-      - ./bot19/base_interfaces.py:/app/bot19/base_interfaces.py:ro
-      - ./bot19/ea_bridge.py:/app/bot19/ea_bridge.py:ro
-      - ./bot19/reset_state_if_flat.py:/app/bot19/reset_state_if_flat.py:ro
-      - ./MetaTrader 5/MQL5/Experts/BotBridge_s19.mq5:/app/selected_bridge/BotBridge_s19.mq5:ro
-      - ./bot19/s19_params.json:/app/bot19/s19_params.json:ro
-      - ./bot19/artifacts:/app/bot19/artifacts:ro
-      - ./bot19/macro_events_2026.json:/app/bot19/macro_events_2026.json:ro
+      - ./bot23/live_config.py:/app/bot23/live_config.py:ro
+      - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
+      - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro
+      - ./bot23/live_executor.py:/app/bot23/live_executor.py:ro
+      - ./bot23/live_safety.py:/app/bot23/live_safety.py:ro
+      - ./bot23/ea_bridge.py:/app/bot23/ea_bridge.py:ro
+      - ./bot23/s23_params.json:/app/bot23/s23_params.json:ro
+      - ./bot23/BotBridge_s23.mq5:/app/bot23/BotBridge_s23.mq5:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
-      - DISPLAY=:112
-      - VNC_PORT=5913
-      - NOVNC_PORT=6093
+      - DISPLAY=:116
+      - VNC_PORT=5917
+      - NOVNC_PORT=6097
       - WINEPREFIX=/root/.wine
-      - BOT_MODULE_DIR=/app/bot19
-      - EA_BRIDGE_EXPERT_NAME=BotBridge_s19
-      - EA_BRIDGE_SOURCE_FILE=/app/selected_bridge/BotBridge_s19.mq5
-      - EA_BRIDGE_COMMAND_FILE=cmd_s19.txt
-      - EA_BRIDGE_RESPONSE_FILE=res_s19.txt
-      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s19.txt
-      - EA_BRIDGE_LOCK_FILE=ea_bridge_s19.lock
+      - BOT_MODULE_DIR=/app/bot23
+      - BOT_RUNNER_FILE=live_s23_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s23
+      - EA_BRIDGE_SOURCE_FILE=/app/bot23/BotBridge_s23.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s23.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s23.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s23.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s23.lock
       - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
-      - DISCORD_WEBHOOK_URL=https://discordapp.com/api/webhooks/1345956802222624870/vTzmaeF3OVcRuNJ8JheyZL2v9Q2L1YBTVh9reJ0JHBMyWrvu_w6AcgKmekDvY09x9aic
-      - BOT_MANUAL_ALERT_ENABLED=1
-      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+
+  # ---- Bot 24 (S24 XAUUSD shadow-first) ----
+  exness-bot-24:
+    image: exness-bot:latest
+    container_name: exness-bot-24
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot24/state:/app/bot24/state
+      - ./bot24/logs:/app/bot24/logs
+      - ./bot24/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot24/live_config.py:/app/bot24/live_config.py:ro
+      - ./bot24/live_s24_bot.py:/app/bot24/live_s24_bot.py:ro
+      - ./bot24/live_data_fetcher.py:/app/bot24/live_data_fetcher.py:ro
+      - ./bot24/live_executor.py:/app/bot24/live_executor.py:ro
+      - ./bot24/live_safety.py:/app/bot24/live_safety.py:ro
+      - ./bot24/ea_bridge.py:/app/bot24/ea_bridge.py:ro
+      - ./bot24/s24_params.json:/app/bot24/s24_params.json:ro
+      - ./bot24/BotBridge_s24.mq5:/app/bot24/BotBridge_s24.mq5:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:117
+      - VNC_PORT=5918
+      - NOVNC_PORT=6098
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot24
+      - BOT_RUNNER_FILE=live_s24_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s24
+      - EA_BRIDGE_SOURCE_FILE=/app/bot24/BotBridge_s24.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s24.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s24.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s24.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s24.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+
+  # ---- Bot 25 (S25 XAUUSD shadow-first) ----
+  exness-bot-25:
+    image: exness-bot:latest
+    container_name: exness-bot-25
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot25/state:/app/bot25/state
+      - ./bot25/logs:/app/bot25/logs
+      - ./bot25/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot25/live_config.py:/app/bot25/live_config.py:ro
+      - ./bot25/live_s25_bot.py:/app/bot25/live_s25_bot.py:ro
+      - ./bot25/live_data_fetcher.py:/app/bot25/live_data_fetcher.py:ro
+      - ./bot25/live_executor.py:/app/bot25/live_executor.py:ro
+      - ./bot25/live_safety.py:/app/bot25/live_safety.py:ro
+      - ./bot25/ea_bridge.py:/app/bot25/ea_bridge.py:ro
+      - ./bot25/s25_params.json:/app/bot25/s25_params.json:ro
+      - ./bot25/BotBridge_s25.mq5:/app/bot25/BotBridge_s25.mq5:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:118
+      - VNC_PORT=5919
+      - NOVNC_PORT=6099
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot25
+      - BOT_RUNNER_FILE=live_s25_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s25
+      - EA_BRIDGE_SOURCE_FILE=/app/bot25/BotBridge_s25.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s25.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s25.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s25.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s25.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
 
   # ---- Bot 22 (S22 EURUSD squeeze-pullback shadow-first) ----
   exness-bot-22:
     image: exness-bot:latest
     container_name: exness-bot-22
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
     restart: always
     logging:
       driver: "json-file"
@@ -425,6 +550,8 @@ services:
       - ./bot22/state:/app/bot22/state
       - ./bot22/logs:/app/bot22/logs
       - ./bot22/live_config.py:/app/bot22/live_config.py:ro
+      - ./bot22/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot22/live_s22_bot.py:/app/bot22/live_s22_bot.py:ro
       - ./bot22/live_data_fetcher.py:/app/bot22/live_data_fetcher.py:ro
       - ./bot22/live_executor.py:/app/bot22/live_executor.py:ro
@@ -433,7 +560,6 @@ services:
       - ./bot22/ea_bridge.py:/app/bot22/ea_bridge.py:ro
       - ./bot22/s22_params.json:/app/bot22/s22_params.json:ro
       - ./bot22/BotBridge_s22.mq5:/app/bot22/BotBridge_s22.mq5:ro
-      - "./bot22/BotBridge_s22.mq5:/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/BotBridge_s22.mq5:ro"
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
@@ -442,6 +568,9 @@ services:
       - NOVNC_PORT=6096
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot22
+      - BOT_RUNNER_FILE=live_s22_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s22
+      - EA_BRIDGE_SOURCE_FILE=/app/bot22/BotBridge_s22.mq5
       - EA_BRIDGE_COMMAND_FILE=cmd_s22.txt
       - EA_BRIDGE_RESPONSE_FILE=res_s22.txt
       - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s22.txt

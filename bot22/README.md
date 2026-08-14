@@ -1,6 +1,6 @@
 # Bot22 / S22 EURUSD H1 Bollinger Squeeze Pullback
 
-S22 is the live-order implementation of the fixed backtest108_1 candidate:
+S22 is the live-order implementation of the fixed backtest108_1_bot22 candidate:
 
 - `man_024_v002 / EURUSD_005_1h`
 - Params hash: `f97149f97d028e98`

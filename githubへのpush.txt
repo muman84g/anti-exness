@@ -22,6 +22,7 @@ Verify `$BOT`, `$SERVICE`, runner, compose mount, strategy ID, and `BOT_BACKTEST
 For a first-time bot push, include the generated target bot folder as requested by project policy, excluding:
 
 - `live_config.py`
+- `startup.ini`
 - direct live-config derivatives such as `__pycache__/live_config*.pyc`
 - `.env`, credentials, account data, secrets, and tokens
 
@@ -62,7 +63,7 @@ Copy-Item -LiteralPath "$SRC_ROOT\BOT_BACKTEST_MAP_ja.md" -Destination "$CLONE\B
 Get-ChildItem -LiteralPath $SRC_ROOT -Filter 'github*push.txt' | Select-Object -First 1 | Copy-Item -Destination $CLONE -Force
 New-Item -ItemType Directory -Force -Path $DST_BOT | Out-Null
 Get-ChildItem -LiteralPath $SRC_BOT -Force |
-  Where-Object { $_.Name -ne 'live_config.py' } |
+  Where-Object { $_.Name -notin @('live_config.py', 'startup.ini') } |
   Copy-Item -Destination $DST_BOT -Recurse -Force
 Get-ChildItem -LiteralPath "$DST_BOT\__pycache__" -Force -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -like 'live_config*.pyc' } |
@@ -71,7 +72,7 @@ Get-ChildItem -LiteralPath "$DST_BOT\__pycache__" -Force -ErrorAction SilentlyCo
 
 If compose changes are authorized, add or update only `$SERVICE`. Preserve unrelated service blocks and mounts.
 
-Before staging a first-time compose-enabled bot, verify that `$SERVICE` exists in `docker-compose.yml` and mounts the runner, params, bridge, helper files, `live_config.py`, state/log directories, `BOT_MODULE_DIR`, and bot-specific IPC filenames.
+Before staging a first-time compose-enabled bot, verify that `$SERVICE` exists in `docker-compose.yml` and mounts the runner, params, bridge, helper files, `live_config.py`, the folderized `startup.ini`, state/log directories, `BOT_MODULE_DIR`, and bot-specific IPC filenames.
 
 ## Stage And Verify
 
@@ -108,26 +109,88 @@ the running container should be considered stale until the target service is
 recreated. Do not say the running bot has the update just because `git pull`
 finished.
 
-For a first deployment, place the local sensitive `botNN/live_config.py` on CentOS manually before any start. Do not commit it.
+The local source folder already contains the sensitive files `botNN/live_config.py` and `botNN/startup.ini`. They are intentionally excluded from Git. After `git pull`, upload both files manually into the same `botNN` folder on CentOS before any compose `run` or `up`. A bind mount whose source file does not exist can create that path as a directory on the host; then SCP upload fails with `is a directory`.
+
+Folderized sensitive-file check and repair:
+
+```bash
+cd /home/muu/python_program/anti-exness
+for name in live_config.py startup.ini; do
+  test -e "bot<NN>/$name" && ls -ld "bot<NN>/$name" || true
+done
+
+# If either path is a directory, stop the target and rename only the mistaken path.
+for name in live_config.py startup.ini; do
+  if [ -d "bot<NN>/$name" ]; then
+    sudo docker compose stop exness-bot-<NN> || true
+    mv "bot<NN>/$name" "bot<NN>/${name}.dir_backup_$(date +%Y%m%d_%H%M%S)"
+  fi
+done
+
+# Upload the real local files now, then require both to be regular files.
+test -f bot<NN>/live_config.py && test -f bot<NN>/startup.ini && echo "sensitive files are regular files"
+```
+
+Do not substitute `startup.example.ini` or `live_config.example.py` for actual login files. Compose must mount `./bot<NN>/startup.ini:/app/startup.ini:ro`; this prevents an old login baked into an image from being used silently. Preserve login/server/password fields from the intended account config, and edit only explicitly authorized fields.
 
 No-order self-test, after replacing `<NN>` and confirming the runner path:
 
 ```bash
-test -f bot<NN>/live_config.py || cp bot<NN>/live_config.example.py bot<NN>/live_config.py
 sudo docker compose run --rm --no-deps exness-bot-<NN> python3 /app/bot<NN>/live_s<NN>_bot.py --self-test
 ```
 
-After the no-order self-test passes, recreate only the authorized target to
-make the updated files active in the running container:
+Start or recreate the authorized target so noVNC/MT5 exists. This makes the updated files active in the target container; if params are live-order enabled, it can place real orders once the bridge is attached and a fresh signal passes all gates.
 
 ```bash
 sudo docker compose up -d --no-deps --force-recreate exness-bot-<NN>
 sudo docker ps --filter name=exness-bot-<NN>
-sudo docker compose logs --tail=80 exness-bot-<NN>
-tail -n 80 bot<NN>/logs/s<NN>_bot.log
 ```
 
-Before a first shadow-forward start, confirm the target params keep real trading disabled and shadow mode enabled unless the user explicitly authorized another mode.
+First noVNC / EA Bridge setup:
+
+```bash
+# Use the target service's NOVNC_PORT from docker-compose.yml.
+sudo firewall-cmd --add-port=<NOVNC_PORT>/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+Open `http://118.27.2.117:<NOVNC_PORT>/vnc.html`, then in MT5:
+
+- Confirm the broker symbol name and chart. If only a suffix symbol exists, update `mt5_symbol` and the lot override before starting.
+- Open the target symbol chart/timeframe used by the bot.
+- Compile and attach `BotBridge_s<NN>.mq5`.
+- Set EA inputs `InpCommandFile=cmd_s<NN>.txt` and `InpResponseFile=res_s<NN>.txt`.
+- Turn Algo Trading on only when the user authorized real trading for this bot; otherwise use read-only bridge checks only.
+
+Read-only bridge check after noVNC attach:
+
+```bash
+sudo docker exec exness-bot-<NN> python3 - <<'PY'
+import json
+import sys
+sys.path.insert(0, "/app/bot<NN>")
+from ea_bridge import EABridgeServer
+
+with open("/app/bot<NN>/s<NN>_params.json", "r", encoding="utf-8") as f:
+    params = json.load(f)
+symbol = params["symbols"][0].get("mt5_symbol") or params["symbols"][0]["symbol"]
+
+b = EABridgeServer()
+b.start()
+for cmd in ("ECHO", "CAPS|", "ACCOUNT|", f"INFO|{symbol}", f"HIST|{symbol}|{params['h1_timeframe']}|5", f"POSITIONS|{symbol}|{params['magic']}", f"ORDERS|{symbol}|{params['magic']}"):
+    print(cmd, "=>", b.send_command(cmd, timeout=10))
+PY
+```
+
+After bridge attach, confirm logs and the bot process:
+
+```bash
+sudo docker compose logs --tail=80 exness-bot-<NN>
+tail -n 80 bot<NN>/logs/s<NN>_bot.log
+sudo docker exec exness-bot-<NN> ps aux | grep '[p]ython'
+```
+
+Before a first start/recreate, confirm the target params match the user-authorized mode. If `live_trading_enabled=true` and `shadow_forward_enabled=false`, recreating the service can place real orders when a fresh signal passes all gates.
 
 ## Final Response Checklist
 

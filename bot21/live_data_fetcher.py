@@ -50,23 +50,81 @@ class MT5DataManager(BaseDataManager):
             return None
 
         rates = []
-        for line in data_str.split("|"):
-            if not line.strip(): continue
-            parts = line.split(",")
-            rates.append({
-                "time": parts[0],
-                "Open": float(parts[1]),
-                "High": float(parts[2]),
-                "Low": float(parts[3]),
-                "Close": float(parts[4]),
-                "Volume": int(parts[5])
-            })
+
+        for line_no, line in enumerate(data_str.split("|"), start=1):
+            line = line.strip()
+
+            if not line:
+                continue
+
+            parts = [part.strip() for part in line.split(",")]
+
+            # time, Open, High, Low, Close, Volume の6列が必要
+            if len(parts) < 6:
+                logging.warning(
+                    "Skipping malformed HIST row for %s: "
+                    "line_no=%s columns=%s row=%r",
+                    mt5_symbol,
+                    line_no,
+                    len(parts),
+                    line,
+                )
+                continue
+
+            try:
+                rates.append({
+                    "time": parts[0],
+                    "Open": float(parts[1]),
+                    "High": float(parts[2]),
+                    "Low": float(parts[3]),
+                    "Close": float(parts[4]),
+                    "Volume": int(float(parts[5])),
+                })
+            except (ValueError, TypeError, IndexError) as exc:
+                logging.warning(
+                    "Skipping invalid HIST row for %s: "
+                    "line_no=%s row=%r error=%s",
+                    mt5_symbol,
+                    line_no,
+                    line,
+                    exc,
+                )
+                continue
+
+        if not rates:
+            logging.error(
+                "No valid historical rows returned for %s. Raw response length=%s",
+                mt5_symbol,
+                len(data_str),
+            )
+            return None
 
         df = pd.DataFrame(rates)
+
         try:
-            idx = pd.DatetimeIndex(pd.to_datetime(df['time'], format='%Y.%m.%d %H:%M'))
-        except ValueError:
-            idx = pd.DatetimeIndex(pd.to_datetime(df['time']))
+            idx = pd.DatetimeIndex(
+                pd.to_datetime(
+                    df["time"],
+                    format="%Y.%m.%d %H:%M",
+                    errors="raise",
+                )
+            )
+        except (ValueError, TypeError):
+            try:
+                idx = pd.DatetimeIndex(
+                    pd.to_datetime(
+                        df["time"],
+                        errors="raise",
+                    )
+                )
+            except (ValueError, TypeError) as exc:
+                logging.error(
+                    "Failed to parse MT5 bar timestamps for %s: %s",
+                    mt5_symbol,
+                    exc,
+                )
+                return None
+
         try:
             if idx.tz is None:
                 # BotBridge_s21 HIST timestamps were verified on CentOS as UTC.

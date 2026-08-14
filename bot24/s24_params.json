@@ -1,0 +1,21 @@
+{
+  "enabled": true, "live_trading_enabled": true, "shadow_forward_enabled": false,
+  "require_hedging_account": true, "bot_number": "24", "bot_suffix": "s24",
+  "strategy_id": "bot24_visual_no_adverse_c_target16", "expected_magic": 200024,
+  "expected_bridge_name": "BotBridge_s24", "symbol": "XAUUSD", "mt5_symbol": "XAUUSD",
+  "default_lot": 0.01, "contract_size": 100.0, "poll_interval_seconds": 5,
+  "status_log_interval_seconds": 60, "broker_timezone": "UTC", "m1_timeframe": 1,
+  "m1_bars": 360, "drop_latest_m1_bar": true, "max_signal_delay_minutes": 2,
+  "point_size": 0.001, "price_digits": 3, "max_entry_spread_points": 300.0,
+  "deviation_points": 50,
+  "safety": {"hist_timestamps_are_utc": true, "stale_signal_guard": true, "preflight_clean_sync": true, "periodic_clean_sync": true, "clear_recoverable_sync_block": true, "save_state_after_clear": true, "broker_sl_residual_clear": false, "audit_log": true},
+  "strategies": [{
+    "enabled": true, "id": "visual_no_adverse_c_target16", "spec_id": "visual_no_adverse_c:target16",
+    "magic": 200024, "comment_prefix": "s24_no_adverse", "lot": 0.01,
+    "session_start_utc": 13, "session_end_utc": 18, "mode": "breakout_impulse",
+    "impulse_bars": 10, "impulse_atr": 0.60, "add_atr": 0.45, "max_positions": 8,
+    "basket_target_usd": 16.0, "basket_stop_usd": 48.0, "max_hold_bars": 120,
+    "cooldown": 3, "vol_min": 1.05, "failure_to_progress_bars": 0,
+    "failure_to_progress_peak_usd": 0.0, "reverse_on_fail": false
+  }]
+}

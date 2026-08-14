@@ -1,0 +1,17 @@
+.git
+**/.git
+**/__pycache__
+**/*.pyc
+**/logs
+**/state
+**/startup.ini
+**/live_config.py
+**/live_config.local.py
+.env
+.env.*
+*.log
+*.sqlite
+*.sqlite-*
+codex-sub
+backtest
+_archive

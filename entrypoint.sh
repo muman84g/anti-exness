@@ -10,6 +10,12 @@
 
 set -e
 
+# Compose one-off commands (for example the no-order self-test) must bypass the
+# GUI/runtime boot path and run exactly the requested command.
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
+
 echo "======================================"
 echo "  Exness MT5 Bot コンテナ起動"
 echo "======================================"
@@ -107,8 +113,41 @@ echo "      MT5 起動完了 (PID: $MT5_PID)"
 # MT5 の初期化（ブローカーログイン含む）に時間がかかるため十分に待機
 sleep 30
 
-# ── 3. コンテナの常駐化 ──────────────
-echo "[3/3] 疎通確認用テストを実行し、CentOSホストからのTCP接続を待機します..."
+# ── 3. runner 待機起動 ──────────────
+# The selected bridge has been copied and compiled above. Attaching it to the
+# target chart remains a manual GUI operation. Until attachment, the runner is
+# restarted with a delay; once IPC becomes available it enters its normal loop.
+BOT_MODULE_DIR="${BOT_MODULE_DIR:-}"
+BOT_RUNNER_FILE="${BOT_RUNNER_FILE:-}"
+BOT_RUNNER="$BOT_MODULE_DIR/$BOT_RUNNER_FILE"
+if [ -z "$BOT_MODULE_DIR" ] || [ -z "$BOT_RUNNER_FILE" ] || [ ! -f "$BOT_RUNNER" ]; then
+    echo "ERROR: bot runner path is invalid: $BOT_RUNNER"
+    exit 1
+fi
+
+run_bot_until_ready() {
+    while kill -0 "$MT5_PID" 2>/dev/null; do
+        echo "[3/3] Starting bot runner: $BOT_RUNNER"
+        if python3 "$BOT_RUNNER"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        echo "Runner exited with code $rc; retrying in 10 seconds while waiting for bridge attachment."
+        sleep 10
+    done
+}
+
+run_bot_until_ready &
+BOT_SUPERVISOR_PID=$!
 python3 /app/test_local_connectivity.py &
 
-tail -f /dev/null
+shutdown_children() {
+    kill "$BOT_SUPERVISOR_PID" "$MT5_PID" 2>/dev/null || true
+    wait "$BOT_SUPERVISOR_PID" "$MT5_PID" 2>/dev/null || true
+}
+trap shutdown_children EXIT INT TERM
+
+wait "$MT5_PID"
+echo "ERROR: MT5 exited; stopping container so restart policy can recover it."
+exit 1

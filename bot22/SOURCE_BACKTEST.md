@@ -1,6 +1,6 @@
 # Source Backtest
 
-Implemented candidate from `C:\botter\backtest\output\backtest108_1`:
+Implemented candidate from `C:\botter\backtest\output\backtest108_1_bot22`:
 
 | Symbol | Spec | Params hash | Params | Dev PnL | Dev PF | Dev MDD | Dev Trades |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |

@@ -1,48 +1,43 @@
 # Source Backtest
 
-## Mapping
+## Frozen mapping
 
-- Bot: `bot23`
-- Service: not added / not deployed
-- Strategy ID: `bot23_chisiki_reactvol_fixed4`
-- Source campaign: `backtest/output/chisiki_x_bot_ideas_20260706`
-- Source run: `runs/20260730_1722_chisiki_prebot_fixed4`
-- Idea: `man_028`
-- Symbol: `XAUUSD`
-- Signal/execution timeframe: M1 confirmed bars, next-cycle market execution
-- Data boundary: dev_data fixed candidates only; holdout_data not used for this porting step
+- Bot: `bot23` / S23
+- Strategy: `visual_loss_abort_g_failure_to_progress`
+- Registry lineage: `man_028_v003`
+- Campaign: `bot23_loss_abort_structural_20260814`
+- Candidate: `loss_abort_structural_exit_v1`
+- Frozen parameter hash: `e1b7ac7a0f6fa87d2fafed38ea7beb38ba7ecffd675fce800fd9a98f9e8c3a1b`
+- Symbol/timeframe: XAUUSD, tick-derived confirmed M1 bars, next-cycle execution
+- Status: `forward_only`; reusable evaluation data was already observed and was
+  not used to alter this live specification.
 
-## Fixed Candidates
+## Frozen strategy parameters
 
-- `visual_loss_abort_g`: PnL 472.19, PF 1.269, DD 183.55, 495 trades, stress 317.44/PF 1.175.
-- `visual_no_adverse_c`: PnL 346.69, PF 1.292, DD 152.24, 252 trades, stress 384.40/PF 1.341.
-- `h14_18_h120_tp12_dd40_vol105_impulseonly_all_all`: PnL 365.32, PF 2.389, DD 80.60, 82 trades, stress 342.34/PF 2.297.
-- `visual_break_reverse_a`: PnL 210.13, PF 1.181, DD 191.02, 305 trades, stress 173.35/PF 1.147. This is the weakest PF candidate and should be monitored first.
-- Combined dev result: PnL 1394.33, PF 1.320, DD 340.47, MDD/PnL 0.24, 1134 trades.
+- UTC session 13:00-18:00, impulse bars 8, impulse ATR 0.55
+- add ATR 0.45, maximum positions 8, volume minimum 1.05
+- basket target USD 10, basket stop USD 18, maximum hold 70 bars
+- cooldown 8 bars
+- failure-to-progress: from held bar 10, close when lifetime peak basket PnL is
+  below USD 3
+- no reverse-on-fail
 
-## Pre-Bot Audit
+## Evidence
 
-- Dev tick/BidAsk replay: PASS in source run.
-- Prefix/price audit: `prefix_mismatches=0`, `price_bad=0` in source run.
-- Cost stress: all four remained PnL positive in source run.
-- Timezone: source timestamps UTC; live EA HIST is normalized as UTC.
-- Entry/close order: live closes existing strategy basket before considering a new entry for that same strategy.
-- Same-bar re-entry guard: after a basket close, the same strategy skips a new entry on the same signal bar except the explicit `visual_break_reverse_a` stop-reverse action.
+- Dev base: PnL 483.874, PF 1.24331, max DD 109.621, 724 closed tickets,
+  403 initial entries.
+- Dev cost stress: PnL 366.905, PF 1.18163, max DD 108.493, 720 closed
+  tickets, 400 initial entries.
+- Observed reusable period (descriptive only): PnL 138.95, PF 1.40378,
+  max DD 86.323, 180 closed tickets.
 
-## Live Alignment
+Primary artifacts are under
+`backtest/検討中/bot23/bot23_loss_abort_structural_20260814/`.
 
-- Initial mode: `live_trading_enabled=false`, `shadow_forward_enabled=true`.
-- Magic/comment isolation:
-  - `230001` / `s23_loss_abort_g`
-  - `230002` / `s23_no_adverse_c`
-  - `230003` / `s23_reactvol_h14_18`
-  - `230004` / `s23_break_reverse_a`
-- Price side: long entry uses Ask, short entry uses Bid; basket PnL uses Bid for long exits and Ask for short exits.
-- Position/order sync: scoped by symbol and per-strategy magic; unknown live exposure blocks new entries fail-closed.
-- State isolation: each strategy has its own basket, cooldown, reverse guard, last add price, sync block, and close timestamp.
+## Live mapping notes
 
-## Known Differences
-
-- BT used tick-derived M1 Bid/Ask. EA HIST provides OHLC only, so bot23 live feature bars use HIST OHLC and current `INFO` Bid/Ask for spread guard and current basket PnL.
-- The `h14_18...` candidate is mapped to the same fixed entry/exit params, but not a byte-for-byte copy of the historical ReactVol research runner.
-- No Docker service, deploy, restart, bridge attach, settings change, or live switch is included in this commit.
+The live runner stores the lifetime peak of broker-reported basket PnL and uses
+elapsed confirmed M1 bar time, not poll counts. Existing entry ownership is
+tracked by symbol, magic, comment, ticket, and position identifier. The runner
+starts shadow-only. Before any future first start, an old fixed4 S23 state file
+must not be reused; identity mismatch intentionally fails closed.
