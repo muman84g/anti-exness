@@ -41,6 +41,12 @@ FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "live_time_close_failed",
     "live_time_close_unconfirmed",
 }
+FULL_SYNC_RECOVERABLE_REASONS = {
+    "positions_or_orders_unavailable",
+    "positions_unavailable",
+    "orders_unavailable",
+    "symbol_info_failed",
+}
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 LOG_FILE = os.path.join(LOG_DIR, "s25_bot.log")
@@ -430,9 +436,13 @@ class S25ReactVolRunner:
         st = self._st(strat)
         positions = self.executor.get_positions(symbol, int(strat["magic"]))
         orders = self.executor.get_orders(symbol, int(strat["magic"]))
-        if positions is None or orders is None:
-            self._set_sync_block(strat, "positions_or_orders_unavailable", recoverable=True)
+        if positions is None:
+            self._set_sync_block(strat, "positions_unavailable", recoverable=True)
             return False
+        orders_available = orders is not None
+        if not orders_available:
+            self._set_sync_block(strat, "orders_unavailable", recoverable=True)
+            orders = []
         unexpected = [record for record in [*positions, *orders] if not self._owned_position(strat, record)]
         if unexpected:
             self._set_sync_block(
@@ -442,7 +452,7 @@ class S25ReactVolRunner:
                 recoverable=False,
             )
             return False
-        if clean_sync_block_if_flat(
+        if orders_available and clean_sync_block_if_flat(
             symbol_key=strat["id"],
             state=st,
             positions=positions,
@@ -519,6 +529,14 @@ class S25ReactVolRunner:
                     self._set_sync_block(strat, None)
                 self._save_state()
                 return True
+        if (
+            orders_available
+            and st.get("sync_block_new_entries")
+            and st.get("sync_block_recoverable")
+            and str(st.get("sync_block_reason") or "") in FULL_SYNC_RECOVERABLE_REASONS
+        ):
+            self._set_sync_block(strat, None)
+            self._save_state()
         return True
 
     def _close_basket(self, strat: dict[str, Any], reason: str, price_row: pd.Series, pnl: float) -> None:
@@ -897,6 +915,45 @@ def self_test() -> None:
     confirmed_runner._open_entry(confirmed_strategy, "LONG", sample_row, confirmed_runner.executor.get_symbol_info("XAUUSD"))
     confirmed_state = confirmed_runner._st(confirmed_strategy)
     assert len(confirmed_state["basket"]) == 1 and confirmed_state["basket"][0]["position_identifier"] == 7001, "OPEN must persist broker-confirmed position ownership"
+
+    active_recovery_runner = S25ReactVolRunner(confirmed_params)
+    active_recovery_runner.state = active_recovery_runner._default_state()
+    active_recovery_runner._save_state = lambda: None
+    active_recovery_state = active_recovery_runner._st(confirmed_strategy)
+    active_recovery_state["basket"] = [{
+        "ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01,
+        "entry_price": 2064.03, "entry_time_utc": "2026-01-01T13:00:00Z",
+        "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD",
+        "owner_magic": EXPECTED_S25_MAGIC, "owner_comment": "s25_reactvol",
+    }]
+    active_recovery_state["sync_block_new_entries"] = True
+    active_recovery_state["sync_block_reason"] = "positions_or_orders_unavailable"
+    active_recovery_state["sync_block_recoverable"] = True
+    active_recovery_runner.executor = FakeExecutor(positions=[owned])
+    assert active_recovery_runner._sync_strategy(confirmed_strategy), "complete owned sync must preserve active basket management"
+    assert not active_recovery_state["sync_block_new_entries"], "complete owned sync must clear recoverable block while active"
+
+    class OrdersUnavailableExecutor(FakeExecutor):
+        def get_orders(self, *_: Any) -> None:
+            return None
+
+    orders_unavailable_runner = S25ReactVolRunner(confirmed_params)
+    orders_unavailable_runner.state = active_recovery_runner.state
+    orders_unavailable_runner._save_state = lambda: None
+    orders_unavailable_runner.executor = OrdersUnavailableExecutor(positions=[owned])
+    orders_unavailable_state = orders_unavailable_runner._st(confirmed_strategy)
+    assert orders_unavailable_runner._sync_strategy(confirmed_strategy), "orders outage must not stop owned basket management"
+    assert orders_unavailable_state["sync_block_reason"] == "orders_unavailable"
+    assert orders_unavailable_state["sync_block_new_entries"], "orders outage must still block entry/add"
+    close_reasons: list[str] = []
+    orders_unavailable_runner._close_basket = lambda _strat, reason, _row, _pnl: close_reasons.append(reason)
+    orders_unavailable_runner._run_strategy(
+        confirmed_strategy,
+        sample_bars,
+        orders_unavailable_runner.executor.get_symbol_info("XAUUSD"),
+    )
+    assert close_reasons, "orders outage must continue existing basket exit evaluation"
+    assert orders_unavailable_state["sync_block_new_entries"], "exit management must not clear orders outage entry block"
 
     ambiguous_runner = S25ReactVolRunner(confirmed_params)
     ambiguous_runner.state = ambiguous_runner._default_state()

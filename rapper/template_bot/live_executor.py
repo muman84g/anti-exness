@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from ea_bridge import ea_bridge
@@ -138,16 +139,21 @@ class MT5Executor:
 
     def _records(self, cmd: str) -> list[LiveRecord] | None:
         res = ea_bridge.send_command(cmd, timeout=10)
+        parts = cmd.split("|")
+        record_kind = parts[0].lower()
+        symbol = parts[1] if len(parts) > 1 else "unknown"
         if res == "OK":
             return []
         if not res or not res.startswith("OK|"):
+            logging.error("EA failed to get %s for symbol %s: %s", record_kind, symbol, res)
             return None
         records: list[LiveRecord] = []
         try:
             for item in res[3:].split("|"):
                 if item:
                     records.append(self._parse_record(item))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            logging.error("EA returned malformed %s for symbol %s: %s", record_kind, symbol, exc)
             return None
         return records
 
