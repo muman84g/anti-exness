@@ -8,3 +8,5 @@
 - mode: user-authorized live (`live=true`, `shadow=false`)。deploy、restart、EA attachment、real orderは未検証
 
 Semantic deletion review: 新規botのため既存戦略挙動の削除はない。base側はbot27固有のsuffix/magic/log/state文字列だけを環境化し、bot27既定値とactual-entry holdを明示保持した。bot29は凍結正本どおりdecision-time holdをparamsで分岐し、self-testで期限を保全する。
+
+2026-08-24 runtime correction: `BotBridge_s29.mq5`を単体コンパイル可能な正本へ展開した。entrypointがMT5 Expertsへコピーしない`_base_bridge.mqh`依存を除去し、bridge名と`cmd_s29.txt` / `res_s29.txt`を保持した。

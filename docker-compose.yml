@@ -524,7 +524,6 @@ services:
       - ./bot28/_base_loader.py:/app/bot28/_base_loader.py:ro
       - ./bot28/s28_params.json:/app/bot28/s28_params.json:ro
       - ./bot28/BotBridge_s28.mq5:/app/bot28/BotBridge_s28.mq5:ro
-      - ./bot27/BotBridge_s27.mq5:/app/bot28/_base_bridge.mqh:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
@@ -578,7 +577,6 @@ services:
       - ./bot29/_base_loader.py:/app/bot29/_base_loader.py:ro
       - ./bot29/s29_params.json:/app/bot29/s29_params.json:ro
       - ./bot29/BotBridge_s29.mq5:/app/bot29/BotBridge_s29.mq5:ro
-      - ./bot27/BotBridge_s27.mq5:/app/bot29/_base_bridge.mqh:ro
       - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
     network_mode: "host"
     environment:
