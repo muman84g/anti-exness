@@ -1,0 +1,8 @@
+MT5_PATH = ""
+MT5_LOGIN = 0
+MT5_PASSWORD = ""
+MT5_SERVER = ""
+
+MIN_LOT_OVERRIDES = {
+    "USTEC": 0.01,
+}

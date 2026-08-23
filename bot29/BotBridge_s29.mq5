@@ -1,0 +1,5 @@
+#define BRIDGE_NAME "BotBridge_s29"
+#define BRIDGE_VERSION "2026-08-22-s29-midclose-v1"
+#define BRIDGE_COMMAND_FILE "cmd_s29.txt"
+#define BRIDGE_RESPONSE_FILE "res_s29.txt"
+#include "_base_bridge.mqh"

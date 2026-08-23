@@ -1,0 +1,16 @@
+{
+  "schema_version": "live_bot_porting_validation_v1",
+  "bot": "bot28",
+  "candidate": "PV2C560_DEVQ80_H75_FORWARD_R1",
+  "validated_at": "2026-08-23",
+  "checks": {
+    "python_compile": "PASS",
+    "runner_self_test": "PASS_DYNAMIC_75M_DECISION_HOLD",
+    "source_feature_parity": "PASS_3_SAMPLES_1E-12",
+    "dev_fixed_selection": "PASS_494_TRADES",
+    "observed_leakcheck_fixed_diagnostic": "PASS_133_TRADES_NOT_SELECTION_ELIGIBLE",
+    "default_shadow_mode": "PASS",
+    "real_order_test": "NOT_RUN"
+  },
+  "release": "NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH"
+}

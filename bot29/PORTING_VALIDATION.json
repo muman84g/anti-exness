@@ -1,0 +1,20 @@
+{
+  "schema_version": "live_bot_porting_validation_v1",
+  "bot": "bot29",
+  "candidate": "PV2C531_CORRECTED_DIAGNOSTIC_R1",
+  "validated_at": "2026-08-22",
+  "checks": {
+    "python_compile": "PASS",
+    "runner_self_test": "PASS_DECISION_TIME_HOLD",
+    "source_feature_parity": "PASS_3_SAMPLES_1E-12",
+    "source_sha256_manifest": "PASS_25_FILES",
+    "compose_config": "PASS",
+    "default_shadow_mode": "PASS",
+    "sensitive_runtime_files": "NOT_CREATED",
+    "runtime_container": "NOT_VERIFIED_DOCKER_DAEMON_UNAVAILABLE",
+    "real_order_test": "NOT_RUN",
+    "mql_compile": "NOT_RUN",
+    "bridge_read_only_probe": "NOT_RUN"
+  },
+  "release": "NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH"
+}

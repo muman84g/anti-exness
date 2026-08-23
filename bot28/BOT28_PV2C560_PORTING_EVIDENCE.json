@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "bot": "bot28",
+  "bot_suffix": "s28",
+  "magic": 200028,
+  "candidate": "PV2C560_DEVQ80_H75_FORWARD_R1",
+  "selection_basis": "DEV_FIXED_THEN_OBSERVED_DIAGNOSTIC_ONLY",
+  "implementation": {
+    "s28_params.json": "4594001e03f8066ac39d6939e35dc076c6516ff877aacbfa5266e54848d9ae0e",
+    "protocol_v2_strategy.py": "5a7de3bde739ef29e053652fa6dba79d63017b736057946753e69c63c5513229",
+    "live_s28_bot.py": "52b7a686dd01f88fac8628227f5132b1228021a67e2f67501f05ab5b00641500",
+    "shared_live_s27_bot.py": "7750e5b9137af0bdafd1f21b4a6faa60a0a233ca4cb6f9270160f93536defc27",
+    "porting_parity_test.py": "a6374997d79b82269708f1b39242fd82c9b9b9e445bb7067822cd99d80d2bad6"
+  },
+  "validation": {
+    "python_compile": "PASS",
+    "runner_self_test": "PASS",
+    "source_parity_samples": 3,
+    "source_parity_tolerance": 1e-12
+  },
+  "release": {
+    "deploy": false,
+    "restart": false,
+    "ea_attachment": false,
+    "live_switch": false
+  }
+}

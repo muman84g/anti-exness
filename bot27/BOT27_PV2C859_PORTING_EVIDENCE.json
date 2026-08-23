@@ -1,0 +1,26 @@
+{
+  "status": "PASS",
+  "bot": "bot27",
+  "bot_suffix": "s27",
+  "magic": 200027,
+  "candidate": "PV2C859_DEVQ825_H90_FORWARD_R1",
+  "selection_basis": "DEV_FIXED_THEN_OBSERVED_DIAGNOSTIC_ONLY",
+  "implementation": {
+    "s27_params.json": "5ff11c388254734aefdfc3589dd2a8756059728f81342d56411caf39d3efce4e",
+    "protocol_v2_strategy.py": "58827b948f4dff9065e2ff62718fe980dc5e844c9a2538f02ff8936f88f383ec",
+    "live_s27_bot.py": "7750e5b9137af0bdafd1f21b4a6faa60a0a233ca4cb6f9270160f93536defc27",
+    "porting_parity_test.py": "cdbe9bf81f8fb616f0a023403ed0083387e55a289dc1ff83f1097f5db7beda81"
+  },
+  "validation": {
+    "python_compile": "PASS",
+    "runner_self_test": "PASS",
+    "source_parity_samples": 3,
+    "source_parity_tolerance": 1e-12
+  },
+  "release": {
+    "deploy": false,
+    "restart": false,
+    "ea_attachment": false,
+    "live_switch": false
+  }
+}

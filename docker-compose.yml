@@ -403,6 +403,204 @@ services:
       - BOT_MANUAL_ALERT_ENABLED=1
       - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
 
+  # ---- Bot 26 (S26 USTEC/USOIL PV2C520 shadow-first) ----
+  exness-bot-26:
+    image: exness-bot:latest
+    container_name: exness-bot-26
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot26/state:/app/bot26/state
+      - ./bot26/logs:/app/bot26/logs
+      - ./bot26/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot26/live_config.py:/app/bot26/live_config.py:ro
+      - ./bot26/live_s26_bot.py:/app/bot26/live_s26_bot.py:ro
+      - ./bot26/protocol_v2_strategy.py:/app/bot26/protocol_v2_strategy.py:ro
+      - ./bot26/live_data_fetcher.py:/app/bot26/live_data_fetcher.py:ro
+      - ./bot26/live_executor.py:/app/bot26/live_executor.py:ro
+      - ./bot26/live_safety.py:/app/bot26/live_safety.py:ro
+      - ./bot26/ea_bridge.py:/app/bot26/ea_bridge.py:ro
+      - ./bot26/s26_params.json:/app/bot26/s26_params.json:ro
+      - ./bot26/BotBridge_s26.mq5:/app/bot26/BotBridge_s26.mq5:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:119
+      - VNC_PORT=5920
+      - NOVNC_PORT=6100
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot26
+      - BOT_RUNNER_FILE=live_s26_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s26
+      - EA_BRIDGE_SOURCE_FILE=/app/bot26/BotBridge_s26.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s26.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s26.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s26.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s26.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+
+  # ---- Bot 27 (S27 USTEC PV2C859 shadow-first) ----
+  exness-bot-27:
+    image: exness-bot:latest
+    container_name: exness-bot-27
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot27/state:/app/bot27/state
+      - ./bot27/logs:/app/bot27/logs
+      - ./bot27/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot27/live_config.py:/app/bot27/live_config.py:ro
+      - ./bot27/live_s27_bot.py:/app/bot27/live_s27_bot.py:ro
+      - ./bot27/protocol_v2_strategy.py:/app/bot27/protocol_v2_strategy.py:ro
+      - ./bot27/live_data_fetcher.py:/app/bot27/live_data_fetcher.py:ro
+      - ./bot27/live_executor.py:/app/bot27/live_executor.py:ro
+      - ./bot27/live_safety.py:/app/bot27/live_safety.py:ro
+      - ./bot27/ea_bridge.py:/app/bot27/ea_bridge.py:ro
+      - ./bot27/s27_params.json:/app/bot27/s27_params.json:ro
+      - ./bot27/BotBridge_s27.mq5:/app/bot27/BotBridge_s27.mq5:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:120
+      - VNC_PORT=5921
+      - NOVNC_PORT=6101
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot27
+      - BOT_RUNNER_FILE=live_s27_bot.py
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s27
+      - EA_BRIDGE_SOURCE_FILE=/app/bot27/BotBridge_s27.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s27.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s27.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s27.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s27.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+
+  # ---- Bot 28 (S28 USTEC PV2C560 shadow-first) ----
+  exness-bot-28:
+    image: exness-bot:latest
+    container_name: exness-bot-28
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot28/state:/app/bot28/state
+      - ./bot28/logs:/app/bot28/logs
+      - ./bot28/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot28/live_config.py:/app/bot28/live_config.py:ro
+      - ./bot28/live_s28_bot.py:/app/bot28/live_s28_bot.py:ro
+      - ./bot27/live_s27_bot.py:/app/bot28/_base_live_bot.py:ro
+      - ./bot28/protocol_v2_strategy.py:/app/bot28/protocol_v2_strategy.py:ro
+      - ./bot28/live_data_fetcher.py:/app/bot28/live_data_fetcher.py:ro
+      - ./bot27/live_data_fetcher.py:/app/bot28/_base_live_data_fetcher.py:ro
+      - ./bot28/live_executor.py:/app/bot28/live_executor.py:ro
+      - ./bot27/live_executor.py:/app/bot28/_base_live_executor.py:ro
+      - ./bot28/live_safety.py:/app/bot28/live_safety.py:ro
+      - ./bot27/live_safety.py:/app/bot28/_base_live_safety.py:ro
+      - ./bot28/ea_bridge.py:/app/bot28/ea_bridge.py:ro
+      - ./bot27/ea_bridge.py:/app/bot28/_base_ea_bridge.py:ro
+      - ./bot28/_base_loader.py:/app/bot28/_base_loader.py:ro
+      - ./bot28/s28_params.json:/app/bot28/s28_params.json:ro
+      - ./bot28/BotBridge_s28.mq5:/app/bot28/BotBridge_s28.mq5:ro
+      - ./bot27/BotBridge_s27.mq5:/app/bot28/_base_bridge.mqh:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:121
+      - VNC_PORT=5922
+      - NOVNC_PORT=6102
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot28
+      - BOT_RUNNER_FILE=live_s28_bot.py
+      - BOT_SUFFIX=s28
+      - EXPECTED_MAGIC=200028
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s28
+      - EA_BRIDGE_SOURCE_FILE=/app/bot28/BotBridge_s28.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s28.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s28.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s28.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s28.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+
+  # ---- Bot 29 (S29 USTEC PV2C531 shadow-first) ----
+  exness-bot-29:
+    image: exness-bot:latest
+    container_name: exness-bot-29
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      - ./bot29/state:/app/bot29/state
+      - ./bot29/logs:/app/bot29/logs
+      - ./bot29/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+      - ./bot29/live_config.py:/app/bot29/live_config.py:ro
+      - ./bot29/live_s29_bot.py:/app/bot29/live_s29_bot.py:ro
+      - ./bot27/live_s27_bot.py:/app/bot29/_base_live_bot.py:ro
+      - ./bot29/protocol_v2_strategy.py:/app/bot29/protocol_v2_strategy.py:ro
+      - ./bot29/live_data_fetcher.py:/app/bot29/live_data_fetcher.py:ro
+      - ./bot27/live_data_fetcher.py:/app/bot29/_base_live_data_fetcher.py:ro
+      - ./bot29/live_executor.py:/app/bot29/live_executor.py:ro
+      - ./bot27/live_executor.py:/app/bot29/_base_live_executor.py:ro
+      - ./bot29/live_safety.py:/app/bot29/live_safety.py:ro
+      - ./bot27/live_safety.py:/app/bot29/_base_live_safety.py:ro
+      - ./bot29/ea_bridge.py:/app/bot29/ea_bridge.py:ro
+      - ./bot27/ea_bridge.py:/app/bot29/_base_ea_bridge.py:ro
+      - ./bot29/_base_loader.py:/app/bot29/_base_loader.py:ro
+      - ./bot29/s29_params.json:/app/bot29/s29_params.json:ro
+      - ./bot29/BotBridge_s29.mq5:/app/bot29/BotBridge_s29.mq5:ro
+      - ./bot27/BotBridge_s27.mq5:/app/bot29/_base_bridge.mqh:ro
+      - ./test_local_connectivity.py:/app/test_local_connectivity.py:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:122
+      - VNC_PORT=5923
+      - NOVNC_PORT=6103
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot29
+      - BOT_RUNNER_FILE=live_s29_bot.py
+      - BOT_SUFFIX=s29
+      - EXPECTED_MAGIC=200029
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s29
+      - EA_BRIDGE_SOURCE_FILE=/app/bot29/BotBridge_s29.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s29.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s29.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s29.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s29.lock
+      - EA_BRIDGE_COMMAND_TIMEOUT_SECONDS=5
+      - EA_BRIDGE_COMMAND_RETRIES=1
+      - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
+      - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+
   # ---- Bot 23 (S23 XAUUSD shadow-first) ----
   exness-bot-23:
     image: exness-bot:latest
@@ -424,6 +622,7 @@ services:
       - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro
       - ./bot23/live_executor.py:/app/bot23/live_executor.py:ro
       - ./bot23/live_safety.py:/app/bot23/live_safety.py:ro
+      - ./bot23/live_manual_alerts.py:/app/bot23/live_manual_alerts.py:ro
       - ./bot23/ea_bridge.py:/app/bot23/ea_bridge.py:ro
       - ./bot23/s23_params.json:/app/bot23/s23_params.json:ro
       - ./bot23/BotBridge_s23.mq5:/app/bot23/BotBridge_s23.mq5:ro
@@ -446,6 +645,8 @@ services:
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 
   # ---- Bot 24 (S24 XAUUSD shadow-first) ----
   exness-bot-24:
