@@ -467,6 +467,7 @@ services:
       - ./bot27/live_config.py:/app/bot27/live_config.py:ro
       - ./bot27/live_s27_bot.py:/app/bot27/live_s27_bot.py:ro
       - ./bot27/protocol_v2_strategy.py:/app/bot27/protocol_v2_strategy.py:ro
+      - ./bot27/c4566_exit_policy.py:/app/bot27/c4566_exit_policy.py:ro
       - ./bot27/live_data_fetcher.py:/app/bot27/live_data_fetcher.py:ro
       - ./bot27/live_executor.py:/app/bot27/live_executor.py:ro
       - ./bot27/live_safety.py:/app/bot27/live_safety.py:ro

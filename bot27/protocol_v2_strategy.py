@@ -25,6 +25,7 @@ def cycle859_latest(target_bars: pd.DataFrame, strategy: dict[str, Any]) -> dict
     short_std = abs_return.rolling(30, min_periods=15).std()
     long_std = abs_return.rolling(120, min_periods=60).std()
     ret25 = np.log(close / close.shift(25))
+    vol30_bps = log_return.mul(10000.0).rolling(30, min_periods=30).std()
     ratio = short_std / long_std
     bar_time = bars.index[-1]
     ret_value = float(ret25.iloc[-1])
@@ -38,6 +39,7 @@ def cycle859_latest(target_bars: pd.DataFrame, strategy: dict[str, Any]) -> dict
         "eligible": bool(eligible),
         "ret25": ret_value,
         "absret_std_ratio30_120": ratio_value,
+        "vol30_bps": float(vol30_bps.iloc[-1]),
         "threshold": threshold,
         "reason": "eligible" if eligible else ("condition_false" if finite else "feature_not_ready"),
     }

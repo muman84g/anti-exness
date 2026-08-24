@@ -28,6 +28,7 @@ class SymbolInfo:
     volume_step: float
     digits: int
     stops_level: int
+    tick_time_msc: int | None = None
 
 
 @dataclass
@@ -119,6 +120,7 @@ class MT5Executor:
                 ask=float(parts[1]), bid=float(parts[2]), point=float(parts[4]),
                 volume_min=float(parts[5]), volume_max=float(parts[6]), volume_step=float(parts[7]),
                 digits=int(float(parts[11])), stops_level=int(float(parts[12])),
+                tick_time_msc=int(parts[13]) if len(parts) >= 14 else None,
             )
         except (TypeError, ValueError):
             return None

@@ -1,0 +1,19 @@
+{
+  "status": "PASS",
+  "intentionally_removed_behavior": [
+    {
+      "behavior": "fixed-hold-only exit for newly opened bot27 positions",
+      "reason": "replaced by frozen C4566 regime dwell exit with hard hold90 fallback",
+      "preservation": "positions lacking C4566 policy state retain legacy fixed hold90"
+    }
+  ],
+  "intentionally_removed_state": [],
+  "intentionally_removed_files": [],
+  "preserved_behavior": [
+    "PV2C859 entry signal and threshold",
+    "runtime strategy ID for existing state compatibility",
+    "symbol/magic/comment ownership boundaries",
+    "single-position admission and close confirmation",
+    "bot number, service, bridge, IPC, state, and log names"
+  ]
+}

@@ -1,0 +1,445 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "manifest_id": "bot27_c4566_live_porting_20260824",
+  "manifest_version": 1,
+  "active": false,
+  "previous_manifest": null,
+  "work_definition": {
+    "objective_id": "BOT27_C4566_PORT",
+    "user_request": "Proceed with the saved bot27 good candidate implementation.",
+    "normal_success_path": [
+      "frozen C4566 source",
+      "bot27 implementation",
+      "no-order parity validation",
+      "user handoff without deploy"
+    ],
+    "normal_success_contract": {
+      "supported_entry": "frozen C4566_v01 candidate",
+      "normal_input": "bot27 PV2C859 live folder",
+      "preconditions": [
+        "source identity fixed",
+        "no deploy authority inferred"
+      ],
+      "main_processing": [
+        "port exit policy",
+        "preserve ownership safety",
+        "run no-order parity"
+      ],
+      "required_effect": "bot27 files implement C4566 exactly for new entries",
+      "minimum_result": "implementation and validation complete; runtime unchanged"
+    },
+    "minimum_required_outcome": "C4566 implementation passes exact tick parity without deploy or restart",
+    "design_constraints": [
+      "keep runtime strategy ID",
+      "preserve legacy open-position hold90",
+      "do not edit live_config.py or startup.ini"
+    ],
+    "permitted_stop_conditions": [
+      "user_decision_required",
+      "technical_blocker",
+      "completion_no_go"
+    ],
+    "prohibited_substitutes": [
+      "stub",
+      "empty_or_status_only_success",
+      "old_artifact_as_new"
+    ],
+    "acceptance": [
+      {
+        "id": "BOT27_C4566_ACCEPTANCE",
+        "criterion": "All A1-A7 in the frozen baseline are satisfied.",
+        "required_evidence": [
+          "source parity",
+          "591-trade exit parity",
+          "self-test",
+          "no external action"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+            "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      }
+    ],
+    "authorized_scope": [
+      "bot/bot27 strategy implementation",
+      "bot27 compose mount",
+      "canonical mapping docs"
+    ],
+    "excluded_scope": [
+      "deploy",
+      "restart",
+      "live switch",
+      "commit",
+      "push",
+      "credentials"
+    ],
+    "no_change_boundaries": [
+      "live_config.py",
+      "startup.ini",
+      "account credentials",
+      "other bot strategies"
+    ],
+    "authority": "User authorized proceeding with implementation; external actions remain unauthorized.",
+    "required_confirmations": [
+      {
+        "id": "DEPLOY_RESTART_AUTHORITY",
+        "status": "pending",
+        "authority": "user",
+        "evidence": []
+      }
+    ],
+    "comparison_baseline_id": "BOT27_C4564_BASELINE",
+    "evidence_manifest_id": "BOT27_C4566_PORTING_EVIDENCE_R2",
+    "evidence_manifest_completeness": "complete",
+    "audit_scope_ids": [
+      "SCOPE_REQUIREMENTS",
+      "SCOPE_RELEASE"
+    ],
+    "audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_RELEASE"
+    ],
+    "history": [
+      {
+        "version": 1,
+        "changed_at": "2026-08-24T12:00:00+09:00",
+        "reason": "implementation and final audit freeze"
+      }
+    ]
+  },
+  "risk": {
+    "class": "high",
+    "rationale": "Live-enabled bot code changes, although no deploy or restart is performed.",
+    "dimensions": [
+      "external_state",
+      "write_recoverability",
+      "financial_execution"
+    ],
+    "lowering_evidence": [
+      {
+        "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+        "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+      }
+    ]
+  },
+  "execution_budget": {
+    "execution_mode": "direct_serial",
+    "rationale": "Direct serial porting with exact replay validation.",
+    "max_delegated_jobs": 0,
+    "planned_audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_RELEASE"
+    ],
+    "same_root_cause_local_batch_limit": 2,
+    "evidence_budget": "source identity, implementation hashes, self-test, exact replay",
+    "approximate_cost": "bounded local validation",
+    "delegation_plan": [],
+    "replan_triggers": [
+      "two_nonprogress_correction_batches",
+      "material_scope_or_identity_change"
+    ]
+  },
+  "time_estimate": {
+    "range": "completed within current turn",
+    "confidence": "high",
+    "critical_path": [
+      "gap-accounting correction",
+      "591-trade parity"
+    ],
+    "high_cost_steps": [],
+    "external_waits": [],
+    "next_checkpoint": "user decision on deployment",
+    "user_deadline": null,
+    "history": [
+      {
+        "version": 1,
+        "estimated_at": "2026-08-24T12:00:00+09:00",
+        "range": "completed within current turn",
+        "confidence": "high",
+        "critical_path": [
+          "gap-accounting correction",
+          "591-trade parity"
+        ],
+        "reason": "final",
+        "next_checkpoint": "user decision on deployment"
+      }
+    ]
+  },
+  "plan": {
+    "task_class": "defect_repair",
+    "implementation_completeness_gate": "passed",
+    "packages": [
+      {
+        "id": "WP_BOT27_C4566",
+        "task_class": "defect_repair",
+        "objective_ids": [
+          "BOT27_C4566_PORT"
+        ],
+        "acceptance_ids": [
+          "BOT27_C4566_ACCEPTANCE"
+        ],
+        "purpose": "Correct tick-gap accounting and port C4566 to bot27.",
+        "owner": "parent",
+        "inputs": [
+          "backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001/良案_C4566_v01_gap補正/MANIFEST.json"
+        ],
+        "outputs": [
+          "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json"
+        ],
+        "risk": "high",
+        "dependencies": [],
+        "completion_evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+            "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+          }
+        ],
+        "state": "completed",
+        "blocker": null,
+        "next_check": "explicit deployment authorization"
+      }
+    ]
+  },
+  "baseline": {
+    "id": "BOT27_C4564_BASELINE",
+    "captured_at": "2026-08-24T11:00:00+09:00",
+    "fingerprint": "48bd2369cf6d5ad6a9d9060d1ca9e67211599dcd81df53e3728f612da06ce8bc",
+    "layers": {
+      "source": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "artifacts": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "configuration": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "dependencies": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "toolchain": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "runtime": {
+        "status": "unproven",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "No runtime or external action requested."
+      },
+      "persistence": {
+        "status": "captured",
+        "required_for_release": false,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "gui_or_external": {
+        "status": "not_applicable",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "No runtime or external action requested."
+      },
+      "behavior": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      },
+      "tests": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+            "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+          }
+        ],
+        "reason": "Frozen before implementation."
+      }
+    },
+    "supplements": []
+  },
+  "implementation": {
+    "snapshot_id": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+    "frozen_at": "2026-08-24T12:00:00+09:00",
+    "candidate_manifest": {
+      "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+    },
+    "known_omissions": [
+      "terminal-side EA attachment and real-order test"
+    ],
+    "unproven_layers": [
+      "runtime deployment"
+    ]
+  },
+  "audits": {
+    "early": {
+      "status": "passed",
+      "target_id": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+      "angle_ids": [
+        "AUDIT_STRUCTURAL"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+          "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+        }
+      ],
+      "limitations": [
+        "no deploy or restart"
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "allowed",
+      "scope_redetermination": null
+    },
+    "final": {
+      "status": "passed",
+      "target_id": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+      "angle_ids": [
+        "AUDIT_RELEASE"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+          "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+        }
+      ],
+      "limitations": [
+        "no deploy or restart"
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "not_applicable",
+      "scope_redetermination": null
+    },
+    "low_risk_omission": null
+  },
+  "tests": {
+    "target_snapshot_id": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+    "identity_gate": "unproven",
+    "partitions": [],
+    "evidence_bridges": []
+  },
+  "findings": [],
+  "correction_ledger": {
+    "batches": [],
+    "convergence_state": "converged"
+  },
+  "external_action": {
+    "applicable": false,
+    "target": null,
+    "authority": null,
+    "approval_evidence": [],
+    "action": null,
+    "expected_effects": [],
+    "side_effects": [],
+    "idempotency": null,
+    "pre_action_audit": "not_applicable",
+    "pre_action_evidence": [],
+    "fresh_state": null,
+    "guard_or_cas": null,
+    "planned_execution": null,
+    "maximum_attempts": 0,
+    "attempts": 0,
+    "original_action_result": "not_run",
+    "post_action_verification": null,
+    "recovery": null
+  },
+  "release": {
+    "candidate_id": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+    "candidate_manifest": {
+      "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+    },
+    "decision": "operation_no_go",
+    "decision_target": "deploy/restart/live runtime",
+    "reasons": [
+      "external action not explicitly authorized"
+    ],
+    "residual_risks": [
+      "forward-only lineage",
+      "runtime not exercised"
+    ]
+  },
+  "final_report": {
+    "status": "operation_no_go",
+    "objective_result": "C4566 implementation and no-order validation complete; runtime unchanged.",
+    "acceptance_disposition": {
+      "BOT27_C4566_ACCEPTANCE": "passed"
+    },
+    "identity_summary": "sha256:3bcbc6d85cfb5e9ca9bf26d0029eebfb8c13c552d275a0398a2dcfc2cdb2aadd",
+    "budget_time_variance": "within bounded local validation",
+    "implementation_summary": "C4566 quote-timestamp gap-aware exit ported to bot27.",
+    "validation_summary": "self-test, entry parity, and all-591-trade exit parity passed",
+    "correction_convergence": "converged after tick-gap and duplicate-timestamp corrections",
+    "external_action_summary": "not run",
+    "final_audit_summary": "implementation pass; operation no-go",
+    "residual_risk_disposition": "requires explicit deploy/restart decision",
+    "evidence_summary": [
+      "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json"
+    ],
+    "limitations": [
+      "no terminal-side deployment or real order"
+    ],
+    "removed_behavior": [
+      "fixed-hold-only behavior for new positions"
+    ],
+    "preservation_evidence": [
+      {
+        "path": "bot/bot27/BOT27_C4566_PORTING_EVIDENCE_R2.json",
+        "sha256": "2959511b49327a84a22cecaaea39f08b0841e9e4c12fcade68cc32088fb9dae0"
+      }
+    ]
+  }
+}

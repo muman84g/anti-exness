@@ -1,0 +1,71 @@
+{
+  "schema_version": "bot27_c4566_porting_evidence_v2",
+  "status": "IMPLEMENTATION_PASS_OPERATION_NOT_RUN",
+  "bot": "bot27",
+  "service": "exness-bot-27",
+  "candidate": "PV2C859_C4566_V01_FORWARD_R1",
+  "source": "backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001/良案_C4566_v01_gap補正",
+  "previous_immutable_manifest": {
+    "path": "bot/bot27/BOT27_PV2C859_PORTING_EVIDENCE.json",
+    "sha256": "aba636610a08caf5f8a56f428321c679f76d2327fc7fd5ea7c1b2adc91cc68e8"
+  },
+  "baseline_manifest": {
+    "path": "bot/bot27/BOT27_C4564_PORTING_BASELINE.json",
+    "sha256": "ac83160fef778bd93a2af906ae908862c952440f47af2dbc961524b132618469"
+  },
+  "source_manifest": {
+    "path": "backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001/良案_C4566_v01_gap補正/MANIFEST.json",
+    "sha256": "04140a5840b4be7475efdff57baea6c0b53a2cad1caf7de352d62e0f70d33c9e"
+  },
+  "implementation": {
+    "s27_params.json": "b0e5d76f4065acaba2e3da77b6c39dc631a95c648d074e5dd89d812e47e4f6c7",
+    "protocol_v2_strategy.py": "7846532d6500fa608c0acf44f80db45eac99f18f7b3b3d2bf627e1e2f8fe34fb",
+    "c4566_exit_policy.py": "b99d3320813f6752d88572bae6e086e15b41711408362304bd400703e91a091e",
+    "live_s27_bot.py": "cb46ad2a76106fe35167aeb0d81d5deee6d43c4d576771864529da7b629c3b32",
+    "live_executor.py": "bd6e119f5d2ea5c65c2ae83d41b758fec92b01d980d4dd3d8a97056122e4082b",
+    "BotBridge_s27.mq5": "4a5d299cd259470ba7ea5040429fe74bab14eaf30ab2045abd1bc87925859238",
+    "porting_parity_test.py": "fdf92032e90df317d859181a5de61347e4c2b4fd1d9a2c8ff2b5cdfe7c557760",
+    "c4566_exit_parity_test.py": "2cbfa677eb045a5c5408e691143477f3878f804870e265842bfd723e4645e98e",
+    "README.md": "966277d8eeff6fcee8c062c47dabe24d76469860114fb95b22557b89fb9c551c",
+    "SOURCE_BACKTEST.md": "6d0d6b5a8e3a7a06bb301217b9b1cf55a76bcbec7b69dbb5c4d9c84bf8f56d94",
+    "PORTING_AUDIT.md": "9da2afd984fecdd6a3b7d37c16f7888f3db1fde12046eaa6789d7f203fd69efe",
+    "docker-compose.yml": "d9761530715e9f854d017d4b7cd6e3c6ee04e616b8df54f9d01a579ba26e1435",
+    "BOT_BACKTEST_MAP_ja.md": "f84962652a15dc606ac655f7b4369c26987ed12ed734c9513c9b197b2de64f63"
+  },
+  "acceptance": {
+    "A1": {
+      "status": "PASS",
+      "evidence": "porting_parity_test.py keeps PV2C859 entry threshold and feature parity"
+    },
+    "A2": {
+      "status": "PASS",
+      "evidence": "c4566_exit_parity_test.py exact match on all 591 corrected DEV trades"
+    },
+    "A3": {
+      "status": "PASS",
+      "evidence": "runner self-test preserves legacy fixed hold90 for positions without policy state"
+    },
+    "A4": {
+      "status": "PASS",
+      "evidence": "runner self-test closes from a same-M1 quote update without requesting a new bar"
+    },
+    "A5": {
+      "status": "PASS",
+      "evidence": "existing symbol/magic/comment ownership and close-confirmation self-tests pass"
+    },
+    "A6": {
+      "status": "PASS",
+      "evidence": "live_config.py and startup.ini were outside the edited and hashed implementation set"
+    },
+    "A7": {
+      "status": "PASS",
+      "evidence": "no deploy, restart, live switch, commit, or push was performed"
+    }
+  },
+  "limitations": [
+    "forward-only lineage; no clean reusable evaluation",
+    "5-second polling observes MT5 quote timestamps and cannot submit before the next poll",
+    "MQL source was structurally checked through compose and Python protocol tests but no terminal-side EA attachment or real order test was run",
+    "agent layout validation is blocked by a pre-existing backtest/base/foundation/__pycache__ directory"
+  ]
+}

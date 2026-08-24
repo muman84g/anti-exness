@@ -1,0 +1,32 @@
+﻿{
+    "schema_version":  "bot27_c4564_porting_baseline_v1",
+    "created_at":  "2026-08-24",
+    "target":  "bot27",
+    "service":  "exness-bot-27",
+    "runtime_strategy_id":  "PV2C859_DEVQ825_H90_FORWARD_R1",
+    "source_candidate":  "C4564_v09",
+    "source_folder":  "backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001/良案_C4564_v09",
+    "baseline_hashes":  {
+                            "s27_params.json":  "865a01ac5ccf78100ab214fdb6b49e40faeb24bd4d8bb652ce5c0c6828327b03",
+                            "protocol_v2_strategy.py":  "58827b948f4dff9065e2ff62718fe980dc5e844c9a2538f02ff8936f88f383ec",
+                            "live_s27_bot.py":  "4a037024659dc5cfacd6be96cb2bc09dc23c586c831430acb488aaf907caeb2a",
+                            "porting_parity_test.py":  "cdbe9bf81f8fb616f0a023403ed0083387e55a289dc1ff83f1097f5db7beda81",
+                            "README.md":  "233cebd48a17589fcb993147ca0ff216cee4852ca4e071891fd0c8bd577f46d2",
+                            "SOURCE_BACKTEST.md":  "ba834e5b22f0545edaeaf79b9d61e407501528891c65be9d19f6eb3bdb0ce7ad",
+                            "PORTING_AUDIT.md":  "f1dd97802d130e05abd7a94644cf0427562d17e6ce49e13ef9589124752b6249",
+                            "docker-compose.yml":  "116ee327e001e325fde9b1295db16e37d6b468fa7ab761623761c5cead3261c9",
+                            "BOT_BACKTEST_MAP_ja.md":  "05b8d12d762298fa7cf1136b8118e08f346a6a6b9bfa24259f2fe756776c3b46",
+                            "source_candidate_config.json":  "bd735e8e560e6ef934c121a521ed045059b1a321d659f205d03736340dc8d443",
+                            "source_DEV_LEDGER.csv.gz":  "7bb07ad5228013fcd49893148d628ade39e5a8c81982d3e9e71d85a6a785ac7e",
+                            "source_MANIFEST.json":  "123152e362dc2ce056dd56e6f6c0e340db6e832389f0adf0c3c088418cb1f597"
+                        },
+    "acceptance":  {
+                       "A1":  "entry signal remains PV2C859 threshold 0.6693523825105777",
+                       "A2":  "new entries use exact C4564 v09 regime classification and exit clocks",
+                       "A3":  "legacy open positions without policy state retain fixed hold90",
+                       "A4":  "same-M1 quote updates can trigger exit without a new bar",
+                       "A5":  "symbol/magic/comment ownership and close confirmation remain unchanged",
+                       "A6":  "live_config.py and startup.ini remain untouched",
+                       "A7":  "no deploy restart live switch commit or push"
+                   }
+}

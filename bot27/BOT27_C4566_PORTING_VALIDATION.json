@@ -1,0 +1,20 @@
+{
+  "schema_version": "bot27_c4566_porting_validation_v2",
+  "bot": "bot27",
+  "candidate": "PV2C859_C4566_V01_FORWARD_R1",
+  "runtime_strategy_id": "PV2C859_DEVQ825_H90_FORWARD_R1",
+  "checks": {
+    "python_compile": "PASS",
+    "runner_self_test": "PASS_C4566_SAME_M1_AND_LEGACY_H90",
+    "entry_feature_parity": "PASS_3_SAMPLES_RET25_RATIO_VOL30_1E-12",
+    "exit_tick_parity": "PASS_ALL_591_DEV_TRADES_EXACT_TIME_AND_REASON",
+    "source_reproducibility": "PASS_LEDGER_AND_RESULT_SHA256_IDENTICAL",
+    "duplicate_quote_and_gap_guard": "PASS",
+    "ownership_and_close_confirmation": "PASS_SELF_TEST",
+    "compose_config": "PASS",
+    "idea_registry": "PASS",
+    "agent_layout": "BLOCKED_PREEXISTING_BACKTEST_BASE_FOUNDATION_PYCACHE",
+    "real_order_test": "NOT_RUN"
+  },
+  "release": "NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH_NO_COMMIT_NO_PUSH"
+}
