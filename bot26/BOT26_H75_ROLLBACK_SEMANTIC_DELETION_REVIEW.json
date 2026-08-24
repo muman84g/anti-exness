@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "removed_behavior": [
+    "C4535 continuation confirmation before entry",
+    "C4535 pending lane reservation"
+  ],
+  "preserved_behavior": [
+    "PV2C520 signal and threshold",
+    "context stale fail closed",
+    "actual-entry based 75 minute exit",
+    "symbol magic comment ownership",
+    "state log bridge and IPC identities"
+  ],
+  "regression_evidence": [
+    "live_s26_bot.py --self-test",
+    "porting_parity_test.py"
+  ]
+}

@@ -39,7 +39,7 @@ UTC = timezone.utc
 BOT_SUFFIX = "s26"
 EXPECTED_MAGIC = 200026
 STATE_SCHEMA_VERSION = 2
-PREVIOUS_STRATEGY_IDS = {"PV2C520_DEVQ80_H75_FORWARD_R1"}
+PREVIOUS_STRATEGY_IDS = {"PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2"}
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s26_params.json")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -185,7 +185,7 @@ class ProtocolV2FixedHoldRunner:
             loaded["migrated_from_strategy_id"] = loaded_strategy_id
             loaded["strategy_id"] = self.strategy["id"]
             loaded["schema_version"] = STATE_SCHEMA_VERSION
-            loaded.setdefault("pending_entry", None)
+            loaded["pending_entry"] = None
             position = loaded.get("position")
             opened_at = int((position or {}).get("open_time_epoch") or 0)
             if position is not None and opened_at > 0:
@@ -700,9 +700,17 @@ class ProtocolV2FixedHoldRunner:
                 self.state["pending_entry"] = None
                 self._save_state()
             return
+        if self.state.get("pending_entry") is not None:
+            pending = dict(self.state.get("pending_entry") or {})
+            signal = dict(pending.get("signal") or {})
+            self.state["pending_entry"] = None
+            self._trade_row(
+                "entry_skip",
+                reason="retired_continuation_pending_cancelled",
+                signal_bar_time=timestamp_text(signal.get("bar_time")),
+            )
+            self._save_state()
         if self.state.get("sync_block_new_entries"):
-            return
-        if self._process_pending_entry(info):
             return
         target_bars = self._get_closed_m1(str(self.params["mt5_symbol"]))
         if target_bars is None or len(target_bars) < int(self.strategy["minimum_bars"]):
@@ -762,7 +770,7 @@ class ProtocolV2FixedHoldRunner:
             self._trade_row("entry_skip", reason="same_direction_reentry_after_close_skip", signal_bar_time=signal_bar_text)
             self._save_state()
             return
-        self._start_pending_entry(info, signal)
+        self._open_entry(info, signal)
 
     def log_status(self) -> None:
         now = time.time()
@@ -853,32 +861,25 @@ def self_test() -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     runner._trade_row = lambda event, **kwargs: events.append((event, kwargs))
     signal_bar = pd.Timestamp("2026-08-21 10:00:00", tz="UTC")
-    reference_time = pd.Timestamp("2026-08-21 10:01:05", tz="UTC")
-    fill_time = pd.Timestamp("2026-08-21 10:01:20", tz="UTC")
-    runner._now = lambda: reference_time
+    entry_time = pd.Timestamp("2026-08-21 10:01:05", tz="UTC")
+    runner._now = lambda: entry_time
     reference_info = runner.executor.get_symbol_info("USTEC")
-    assert runner._start_pending_entry(reference_info, {"bar_time": signal_bar, "side": "LONG", "eligible": True})
-    pending = runner.state["pending_entry"]
-    assert pending is not None
-    assert pending["expires_utc"] == timestamp_text(signal_bar + pd.Timedelta(minutes=2))
-    assert runner._process_pending_entry(reference_info)
-    assert runner.state["position"] is None
-    runner._get_closed_m1 = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reserved pending lane evaluated a new signal"))
-    runner.run_once()
-    trigger_info = SimpleNamespace(bid=float(pending["trigger_ask"]) - 1.0, ask=float(pending["trigger_ask"]))
-    runner._now = lambda: fill_time
-    assert runner._process_pending_entry(trigger_info)
+    assert runner._open_entry(reference_info, {"bar_time": signal_bar, "side": "LONG", "eligible": True})
     position = runner.state["position"]
     assert position is not None
     shadow_position = dict(position)
-    expected_exit_due = fill_time + pd.Timedelta(minutes=int(runner.strategy["hold_min"]))
-    assert position["entry_due_utc"] == timestamp_text(fill_time)
+    expected_exit_due = entry_time + pd.Timedelta(minutes=int(runner.strategy["hold_min"]))
+    assert runner.state["pending_entry"] is None
+    assert position["entry_due_utc"] == timestamp_text(entry_time)
     assert position["exit_due_utc"] == timestamp_text(expected_exit_due)
     migrated = runner._default_state()
-    migrated["strategy_id"] = "PV2C520_DEVQ80_H75_FORWARD_R1"
-    migrated["position"] = dict(position, open_time_epoch=int(fill_time.timestamp()))
+    migrated["strategy_id"] = "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2"
+    migrated["pending_entry"] = {"signal": {"bar_time": timestamp_text(signal_bar)}}
+    migrated["position"] = dict(position, open_time_epoch=int(entry_time.timestamp()))
     migrated = runner._merge_loaded_state(migrated)
-    assert migrated["migrated_from_strategy_id"] == "PV2C520_DEVQ80_H75_FORWARD_R1"
+    assert migrated["migrated_from_strategy_id"] == "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2"
+    assert migrated["strategy_id"] == runner.strategy["id"]
+    assert migrated["pending_entry"] is None
     assert migrated["position"]["exit_due_utc"] == timestamp_text(expected_exit_due)
     live_runner = ProtocolV2FixedHoldRunner(test_params)
     live_runner.state = live_runner._default_state()
@@ -886,7 +887,7 @@ def self_test() -> None:
     live_runner.executor = FakeExecutor()
     live_runner._save_state = lambda: None
     live_runner._trade_row = lambda *_args, **_kwargs: None
-    assert live_runner._open_entry(trigger_info, {"bar_time": signal_bar, "side": "LONG", "eligible": True})
+    assert live_runner._open_entry(reference_info, {"bar_time": signal_bar, "side": "LONG", "eligible": True})
     broker_fill_time = pd.Timestamp(live_runner.executor.next_open_time, unit="s", tz="UTC")
     assert live_runner.state["position"]["entry_due_utc"] == timestamp_text(broker_fill_time)
     assert live_runner.state["position"]["exit_due_utc"] == timestamp_text(
@@ -896,14 +897,6 @@ def self_test() -> None:
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))
     assert runner.state["position"] is None
     assert any(event == "position_close" for event, _kwargs in events)
-    runner.state = runner._default_state()
-    runner._now = lambda: reference_time
-    assert runner._start_pending_entry(reference_info, {"bar_time": signal_bar, "side": "LONG", "eligible": True})
-    runner._now = lambda: signal_bar + pd.Timedelta(minutes=2, seconds=1)
-    assert runner._process_pending_entry(trigger_info)
-    assert runner.state["pending_entry"] is None
-    assert runner.state["position"] is None
-    assert any(event == "entry_skip" and kwargs.get("reason") == "entry_confirmation_expired" for event, kwargs in events)
     waiting_events = len(events)
     runner.state["position"] = {"close_requested": True}
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))

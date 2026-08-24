@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "removed_behavior": [
+    "C4566 continuous profit dwell exit",
+    "C4566 cumulative profit dwell exit"
+  ],
+  "preserved_behavior": [
+    "PV2C859 signal and threshold",
+    "actual-entry based 90 minute exit",
+    "symbol magic comment ownership",
+    "state log bridge and IPC identities"
+  ],
+  "regression_evidence": [
+    "live_s27_bot.py --self-test including legacy exit_policy_state suppression",
+    "porting_parity_test.py"
+  ],
+  "historical_files_retained": true
+}

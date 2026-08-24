@@ -1,17 +1,12 @@
 {
-  "schema_version": "live_bot_porting_validation_v1",
-  "bot": "bot26",
-  "candidate": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY",
-  "validated_at": "2026-08-24",
+  "status": "PASS",
+  "candidate": "PV2C520_DEVQ80_H75_FORWARD_R1",
   "checks": {
-    "python_compile": "PASS",
-    "runner_self_test": "PASS_PENDING_LANE_EXPIRY_BROKER_FILL_75M_STATE_MIGRATION",
-    "source_feature_parity": "PASS_4_SAMPLES_INCLUDING_2_STALE_REJECTIONS",
-    "dev_tick": "PASS_289_TRADES_BASE_982.121_STRESS_893.029_PF_1.374_MDD_218.340",
-    "forward_only_boundary": "PASS_NO_HOLDOUT_OR_LEAKCHECK_SELECTION",
-    "live_mode_preserved": "PASS_TRUE_LIVE_FALSE_SHADOW",
-    "real_order_test": "NOT_RUN",
-    "bridge_read_only_probe": "NOT_RUN"
+    "immediate_entry_enabled": true,
+    "continuation_pending_disabled": true,
+    "actual_entry_hold_min": 75,
+    "self_test": "PASS",
+    "porting_parity": "PASS"
   },
-  "release": "PUSH_ONLY_NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH"
+  "external_actions": "NOT_RUN"
 }

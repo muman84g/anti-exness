@@ -28,15 +28,9 @@ def main() -> int:
     target = target.set_index("bar_start")
     context = context.set_index("bar_start")
     strategy = json.loads((Path(__file__).parent / "s26_params.json").read_text(encoding="utf-8"))["strategy"]
-    assert strategy["candidate"] == "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY"
+    assert strategy["candidate"] == "PV2C520_DEVQ80_H75_FORWARD_R1"
     assert strategy["hold_min"] == 75
-    assert strategy["entry_confirmation"] == {
-        "type": "continuation_confirmation",
-        "reference": "first_valid_ask_at_signal_decision",
-        "continuation_bps": 1.0,
-        "window_seconds": 60,
-        "pending_lane": "single_pending_or_position",
-    }
+    assert "entry_confirmation" not in strategy
     kept = pd.read_csv(source / "STALE_FC_DIAGNOSTIC_R1_LEDGER.csv.gz")
     rejected = pd.read_csv(source / "STALE_FC_DIAGNOSTIC_R1_REJECTED_SIGNALS.csv")
     samples = pd.concat([kept.iloc[[0, -1]], rejected], ignore_index=True)

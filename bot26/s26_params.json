@@ -4,7 +4,7 @@
   "shadow_forward_enabled": false,
   "bot_number": 26,
   "bot_suffix": "s26",
-  "strategy_id": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2",
+  "strategy_id": "PV2C520_DEVQ80_H75_FORWARD_R1",
   "magic": 200026,
   "expected_magic": 200026,
   "expected_bridge_name": "BotBridge_s26",
@@ -32,9 +32,9 @@
     "audit_log": true
   },
   "strategy": {
-    "id": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2",
+    "id": "PV2C520_DEVQ80_H75_FORWARD_R1",
     "strategy_type": "PV2C520",
-    "candidate": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY",
+    "candidate": "PV2C520_DEVQ80_H75_FORWARD_R1",
     "enabled": true,
     "comment_prefix": "s26_pv2c520",
     "side": "LONG",
@@ -43,13 +43,6 @@
     "tail": "high",
     "threshold": 0.8284896671815759,
     "hold_min": 75,
-    "entry_confirmation": {
-      "type": "continuation_confirmation",
-      "reference": "first_valid_ask_at_signal_decision",
-      "continuation_bps": 1.0,
-      "window_seconds": 60,
-      "pending_lane": "single_pending_or_position"
-    },
     "lot": 0.01,
     "minimum_bars": 2200,
     "context_symbol": "USOIL",

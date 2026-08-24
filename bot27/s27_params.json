@@ -34,7 +34,7 @@
   "strategy": {
     "id": "PV2C859_DEVQ825_H90_FORWARD_R1",
     "strategy_type": "PV2C859",
-    "candidate": "PV2C859_C4566_V01_FORWARD_R1",
+    "candidate": "PV2C859_DEVQ825_H90_FORWARD_R1",
     "enabled": true,
     "comment_prefix": "s27_pv2c859",
     "side": "LONG",
@@ -46,23 +46,6 @@
     "hold_clock": "actual_entry_time",
     "hold_min": 90,
     "lot": 0.01,
-    "minimum_bars": 130,
-    "exit_policy": {
-      "id": "C4566_V01_VOL30_Q2_GAP15_CUMULATIVE_CONTINUOUS_R1",
-      "floor_bps": 4.0,
-      "inner_vol_lower_bps_exclusive": 1.6831322559641573,
-      "inner_vol_upper_bps_inclusive": 2.4177661654559843,
-      "inner_branch": {
-        "mode": "continuous",
-        "grace_min": 10,
-        "required_min": 20
-      },
-      "outer_branch": {
-        "mode": "cumulative",
-        "grace_min": 5,
-        "required_min": 10
-      },
-      "max_observation_gap_seconds": 15
-    }
+    "minimum_bars": 130
   }
 }

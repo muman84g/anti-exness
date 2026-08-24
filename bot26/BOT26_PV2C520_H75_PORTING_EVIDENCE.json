@@ -1,45 +1,29 @@
 {
   "status": "PASS",
+  "validated_at_jst": "2026-08-24",
   "bot": "bot26",
-  "bot_suffix": "s26",
-  "magic": 200026,
-  "candidate": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY",
-  "live_strategy_id": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2",
-  "selection_basis": "DEV_TICK_ONLY_FORWARD_ONLY",
+  "candidate": "PV2C520_DEVQ80_H75_FORWARD_R1",
+  "change": "rollback_from_C4535_to_immediate_entry_h75",
   "implementation": {
-    "s26_params.json": "63b889d5d5fe0ec0ebcad545cab1405c2a2b866532c18c46f89eb33a817086a0",
-    "protocol_v2_strategy.py": "11bb819126b22df77da51010b9dc82ece92839c961ebaf6896f37083674edcce",
-    "live_s26_bot.py": "87a34b6d0ec85473ee7044ad3ba99fa42a7800ebd2b8924553de7a61f79318c7",
-    "porting_parity_test.py": "be2632d0a01fdc6607d5023e5fed524ff880c7feb9646c6d397ee7c94a1d6d97"
+    "s26_params.json": "c952f9b011be332a8865f092f4d7a5ec0b806c2f98c4778cd898da7df4779f10",
+    "live_s26_bot.py": "54dfbde71b60cefd7603885e53483811ae5ef289a718d75f95021ceb6fff506e",
+    "porting_parity_test.py": "8644c2810efb6fd0d36a1b20b4e7cda5c2def15b8273b184d5e36408db91f18e",
+    "SOURCE_BACKTEST.md": "568359c00efdc753c039a33df11b6f2964421d30c7e35e240419bb28ebfbb7b1"
   },
   "validation": {
+    "json_parse": "PASS",
     "python_compile": "PASS",
-    "runner_self_test": "PASS_PENDING_LANE_EXPIRY_BROKER_FILL_HOLD_STATE_MIGRATION",
+    "runner_self_test": "PASS",
     "source_parity_samples": 4,
     "source_parity_tolerance": 1e-9,
-    "dev_tick": "PASS_289_TRADES_BASE_982.121_STRESS_893.029_PF_1.374_MDD_218.340",
-    "holdout_or_leakcheck_selection": "NOT_USED_FORWARD_ONLY"
-  },
-  "semantic_deletion_review": {
-    "removed": [
-      "immediate market entry on first post-decision poll",
-      "75-minute exit clock anchored to signal decision time"
-    ],
-    "replacement": [
-      "single reserved pending lane with Ask plus 1 bps continuation inside 60 seconds",
-      "75-minute exit clock anchored to broker-confirmed actual fill time"
-    ],
-    "preserved": [
-      "bot suffix, magic, bridge and IPC names",
-      "symbol, context, signal threshold and stale guard",
-      "comment ownership, state and log paths",
-      "live_trading_enabled=true and shadow_forward_enabled=false"
-    ]
+    "legacy_C4535_state_migration": "PASS_PENDING_CANCELLED_POSITION_H75_EXIT_PRESERVED"
   },
   "release": {
+    "git_push": false,
     "deploy": false,
     "restart": false,
     "ea_attachment": false,
-    "live_switch": false
+    "live_switch": false,
+    "real_order": false
   }
 }

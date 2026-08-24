@@ -33,7 +33,6 @@ from live_safety import (
     stale_signal_decision,
 )
 from protocol_v2_strategy import latest_signal
-from c4566_exit_policy import build_policy_state, evaluate_policy
 
 
 UTC = timezone.utc
@@ -500,6 +499,8 @@ class ProtocolV2FixedHoldRunner:
         exit_policy_config = self.strategy.get("exit_policy")
         exit_policy_state = None
         if exit_policy_config:
+            from c4566_exit_policy import build_policy_state
+
             entry_vol30_bps = float(signal["vol30_bps"])
             exit_policy_state = build_policy_state(entry_event_time.to_pydatetime(), entry_vol30_bps, exit_policy_config)
         self.state["position"] = {
@@ -561,15 +562,18 @@ class ProtocolV2FixedHoldRunner:
         if tick_time_msc > 0:
             observation_now = pd.Timestamp(tick_time_msc, unit="ms", tz="UTC")
         policy_reason = None
-        policy_state = position.get("exit_policy_state")
+        exit_policy_config = self.strategy.get("exit_policy")
+        policy_state = position.get("exit_policy_state") if exit_policy_config else None
         close_price = float(info.bid)
         profit_bps = (close_price / float(position["entry_price"]) - 1.0) * 10000.0
         if policy_state is not None and observation_now is not None:
+            from c4566_exit_policy import evaluate_policy
+
             decision = evaluate_policy(
                 policy_state,
                 now=observation_now.to_pydatetime(),
                 current_profit_bps=profit_bps,
-                max_observation_gap_seconds=float(self.strategy["exit_policy"]["max_observation_gap_seconds"]),
+                max_observation_gap_seconds=float(exit_policy_config["max_observation_gap_seconds"]),
             )
             position["exit_policy_state"] = decision.policy_state
             policy_reason = decision.reason
@@ -767,30 +771,18 @@ def self_test() -> None:
     )
     position = runner.state["position"]
     assert position is not None
-    c4564_position = json.loads(json.dumps(position))
+    shadow_position = json.loads(json.dumps(position))
     assert position["entry_time_utc"] == "2026-08-21T10:01:05+00:00"
     close_base = signal_bar + pd.Timedelta(minutes=1) if runner.strategy.get("hold_clock") == "decision_time" else pd.Timestamp(position["entry_time_utc"])
     expected_exit_due = close_base + pd.Timedelta(minutes=int(runner.strategy["hold_min"]))
     assert position["exit_due_utc"] == timestamp_text(expected_exit_due)
-    policy_state = position["exit_policy_state"]
-    policy_state["accumulated_seconds"] = 1198.0
-    policy_state["accumulated_milliseconds"] = 1198000
-    policy_state["last_observation_above_floor"] = True
-    policy_state["last_observation_time_utc"] = "2026-08-21T10:30:58+00:00"
-    policy_state["grace_until_utc"] = "2026-08-21T10:11:05+00:00"
-    policy_state["grace_started"] = True
+    assert position["exit_policy_state"] is None
+    position["exit_policy_state"] = {"mode": "continuous", "accumulated_milliseconds": 1200000}
     runner._now = lambda: pd.Timestamp("2026-08-21 10:31:01", tz="UTC")
-    profitable_info = SimpleNamespace(
-        bid=float(position["entry_price"]) * 1.0005,
-        ask=float(position["entry_price"]) * 1.0006,
-        tick_time_msc=1787308261000,
+    assert not runner._handle_time_exit(
+        SimpleNamespace(bid=float(position["entry_price"]) * 1.0005, ask=float(position["entry_price"]) * 1.0006)
     )
-    assert runner._handle_time_exit(profitable_info), "same-M1 quote update must trigger C4564 exit"
-    assert runner.state["position"] is None
-    assert any(kwargs.get("reason") == "c4566_continuous_positive_time" for event, kwargs in events if event == "position_close")
-    shadow_position = c4564_position
-    shadow_position.pop("exit_policy_state", None)
-    runner.state["position"] = shadow_position
+    assert runner.state["position"] is position
     runner._now = lambda: expected_exit_due + pd.Timedelta(seconds=1)
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))
     assert runner.state["position"] is None
@@ -800,12 +792,14 @@ def self_test() -> None:
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))
     assert len(events) == waiting_events
     runner.state["position"] = None
+    runner._now = lambda: pd.Timestamp("2026-08-21 10:01:05", tz="UTC")
     runner._open_entry(
         SimpleNamespace(bid=100.0, ask=101.0, tick_time_msc=None),
-        {"bar_time": signal_bar, "side": "LONG", "eligible": True, "vol30_bps": 2.0},
+        {"bar_time": signal_bar, "side": "LONG", "eligible": True},
     )
-    assert runner.state["position"] is None
-    assert runner.state["sync_block_reason"] == "tick_time_unavailable_for_c4566_entry"
+    assert runner.state["position"] is not None
+    assert runner.state["position"]["exit_policy_state"] is None
+    runner.state["position"] = None
     foreign = SimpleNamespace(symbol=params["mt5_symbol"], magic=EXPECTED_MAGIC + 1, comment=params["strategy"]["comment_prefix"], ticket=1)
     assert not runner._owned_position(foreign)
     wrong_comment = SimpleNamespace(symbol=params["mt5_symbol"], magic=EXPECTED_MAGIC, comment="foreign", ticket=2)
