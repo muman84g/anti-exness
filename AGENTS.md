@@ -9,6 +9,7 @@
 ## Required Sources
 
 - Use `C:\botter\bot\BOT_BACKTEST_MAP_ja.md` as the central bot/backtest mapping entry.
+- Use `C:\botter\bot\LIVE_BOT_CLOSE_BASELINE_ja.md` as the canonical close/session/spread/DST contract for new and updated live bots.
 - Verify the target from the bot README, `SOURCE_BACKTEST.md`, compose service/mounts, and the user's latest instruction. Do not infer it from a backtest folder name.
 - Use `C:\botter\.agents\skills\live-bot-porting\SKILL.md` when porting or replacing strategy behavior.
 - Use `C:\botter\bot\githubへのpush.txt` only when the user explicitly requests commit or push work.
@@ -25,7 +26,14 @@
 - Preserve bot number, strategy ID, magic, symbol, service, volume mount, bridge, state, log, and IPC names unless the user asks to change them.
 - Assume multiple bots may run on the same trading account. Never use account-wide position/order presence as a bot-owned exposure signal; scope live exposure by bot-owned symbol/magic and, before ticket-only actions, verify ticket ownership by symbol, magic, and comment evidence.
 - Update `BOT_BACKTEST_MAP_ja.md`, README, params, runner notes, and `SOURCE_BACKTEST.md` together when their mapping changes.
+- For a first-time bot that will be tested through Docker Compose, add or update the target compose service before reporting any `docker compose run ... exness-bot-NN` command.
 - Document every unavoidable backtest/live mismatch in `SOURCE_BACKTEST.md`.
+- For live/backtest synchronization, prefer a fixed bot parent folder named
+  `backtestNN_botXX` with a child `live_bot_backtest/`. Keep the current
+  live-aligned source under `live_bot_backtest/` and move non-current, derived,
+  legacy, or misplaced material under the parent `legacy/<old_folder_slug>/`.
+  Point the bot folder to `backtestNN_botXX/live_bot_backtest`, not to scattered
+  output folders.
 - For local virtual-grid bots that execute market orders, treat virtual levels as trigger/state identity. Recalculate actual market entry and SL/TP from the current tick at every send/retry unless the strategy source explicitly requires fixed absolute prices.
 - For breakout-style local virtual grids, do not assume a stop loss that leaves the symbol flat always ends the source cycle. If the source strategy treats flat-after-SL as cycle failure, clear remaining virtual orders, apply cooldown, and reanchor from current market state. If the source strategy keeps the cycle alive, preserve the cycle and use explicit trigger re-arm/recross state so same-level `SL -> immediate re-entry` cannot occur. If a flat stale breakout trigger is crossed only after excessive drift, either reanchor or suppress that fill according to the source strategy; do not chase the stale level with a late market order.
 
@@ -35,7 +43,7 @@
 - Run no-order checks first: syntax, import, self-test, policy/artifact test, or safe dry run.
 - For live-bot behavior changes, validate preserved behavior explicitly. Review removed code, state fields, wait states, retries, alerts, and mounts before commit/push; explain every intentional deletion.
 - Design live-bot recovery for autonomous operation. Stopping or requiring manual action is a last resort for ambiguous or unsafe states, not the default fix for predictable price drift, stale orders, retryable broker errors, or recoverable state mismatch.
-- Keep temporary entry-block recovery reason-aware. Clear `sync_block_new_entries` only after the matching clean-sync recovery condition is proven; do not leave recoverable blocks stale, and do not clear unresolved reconciliation or ambiguous exposure.
+- Keep temporary entry-block recovery reason-aware. Clear `sync_block_new_entries` after either proven flat sync or a complete owned position/order/state reconciliation, including while exposure is active; do not leave recoverable query blocks stale, and do not clear unresolved reconciliation or ambiguous exposure. If only the pending-order inventory query fails, keep entry/add blocked but continue exits for an exactly reconciled owned basket.
 - Preserve fail-closed behavior for order, sync, state, pending-open, and reconciliation failures.
 - For `CLOSE`, `MODIFY`, `CANCEL`, and missing-state-ticket server-SL assumptions, fail closed if the ticket cannot be proven to belong to the target bot. Add regression checks for same-symbol/different-magic foreign tickets when changing sync or state recovery.
 - Do not manually repair state while the target bot is running. Verify ticket, symbol, direction, lot, SL, and TP before an authorized repair.

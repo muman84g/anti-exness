@@ -5,6 +5,8 @@
 - Source folder: `backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001/`
 - Candidate: `PV2C859_DEVQ825_H90_FORWARD_R1`
 - Mapping: USTEC LONG、`ret25_sign_long`、`absret_std_ratio30_120:low`、threshold `0.6693523825105777`
+- Live symbol contract: 注文対象は`USTEC`のみ。`XAUUSD`は非対象。Exness表示のUSTEC最小lot `0.05`に合わせ、live設定lotも`0.05`
+- Close execution: `LIVE_BOT_CLOSE_BASELINE_ja.md`準拠。USTEC 260-point guard、wide後3 stable polls、30分timeout、market-closed 60秒retry。固定UTC/DST session tableと週末precloseは不採用
 - Entry: signal decision後30秒以内の最初の実Askでmarket entry
 - Exit: broker確認済みactual entry時刻から90分後の最初のBid。C4566のvolatility dwell早期exitは使用しない
 

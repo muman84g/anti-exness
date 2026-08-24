@@ -30,14 +30,20 @@ from live_safety import (
     LiveSafetyOptions,
     clean_sync_block_if_flat,
     clear_recoverable_sync_block_after_clean_sync,
+    lot_contract_error,
     stale_signal_decision,
 )
+try:
+    from live_config import MIN_LOT_OVERRIDES
+except ImportError:
+    MIN_LOT_OVERRIDES: dict[str, float] = {}
 from protocol_v2_strategy import latest_signal
 
 
 UTC = timezone.utc
 BOT_SUFFIX = os.environ.get("BOT_SUFFIX", "s27")
 EXPECTED_MAGIC = int(os.environ.get("EXPECTED_MAGIC", "200027"))
+TIME_CLOSE_RETRYABLE_RETCODES = {"10018"}
 PARAMS_FILE = os.path.join(SCRIPT_DIR, f"{BOT_SUFFIX}_params.json")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -90,6 +96,13 @@ def utc_timestamp(value: Any) -> pd.Timestamp | None:
 def timestamp_text(value: Any) -> str:
     timestamp = utc_timestamp(value)
     return timestamp.isoformat() if timestamp is not None else ""
+
+
+def close_failure_retcode(status: str) -> str | None:
+    for part in str(status).split("|"):
+        if part.isdigit():
+            return part
+    return None
 
 
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
@@ -545,6 +558,84 @@ class ProtocolV2FixedHoldRunner:
         )
         self._save_state()
 
+    def _time_close_spread_action(self, position: dict[str, Any], info: Any, exit_due: pd.Timestamp) -> str:
+        if not bool(self.params.get("time_close_spread_guard_enabled", True)):
+            return "close"
+        tick_time_msc = int(getattr(info, "tick_time_msc", 0) or 0)
+        quote_time = pd.Timestamp(tick_time_msc, unit="ms", tz="UTC") if tick_time_msc > 0 else None
+        last_quote_time = utc_timestamp(position.get("time_close_last_quote_utc"))
+        if quote_time is None or quote_time < exit_due or (last_quote_time is not None and quote_time <= last_quote_time):
+            if not bool(position.get("time_close_quote_wait_logged", False)):
+                position["time_close_quote_wait_logged"] = True
+                self._trade_row(
+                    "DEFER",
+                    ticket=position.get("ticket"),
+                    side=position.get("side"),
+                    reason="time_close_wait_fresh_quote",
+                    note=f"exit_due={timestamp_text(exit_due)} quote_time={timestamp_text(quote_time) if quote_time is not None else 'missing'}",
+                )
+            return "defer"
+        position["time_close_last_quote_utc"] = timestamp_text(quote_time)
+        position["time_close_quote_wait_logged"] = False
+        bid = float(getattr(info, "bid", 0.0) or 0.0)
+        ask = float(getattr(info, "ask", 0.0) or 0.0)
+        point_size = float(self.params.get("point_size", 0.0) or 0.0)
+        spread_cap = float(self.strategy.get("max_time_close_spread_points", 0.0) or 0.0)
+        if bid <= 0 or ask < bid or point_size <= 0 or spread_cap <= 0:
+            self._set_sync_block(
+                "time_close_quote_contract_invalid",
+                {"bid": bid, "ask": ask, "point_size": point_size, "spread_cap": spread_cap},
+                recoverable=True,
+            )
+            return "defer"
+        spread_points = (ask - bid) / point_size
+        defer_started = utc_timestamp(position.get("time_close_spread_defer_started_at"))
+        max_defer_minutes = max(0.0, float(self.params.get("time_close_max_defer_minutes", 30)))
+        stable_required = max(1, int(self.params.get("time_close_spread_stable_polls", 3)))
+        if spread_points > spread_cap:
+            if defer_started is None:
+                defer_started = quote_time
+                position["time_close_spread_defer_started_at"] = timestamp_text(quote_time)
+                position["time_close_spread_stable_count"] = 0
+                position["time_close_spread_timeout_logged"] = False
+                self._trade_row(
+                    "DEFER",
+                    ticket=position.get("ticket"),
+                    side=position.get("side"),
+                    reason="time_close_spread_high",
+                    note=f"spread_points={spread_points:.2f} cap={spread_cap:.2f} max_defer_minutes={max_defer_minutes:.0f}",
+                )
+            else:
+                position["time_close_spread_stable_count"] = 0
+        elif defer_started is None:
+            return "close"
+        position["time_close_spread_last_points"] = spread_points
+        if defer_started is not None and quote_time >= defer_started + pd.Timedelta(minutes=max_defer_minutes):
+            if not bool(position.get("time_close_spread_timeout_logged", False)):
+                position["time_close_spread_timeout_logged"] = True
+                self._trade_row(
+                    "DEFER_TIMEOUT",
+                    ticket=position.get("ticket"),
+                    side=position.get("side"),
+                    reason="time_close_spread_timeout",
+                    note=f"spread_points={spread_points:.2f} cap={spread_cap:.2f} max_defer_minutes={max_defer_minutes:.0f}",
+                )
+            return "close_timeout"
+        if spread_points > spread_cap:
+            return "defer"
+        stable_count = int(position.get("time_close_spread_stable_count", 0)) + 1
+        position["time_close_spread_stable_count"] = stable_count
+        if stable_count < stable_required:
+            return "defer"
+        self._trade_row(
+            "RESUME",
+            ticket=position.get("ticket"),
+            side=position.get("side"),
+            reason="time_close_spread_settled",
+            note=f"spread_points={spread_points:.2f} cap={spread_cap:.2f} stable_polls={stable_count}",
+        )
+        return "close_settled"
+
     def _handle_time_exit(self, info: Any) -> bool:
         position = self.state.get("position")
         if position is None:
@@ -581,6 +672,12 @@ class ProtocolV2FixedHoldRunner:
         exit_clock_now = observation_now if policy_state is not None and observation_now is not None else wall_now
         if policy_reason is None and exit_clock_now < exit_due:
             return False
+        retry_after = utc_timestamp(position.get("time_close_retry_after_utc"))
+        if retry_after is not None and wall_now < retry_after:
+            return True
+        if self._time_close_spread_action(position, info, exit_due) == "defer":
+            self._save_state()
+            return True
         ticket = int(position.get("ticket") or 0)
         hold_reason = policy_reason or f"fixed_hold_{int(self.strategy['hold_min'])}m"
         if self.live_enabled:
@@ -600,6 +697,19 @@ class ProtocolV2FixedHoldRunner:
             close_result = self.executor.close_position(ticket, int(self.params.get("deviation_points", 50)))
             if not close_result:
                 status = str(getattr(close_result, "status", "FAILED"))
+                if close_failure_retcode(status) in TIME_CLOSE_RETRYABLE_RETCODES:
+                    retry_seconds = max(1.0, float(self.params.get("time_close_market_closed_retry_seconds", 60)))
+                    position["time_close_retry_after_utc"] = timestamp_text(wall_now + pd.Timedelta(seconds=retry_seconds))
+                    position["time_close_last_retry_status"] = status
+                    self._trade_row(
+                        "DEFER",
+                        ticket=ticket,
+                        side="LONG",
+                        reason="time_close_market_closed_retry",
+                        note=f"status={status} retry_seconds={retry_seconds:.0f}",
+                    )
+                    self._save_state()
+                    return True
                 reason = "live_time_close_unconfirmed" if status in {"MISSING_UNCONFIRMED", "MALFORMED_OK"} else "live_time_close_failed"
                 self._set_sync_block(reason, {"ticket": ticket, "status": status})
                 self._save_state()
@@ -643,6 +753,22 @@ class ProtocolV2FixedHoldRunner:
         if self._handle_time_exit(info):
             return
         if self.state.get("position") is not None or self.state.get("sync_block_new_entries"):
+            return
+        mt5_symbol = str(self.params["mt5_symbol"])
+        lot_error = lot_contract_error(
+            float(self.strategy["lot"]),
+            float(info.volume_min),
+            float(info.volume_max),
+            float(info.volume_step),
+            float(MIN_LOT_OVERRIDES.get(mt5_symbol, 0.0)),
+        )
+        if lot_error:
+            self._set_sync_block(
+                "invalid_lot_contract",
+                {"symbol": mt5_symbol, "error": lot_error},
+                recoverable=False,
+            )
+            self._save_state()
             return
         target_bars = self._get_closed_m1(str(self.params["mt5_symbol"]))
         if target_bars is None or len(target_bars) < int(self.strategy["minimum_bars"]):
@@ -727,9 +853,17 @@ class FakeExecutor:
         self.orders_available = True
         self.close_deal_results: list[Any] = []
         self.close_deal_calls: list[tuple[int, int]] = []
+        self.tick_time_msc = 1787306465000
 
     def get_symbol_info(self, _symbol: str) -> Any:
-        return SimpleNamespace(bid=28646.45, ask=28648.97, tick_time_msc=1787306465000)
+        return SimpleNamespace(
+            bid=28646.45,
+            ask=28648.97,
+            tick_time_msc=self.tick_time_msc,
+            volume_min=0.05,
+            volume_max=500.0,
+            volume_step=0.01,
+        )
 
     def get_positions(self, _symbol: str, _magic: int) -> list[Any]:
         return list(self.positions)
@@ -784,6 +918,7 @@ def self_test() -> None:
     )
     assert runner.state["position"] is position
     runner._now = lambda: expected_exit_due + pd.Timedelta(seconds=1)
+    runner.executor.tick_time_msc = int((expected_exit_due + pd.Timedelta(seconds=1)).timestamp() * 1000)
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))
     assert runner.state["position"] is None
     assert any(event == "position_close" for event, _kwargs in events)
@@ -792,6 +927,43 @@ def self_test() -> None:
     assert runner._handle_time_exit(runner.executor.get_symbol_info("USTEC"))
     assert len(events) == waiting_events
     runner.state["position"] = None
+    guard_due = pd.Timestamp("2026-03-08 22:00:00", tz="UTC")
+    guard_position = {"ticket": -1, "side": "LONG"}
+    stale_info = SimpleNamespace(bid=100.0, ask=102.52, tick_time_msc=int((guard_due - pd.Timedelta(seconds=1)).timestamp() * 1000))
+    assert runner._time_close_spread_action(guard_position, stale_info, guard_due) == "defer"
+    wide_info = SimpleNamespace(bid=100.0, ask=103.02, tick_time_msc=int((guard_due + pd.Timedelta(seconds=1)).timestamp() * 1000))
+    assert runner._time_close_spread_action(guard_position, wide_info, guard_due) == "defer"
+    assert runner._time_close_spread_action(guard_position, wide_info, guard_due) == "defer"
+    for seconds in (6, 11):
+        settled_info = SimpleNamespace(bid=100.0, ask=102.52, tick_time_msc=int((guard_due + pd.Timedelta(seconds=seconds)).timestamp() * 1000))
+        assert runner._time_close_spread_action(guard_position, settled_info, guard_due) == "defer"
+    settled_info = SimpleNamespace(bid=100.0, ask=102.52, tick_time_msc=int((guard_due + pd.Timedelta(seconds=16)).timestamp() * 1000))
+    assert runner._time_close_spread_action(guard_position, settled_info, guard_due) == "close_settled"
+    timeout_position = {"ticket": -2, "side": "LONG"}
+    assert runner._time_close_spread_action(timeout_position, wide_info, guard_due) == "defer"
+    timeout_info = SimpleNamespace(bid=100.0, ask=103.02, tick_time_msc=int((guard_due + pd.Timedelta(minutes=30, seconds=1)).timestamp() * 1000))
+    assert runner._time_close_spread_action(timeout_position, timeout_info, guard_due) == "close_timeout"
+    retry_params = json.loads(json.dumps(params))
+    retry_runner = ProtocolV2FixedHoldRunner(retry_params)
+    retry_runner.state = retry_runner._default_state()
+    retry_position = dict(shadow_position, close_requested=False, exit_due_utc=timestamp_text(expected_exit_due))
+    retry_runner.state["position"] = retry_position
+    retry_executor = FakeExecutor()
+    retry_live_position = SimpleNamespace(
+        symbol=params["mt5_symbol"], magic=EXPECTED_MAGIC, comment=params["strategy"]["comment_prefix"],
+        ticket=retry_position["ticket"], identifier=retry_position["position_identifier"], type=ORDER_TYPE_BUY,
+    )
+    retry_executor.get_position = lambda _ticket: retry_live_position
+    retry_executor.close_position = lambda _ticket, _deviation: type("RetryResult", (), {"status": "ERR|10018", "__bool__": lambda self: False})()
+    retry_executor.tick_time_msc = int((expected_exit_due + pd.Timedelta(seconds=1)).timestamp() * 1000)
+    retry_runner.executor = retry_executor
+    retry_runner._save_state = lambda: None
+    retry_runner._trade_row = lambda _event, **_kwargs: None
+    retry_runner._now = lambda: expected_exit_due + pd.Timedelta(seconds=1)
+    assert retry_runner._handle_time_exit(retry_executor.get_symbol_info("USTEC"))
+    assert retry_runner.state["position"] is retry_position
+    assert utc_timestamp(retry_position["time_close_retry_after_utc"]) == expected_exit_due + pd.Timedelta(seconds=61)
+    assert close_failure_retcode("ERR|10018") == "10018"
     runner._now = lambda: pd.Timestamp("2026-08-21 10:01:05", tz="UTC")
     runner._open_entry(
         SimpleNamespace(bid=100.0, ask=101.0, tick_time_msc=None),

@@ -1,0 +1,48 @@
+{
+  "schema_version": "live_bot_close_guard_evidence_v1",
+  "implemented_at": "2026-08-25",
+  "bots": [26, 27, 28, 29],
+  "symbol": "USTEC",
+  "canonical_contract": "LIVE_BOT_CLOSE_BASELINE_ja.md",
+  "backtest_evidence": "backtest/bot関連backtest/runs/20260825_bot26_29_ustec_close_policy_v1",
+  "fixed_parameters": {
+    "point_size": 0.01,
+    "max_time_close_spread_points": 260,
+    "stable_fresh_polls_after_wide": 3,
+    "max_defer_minutes": 30,
+    "market_closed_retry_seconds": 60,
+    "weekly_preclose": false,
+    "fixed_utc_session_table": false
+  },
+  "implementation": {
+    "bot26": "independent live_s26_bot.py and live_executor.py",
+    "bot27": "base live_s27_bot.py and live_executor.py",
+    "bot28": "inherits bot27 base through docker-compose mounts",
+    "bot29": "inherits bot27 base through docker-compose mounts"
+  },
+  "preserved_behavior": [
+    "strategy signals and thresholds",
+    "entry timing and side",
+    "hold clock and hold duration",
+    "symbol, magic, comments, state/log names",
+    "ownership and reconciliation gates"
+  ],
+  "validation": {
+    "python_compile": "pass for bot26-29 runners and bot26/bot27 executors",
+    "self_test": "pass for bot26, bot27, bot28, bot29",
+    "porting_parity": "pass for bot26, bot27, bot28, bot29",
+    "compose_config": "pass; exness-bot-26 through exness-bot-29 present",
+    "raw_market_closed_status": "pass; ERR|10018 preserved by bot26/bot27 executors",
+    "agent_layout": "blocked only by pre-existing backtest/base/foundation/__pycache__"
+  },
+  "intentionally_removed_behavior": [
+    "time-close attempt against a stale quote after the due time",
+    "time-close attempt on the first fresh quote when its spread exceeds 260 points"
+  ],
+  "not_performed": [
+    "deploy",
+    "service restart",
+    "EA attachment",
+    "live order test"
+  ]
+}

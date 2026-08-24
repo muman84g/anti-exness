@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import re
 from typing import Any, Callable
 
@@ -17,6 +18,29 @@ import pandas as pd
 
 
 UTC = timezone.utc
+
+
+def lot_contract_error(
+    requested_lot: float,
+    broker_min: float,
+    broker_max: float,
+    broker_step: float,
+    configured_min: float = 0.0,
+) -> str | None:
+    lot = float(requested_lot)
+    minimum = max(float(broker_min), float(configured_min))
+    maximum = float(broker_max)
+    step = float(broker_step)
+    if lot + 1e-12 < minimum:
+        return f"lot_below_minimum requested={lot} minimum={minimum}"
+    if maximum > 0.0 and lot - 1e-12 > maximum:
+        return f"lot_above_maximum requested={lot} maximum={maximum}"
+    if step > 0.0:
+        steps = round((lot - float(broker_min)) / step)
+        aligned = float(broker_min) + steps * step
+        if not math.isclose(lot, aligned, rel_tol=0.0, abs_tol=1e-9):
+            return f"lot_step_mismatch requested={lot} broker_min={broker_min} step={step}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -293,6 +317,8 @@ def self_test() -> None:
     fresh = stale_signal_decision("2026-01-01 10:00:00+00:00", now_utc=pd.Timestamp("2026-01-01 11:05:00+00:00"), max_delay_minutes=10)
     stale = stale_signal_decision("2026-01-01 10:00:00+00:00", now_utc=pd.Timestamp("2026-01-01 11:11:00+00:00"), max_delay_minutes=10)
     assert not fresh.stale and stale.stale
+    assert lot_contract_error(0.01, 0.05, 500.0, 0.01, 0.05) is not None
+    assert lot_contract_error(0.05, 0.05, 500.0, 0.01, 0.05) is None
 
 
 if __name__ == "__main__":

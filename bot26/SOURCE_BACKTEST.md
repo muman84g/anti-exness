@@ -5,6 +5,8 @@
 - Source folder: `backtest/bot関連backtest/0_bot26実装PV2C520_OOS_001/`
 - Candidate: `PV2C520_DEVQ80_H75_FORWARD_R1`
 - Mapping: USTEC LONG、USOIL `lead5_corr_z:high`、threshold `0.8284896671815759`、context stale上限120秒
+- Live symbol contract: 注文対象は`USTEC`のみ。`USOIL`は参照専用、`XAUUSD`は非対象。Exness表示のUSTEC最小lot `0.05`に合わせ、live設定lotも`0.05`
+- Close execution: `LIVE_BOT_CLOSE_BASELINE_ja.md`準拠。USTEC 260-point guard、wide後3 stable polls、30分timeout、market-closed 60秒retry。固定UTC/DST session tableと週末precloseは不採用
 - Entry: signal decision後の最初の実Askで即時market entry。C4535の+1 bps継続確認pendingは使用しない
 - Exit: broker確認済みactual entry時刻から壁時75分後の最初のBid
 

@@ -235,4 +235,4 @@ class MT5Executor:
                 return CloseResult(False, "MALFORMED_OK")
         if res in {"ERR|POSITION_NOT_FOUND", "ERR|Position Not Found", "ERR|0", "ERR|10009"}:
             return CloseResult(False, "MISSING_UNCONFIRMED")
-        return CloseResult(False, "FAILED")
+        return CloseResult(False, str(res or "NO_RESPONSE"))

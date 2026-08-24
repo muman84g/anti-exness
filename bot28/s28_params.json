@@ -19,6 +19,10 @@
   "broker_timezone": "UTC",
   "poll_interval_seconds": 5,
   "status_log_interval_seconds": 60,
+  "time_close_spread_guard_enabled": true,
+  "time_close_max_defer_minutes": 30,
+  "time_close_spread_stable_polls": 3,
+  "time_close_market_closed_retry_seconds": 60,
   "max_signal_delay_seconds": 45,
   "deviation_points": 50,
   "safety": {
@@ -45,7 +49,8 @@
     "threshold": 0.1507958826882894,
     "hold_clock": "decision_time",
     "hold_min": 75,
-    "lot": 0.01,
+    "max_time_close_spread_points": 260,
+    "lot": 0.05,
     "minimum_bars": 65
   }
 }
