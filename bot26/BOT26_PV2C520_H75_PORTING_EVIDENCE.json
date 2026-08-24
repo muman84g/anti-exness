@@ -3,20 +3,38 @@
   "bot": "bot26",
   "bot_suffix": "s26",
   "magic": 200026,
-  "candidate": "PV2C520_DEVQ80_H75_FORWARD_R1",
-  "selection_basis": "DEV_FIXED_THEN_OBSERVED_DIAGNOSTIC_ONLY",
+  "candidate": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY",
+  "live_strategy_id": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_R2",
+  "selection_basis": "DEV_TICK_ONLY_FORWARD_ONLY",
   "implementation": {
-    "s26_params.json": "7272d2def339b2f0f284aed949e136b81d543a5510ef40306de2051f4a05a4a1",
+    "s26_params.json": "63b889d5d5fe0ec0ebcad545cab1405c2a2b866532c18c46f89eb33a817086a0",
     "protocol_v2_strategy.py": "11bb819126b22df77da51010b9dc82ece92839c961ebaf6896f37083674edcce",
-    "live_s26_bot.py": "a69d6719ef0078a5e371805fcafa3fed1bba825e1208bcd7b2dc3680277290e6",
-    "porting_parity_test.py": "241aa0d4d02ea45e629ccb2999117eb927c28e4c70f503609b0b85d00baa3993"
+    "live_s26_bot.py": "87a34b6d0ec85473ee7044ad3ba99fa42a7800ebd2b8924553de7a61f79318c7",
+    "porting_parity_test.py": "be2632d0a01fdc6607d5023e5fed524ff880c7feb9646c6d397ee7c94a1d6d97"
   },
   "validation": {
     "python_compile": "PASS",
-    "runner_self_test": "PASS",
+    "runner_self_test": "PASS_PENDING_LANE_EXPIRY_BROKER_FILL_HOLD_STATE_MIGRATION",
     "source_parity_samples": 4,
     "source_parity_tolerance": 1e-9,
-    "compose_config": "PASS"
+    "dev_tick": "PASS_289_TRADES_BASE_982.121_STRESS_893.029_PF_1.374_MDD_218.340",
+    "holdout_or_leakcheck_selection": "NOT_USED_FORWARD_ONLY"
+  },
+  "semantic_deletion_review": {
+    "removed": [
+      "immediate market entry on first post-decision poll",
+      "75-minute exit clock anchored to signal decision time"
+    ],
+    "replacement": [
+      "single reserved pending lane with Ask plus 1 bps continuation inside 60 seconds",
+      "75-minute exit clock anchored to broker-confirmed actual fill time"
+    ],
+    "preserved": [
+      "bot suffix, magic, bridge and IPC names",
+      "symbol, context, signal threshold and stale guard",
+      "comment ownership, state and log paths",
+      "live_trading_enabled=true and shadow_forward_enabled=false"
+    ]
   },
   "release": {
     "deploy": false,

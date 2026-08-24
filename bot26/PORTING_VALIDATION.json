@@ -1,18 +1,17 @@
 {
   "schema_version": "live_bot_porting_validation_v1",
   "bot": "bot26",
-  "candidate": "PV2C520_DEVQ80_H75_FORWARD_R1",
-  "validated_at": "2026-08-23",
+  "candidate": "PV2C520_C4535_CONT1_WINDOW60_H75_FORWARD_ONLY",
+  "validated_at": "2026-08-24",
   "checks": {
     "python_compile": "PASS",
-    "runner_self_test": "PASS_DYNAMIC_75M_DECISION_HOLD",
+    "runner_self_test": "PASS_PENDING_LANE_EXPIRY_BROKER_FILL_75M_STATE_MIGRATION",
     "source_feature_parity": "PASS_4_SAMPLES_INCLUDING_2_STALE_REJECTIONS",
-    "legacy_parent_bar_clock_lineage": "PASS_97_OF_97_EXACT",
-    "live_aligned_dev": "PASS_317_TRADES_BASE_712.953_STRESS_615.302_MDD_266.998",
-    "observed_leakcheck_fixed_diagnostic": "PASS_82_TRADES_NOT_SELECTION_ELIGIBLE",
-    "default_shadow_mode": "PASS",
+    "dev_tick": "PASS_289_TRADES_BASE_982.121_STRESS_893.029_PF_1.374_MDD_218.340",
+    "forward_only_boundary": "PASS_NO_HOLDOUT_OR_LEAKCHECK_SELECTION",
+    "live_mode_preserved": "PASS_TRUE_LIVE_FALSE_SHADOW",
     "real_order_test": "NOT_RUN",
     "bridge_read_only_probe": "NOT_RUN"
   },
-  "release": "NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH"
+  "release": "PUSH_ONLY_NO_DEPLOY_NO_RESTART_NO_LIVE_SWITCH"
 }
