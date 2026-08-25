@@ -103,6 +103,8 @@ class MT5Executor:
                 "margin_mode": int(parts[1]), "margin_mode_name": parts[2],
                 "account_trade_allowed": bool(int(parts[3])), "account_trade_expert": bool(int(parts[4])),
                 "terminal_trade_allowed": bool(int(parts[5])), "mql_trade_allowed": bool(int(parts[6])),
+                "login": int(parts[7]) if len(parts) >= 9 else None,
+                "server": parts[8] if len(parts) >= 9 else None,
             }
         except (TypeError, ValueError):
             return None

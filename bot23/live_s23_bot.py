@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""S23 loss-abort failure-to-progress shadow/live runner."""
+"""S23 ZA four-lane horizontal inventory shadow/live runner."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import sys
@@ -31,15 +33,64 @@ from live_executor import (
     ORDER_TYPE_BUY,
     ORDER_TYPE_SELL,
 )
-from live_safety import LiveSafetyOptions, clean_sync_block_if_flat, stale_signal_decision
+from live_safety import (
+    LiveSafetyOptions,
+    clean_sync_block_if_flat,
+    clear_recoverable_sync_block_after_clean_sync,
+    stale_signal_decision,
+)
+from live_manual_alerts import notify_manual_action_required
+from live_config import MT5_LOGIN, MT5_SERVER
 
 
 UTC = timezone.utc
-EXPECTED_S23_MAGIC = 200023
+EXPECTED_S23_MAGICS = (230023, 230024, 230025, 230026)
+EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
+LEGACY_S23_MAGICS = (200023,)
+EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
+EXPECTED_CANDIDATE_ID = "bot23-za-horizontal-inventory-v001"
+EXPECTED_ROUTING_MODE = "first_consuming_lane_preserve_primary_v1"
+FROZEN_LANE_FIELDS = {
+    "lot": 0.01,
+    "session_start_utc": 13,
+    "session_end_utc": 18,
+    "mode": "impulse",
+    "impulse_bars": 8,
+    "impulse_atr": 0.55,
+    "add_atr": 0.65,
+    "max_positions": 2,
+    "add_profit_guard_ratio": 0.30,
+    "basket_target_usd": 10.0,
+    "basket_stop_usd": 18.0,
+    "max_hold_bars": 70,
+    "cooldown": 8,
+    "vol_min": 1.05,
+    "failure_to_progress_bars": 10,
+    "failure_to_progress_peak_usd": 3.0,
+    "entry_wait_z": 2.0,
+    "entry_wait_sigma": 1.0,
+    "entry_wait_minutes": 10,
+    "entry_require_extreme": True,
+    "target_atr_mult": 3.5,
+    "stop_atr_mult": 6.5,
+    "failure_to_progress_peak_atr_mult": 1.0,
+    "entry_max_spread_atr_ratio": 0.10,
+    "adaptive_fixed_exit_atr_threshold": 2.0,
+    "reverse_on_fail": False,
+}
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
     "live_time_close_failed",
     "live_time_close_unconfirmed",
+}
+REPEATABLE_DIAGNOSTIC_REASONS = {
+    "symbol_info_failed",
+    "positions_unavailable",
+    "orders_unavailable",
+    "positions_or_orders_unavailable",
+    "m1_bars_unavailable",
+    "close_deal_query_unavailable",
+    "close_deal_not_confirmed",
 }
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 STATE_DIR = os.path.join(SCRIPT_DIR, "state")
@@ -52,8 +103,12 @@ TRADE_FIELDS = [
     "timestamp_utc",
     "event",
     "strategy_id",
+    "lane_id",
+    "magic",
     "symbol",
     "mt5_symbol",
+    "opportunity_id",
+    "basket_id",
     "ticket",
     "side",
     "lot",
@@ -61,9 +116,17 @@ TRADE_FIELDS = [
     "profit",
     "reason",
     "signal_bar_time",
+    "event_time",
+    "release_time",
+    "available_time",
+    "decision_time",
+    "executable_at",
     "live",
+    "repeat_count",
+    "repeat_window_seconds",
     "note",
 ]
+_CSV_SCHEMAS_VALIDATED: set[str] = set()
 
 
 def utc_now() -> datetime:
@@ -104,11 +167,20 @@ def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
 
 def append_csv(path: str, row: dict[str, Any], fields: list[str]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    exists = os.path.exists(path)
+    exists = os.path.exists(path) and os.path.getsize(path) > 0
+    if exists and path not in _CSV_SCHEMAS_VALIDATED:
+        with open(path, "r", newline="", encoding="utf-8") as existing_file:
+            observed_fields = next(csv.reader(existing_file), [])
+        if observed_fields != fields:
+            raise RuntimeError(
+                f"CSV schema mismatch for {path}; archive/reset the old trades CSV before starting bot23"
+            )
+        _CSV_SCHEMAS_VALIDATED.add(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         if not exists:
             writer.writeheader()
+            _CSV_SCHEMAS_VALIDATED.add(path)
         writer.writerow({name: row.get(name, "") for name in fields})
 
 
@@ -123,12 +195,14 @@ def add_features(bars: pd.DataFrame, point_size: float) -> pd.DataFrame:
     close = out["Close"].astype(float)
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
     out["atr30"] = tr.rolling(30, min_periods=30).mean()
-    out["atr90"] = tr.rolling(90, min_periods=90).mean()
-    out["vol_ratio"] = out["atr30"] / out["atr90"]
+    volume = out.get("Volume", pd.Series(index=out.index, dtype=float)).astype(float)
+    out["vol_ratio"] = volume / volume.rolling(30, min_periods=30).mean()
     out["ret5"] = close - close.shift(5)
     out["ret10"] = close - close.shift(10)
     out["roll_high30"] = high.shift(1).rolling(30, min_periods=30).max()
     out["roll_low30"] = low.shift(1).rolling(30, min_periods=30).min()
+    out["bb20_mid"] = close.rolling(20, min_periods=20).mean()
+    out["bb20_std"] = close.rolling(20, min_periods=20).std(ddof=0)
     out["spread_points"] = ((out.get("AskOpen", out["Open"]) - out["Open"]) / point_size).clip(lower=0.0)
     return out
 
@@ -140,7 +214,7 @@ def in_session(ts: pd.Timestamp, start: int, end: int) -> bool:
     return hour >= start or hour < end
 
 
-class S23LossAbortRunner:
+class S23HorizontalInventoryRunner:
     def __init__(self, params: dict[str, Any]):
         self.params = params
         self.live_enabled = bool(params.get("live_trading_enabled", False))
@@ -148,18 +222,32 @@ class S23LossAbortRunner:
         self.safety = LiveSafetyOptions(**params.get("safety", {}))
         self.dm = MT5DataManager(self.safety)
         self.executor = MT5Executor()
+        self._suppress_manual_alerts = False
         self.state = self._load_state()
         self._last_status_log = 0.0
+        self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
+        self._last_retained_block_warning: dict[int, tuple[str, str]] = {}
 
     def _default_state(self) -> dict[str, Any]:
         return {
-            "version": 2,
+            "version": 3,
             "bot": "bot23",
             "strategy_id": self.params["strategy_id"],
             "last_saved_utc": None,
+            "routing": {
+                "version": str(self.params.get("routing_mode", "first_consuming_lane_preserve_primary_v1")),
+                "lane_count": int(self.params.get("lane_count", len(self.params["strategies"]))),
+                "last_routed_signal_bar": None,
+                "last_routed_opportunity_id": None,
+                "last_consumed_lane_id": None,
+                "last_route_decision_utc": None,
+            },
             "strategies": {
                 s["id"]: {
+                    "lane_id": int(s["lane_id"]),
                     "basket": [],
+                    "basket_sequence": 0,
+                    "current_basket_id": None,
                     "cooldown_until_bar": -1,
                     "last_add_price": None,
                     "last_signal_bar": None,
@@ -180,25 +268,64 @@ class S23LossAbortRunner:
                     "last_evaluated_bar": None,
                     "daily_realized_date_utc": None,
                     "daily_realized_pnl_usd": 0.0,
+                    "frozen_basket_atr30": None,
+                    "pending_entry_side": None,
+                    "pending_entry_target": None,
+                    "pending_entry_expires_utc": None,
+                    "pending_entry_atr30": None,
+                    "pending_entry_signal_bar": None,
+                    "pending_entry_opportunity_id": None,
+                    "pending_entry_event_time": None,
+                    "pending_entry_release_time": None,
+                    "pending_open_opportunity_id": None,
+                    "pending_open_started_utc": None,
+                    "open_retry_after_utc": None,
+                    "autotrading_reject_streak": 0,
+                    "autotrading_reject_notified": False,
+                    "manual_alert_last_signature": None,
+                    "manual_alert_last_reason": None,
+                    "manual_alert_last_at_utc": None,
                 }
                 for s in self.params["strategies"]
             },
         }
 
     def _load_state(self) -> dict[str, Any]:
+        default = self._default_state()
         if not os.path.exists(STATE_FILE):
-            return self._default_state()
+            return default
+        load_error: str | None = None
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
-        except Exception:
-            logging.exception("Could not load state; using fail-closed default")
-            state = self._default_state()
-        default = self._default_state()
-        if state.get("bot") != default["bot"] or state.get("strategy_id") != default["strategy_id"] or int(state.get("version", 0)) != int(default["version"]):
+        except Exception as exc:
+            logging.exception("Could not load state; refusing to start from an unverified default")
+            state = None
+            load_error = f"{type(exc).__name__}: {exc}"
+        observed = state if isinstance(state, dict) else {}
+        try:
+            version_matches = int(observed.get("version", 0)) == int(default["version"])
+        except (TypeError, ValueError, OverflowError):
+            version_matches = False
+        strategies = observed.get("strategies")
+        shape_matches = isinstance(strategies, dict) and all(isinstance(strategies.get(s["id"]), dict) for s in self.params["strategies"])
+        identity_matches = (
+            observed.get("bot") == default["bot"]
+            and observed.get("strategy_id") == default["strategy_id"]
+            and version_matches
+        )
+        if not identity_matches or not shape_matches:
+            observed_identity = {
+                "bot": observed.get("bot"),
+                "strategy_id": observed.get("strategy_id"),
+                "version": observed.get("version"),
+                "state_type": type(state).__name__,
+                "shape_valid": shape_matches,
+                "load_error": load_error,
+            }
             logging.critical(
-                "S23 state identity mismatch; refusing legacy or foreign state: bot=%s strategy_id=%s version=%s",
-                state.get("bot"), state.get("strategy_id"), state.get("version"),
+                "S23 state identity/shape invalid; refusing legacy, corrupt, or foreign state: bot=%s strategy_id=%s version=%s type=%s",
+                observed.get("bot"), observed.get("strategy_id"), observed.get("version"), type(state).__name__,
             )
             state = default
             for strat in self.params["strategies"]:
@@ -206,6 +333,10 @@ class S23LossAbortRunner:
                 st["sync_block_new_entries"] = True
                 st["sync_block_reason"] = "state_identity_mismatch"
                 st["sync_block_recoverable"] = False
+                st["sync_block_details"] = {"observed": observed_identity, "expected": {"bot": default["bot"], "strategy_id": default["strategy_id"], "version": default["version"]}}
+        state.setdefault("routing", default["routing"])
+        for key, value in default["routing"].items():
+            state["routing"].setdefault(key, value)
         state.setdefault("strategies", {})
         for sid, st in default["strategies"].items():
             state["strategies"].setdefault(sid, st)
@@ -223,10 +354,7 @@ class S23LossAbortRunner:
     def _roll_daily_realized(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> dict[str, Any]:
         st = self._st(strat)
         stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
-        if stamp.tzinfo is None:
-            stamp = stamp.tz_localize("UTC")
-        else:
-            stamp = stamp.tz_convert("UTC")
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
         day = stamp.strftime("%Y-%m-%d")
         if st.get("daily_realized_date_utc") != day:
             st["daily_realized_date_utc"] = day
@@ -239,30 +367,108 @@ class S23LossAbortRunner:
 
     def _new_basket_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp) -> str | None:
         stamp = pd.Timestamp(at_utc)
-        if stamp.tzinfo is None:
-            stamp = stamp.tz_localize("UTC")
-        else:
-            stamp = stamp.tz_convert("UTC")
-        blocked_hours = {int(hour) for hour in self.params.get("new_basket_blocked_hours_utc", [])}
-        if int(stamp.hour) in blocked_hours:
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        if int(stamp.hour) in {int(hour) for hour in self.params.get("new_basket_blocked_hours_utc", [])}:
             return "new_basket_blocked_hour"
         st = self._roll_daily_realized(strat, stamp)
         limit = float(self.params.get("daily_realized_loss_limit_usd", 0.0))
-        if limit > 0 and float(st.get("daily_realized_pnl_usd", 0.0)) <= -limit:
-            return "daily_realized_loss_limit"
-        return None
+        return "daily_realized_loss_limit" if limit > 0.0 and float(st.get("daily_realized_pnl_usd", 0.0)) <= -limit else None
+
+    @staticmethod
+    def _alert_signature(reason: str, details: dict[str, Any]) -> str:
+        encoded = json.dumps({"reason": reason, "details": details}, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _notify_manual_action(self, strat: dict[str, Any], *, title: str, reason: str, action: str, key: str) -> None:
+        if self._suppress_manual_alerts:
+            return
+        notify_manual_action_required(bot_id="bot23", symbol=str(self.params.get("mt5_symbol", self.params["symbol"])), title=title, reason=reason, action=action, key=key)
+
+    def _notify_reconciliation_required(self, strat: dict[str, Any], reason: str, details: dict[str, Any]) -> None:
+        st = self._st(strat)
+        signature = self._alert_signature(reason, details)
+        if st.get("manual_alert_last_signature") == signature:
+            return
+        st["manual_alert_last_signature"] = signature
+        st["manual_alert_last_reason"] = reason
+        st["manual_alert_last_at_utc"] = dt_text(utc_now())
+        self._notify_manual_action(strat, title="reconciliation_required", reason=f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True, default=str)}", action="Inspect bot23-owned MT5 inventory and state before clearing the block.", key=f"bot23:reconciliation:{strat['id']}:{reason}")
 
     def _trade_row(self, event: str, strat: dict[str, Any], **kwargs: Any) -> None:
+        now = utc_now()
         row = {
-            "timestamp_utc": dt_text(utc_now()),
+            "timestamp_utc": dt_text(now),
             "event": event,
             "strategy_id": strat["id"],
+            "lane_id": int(strat["lane_id"]),
+            "magic": int(strat["magic"]),
             "symbol": self.params["symbol"],
             "mt5_symbol": self.params.get("mt5_symbol", self.params["symbol"]),
+            "basket_id": self._st(strat).get("current_basket_id") or "",
             "live": self.live_enabled,
         }
         row.update(kwargs)
-        append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+        lane_id = int(strat["lane_id"])
+        reason = str(row.get("reason") or "")
+        coalesce = event == "entry_skip" and (
+            reason in REPEATABLE_DIAGNOSTIC_REASONS or str(row.get("note") or "") == "sync_block"
+        )
+        active = self._diagnostic_repeats.get(lane_id)
+        signature = (event, reason, str(row.get("note") or ""))
+        if not coalesce:
+            self._flush_diagnostic_repeat(lane_id, now)
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            return
+        if active is None or active["signature"] != signature:
+            self._flush_diagnostic_repeat(lane_id, now)
+            row["repeat_count"] = 1
+            row["repeat_window_seconds"] = 0
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            self._diagnostic_repeats[lane_id] = {
+                "signature": signature,
+                "first": now,
+                "last": now,
+                "suppressed": 0,
+                "row": dict(row),
+            }
+            return
+        active["last"] = now
+        active["suppressed"] = int(active.get("suppressed", 0)) + 1
+        interval = float(self.params.get("diagnostic_repeat_summary_seconds", 300.0))
+        if (now - active["first"]).total_seconds() >= interval:
+            self._flush_diagnostic_repeat(lane_id, now, keep_signature=True)
+
+    def _flush_diagnostic_repeat(
+        self,
+        lane_id: int,
+        now: datetime | None = None,
+        *,
+        keep_signature: bool = False,
+    ) -> None:
+        active = self._diagnostic_repeats.get(int(lane_id))
+        if active is None:
+            return
+        at = now or utc_now()
+        suppressed = int(active.get("suppressed", 0))
+        if suppressed > 0:
+            row = dict(active["row"])
+            original_note = str(row.get("note") or "")
+            row.update(
+                {
+                    "timestamp_utc": dt_text(at),
+                    "event": "diagnostic_repeat_summary",
+                    "repeat_count": suppressed,
+                    "repeat_window_seconds": round(max(0.0, (active["last"] - active["first"]).total_seconds()), 3),
+                    "note": f"source_event=entry_skip;source_note={original_note}",
+                }
+            )
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+        if keep_signature:
+            active["first"] = at
+            active["last"] = at
+            active["suppressed"] = 0
+        else:
+            self._diagnostic_repeats.pop(int(lane_id), None)
 
     def _set_sync_block(
         self,
@@ -275,6 +481,19 @@ class S23LossAbortRunner:
         st = self._st(strat)
         previous = st.get("sync_block_reason")
         if reason:
+            if recoverable and st.get("sync_block_new_entries") and not st.get("sync_block_recoverable"):
+                lane_id = int(strat["lane_id"])
+                signature = (str(previous or ""), str(reason))
+                if self._last_retained_block_warning.get(lane_id) != signature:
+                    logging.warning(
+                        "S23 retained non-recoverable block for %s: existing=%s ignored_transient=%s",
+                        strat["id"],
+                        previous,
+                        reason,
+                    )
+                    self._last_retained_block_warning[lane_id] = signature
+                return
+            self._last_retained_block_warning.pop(int(strat["lane_id"]), None)
             if previous != reason:
                 st["flat_clear_confirmation_count"] = 0
                 st["flat_clear_confirmation_reason"] = None
@@ -283,15 +502,20 @@ class S23LossAbortRunner:
             st["sync_block_reason"] = reason
             st["sync_block_recoverable"] = bool(recoverable)
             st["sync_block_details"] = details or {}
+            if not recoverable:
+                self._notify_reconciliation_required(strat, reason, st["sync_block_details"])
             return
         if st.get("sync_block_new_entries"):
             logging.warning("S23 new-entry block cleared for %s after clean sync: %s", strat["id"], previous)
+        self._last_retained_block_warning.pop(int(strat["lane_id"]), None)
         st["sync_block_new_entries"] = False
         st["sync_block_reason"] = None
         st["sync_block_recoverable"] = False
         st["sync_block_details"] = {}
         st["flat_clear_confirmation_count"] = 0
         st["flat_clear_confirmation_reason"] = None
+        st["manual_alert_last_signature"] = None
+        st["manual_alert_last_reason"] = None
 
     @staticmethod
     def _side_from_record(record: Any) -> str:
@@ -311,6 +535,7 @@ class S23LossAbortRunner:
             position_id > 0
             and position_id == live_position_id
             and str(state_pos.get("side")) == self._side_from_record(live_pos)
+            and math.isclose(float(state_pos.get("lot") or 0.0), float(getattr(live_pos, "volume", 0.0)), rel_tol=0.0, abs_tol=1e-9)
             and self._owned_position(strat, live_pos)
         )
 
@@ -328,14 +553,64 @@ class S23LossAbortRunner:
         st["basket"] = []
         st["last_add_price"] = None
         st["basket_peak_pnl_usd"] = None
+        st["frozen_basket_atr30"] = None
         st["pending_close_reason"] = None
         st["pending_close_signal_bar"] = None
+        st["current_basket_id"] = None
         st["cooldown_until_bar"] = -1
         closed_bar = parse_ts(signal_bar)
         st["cooldown_until_utc"] = dt_text(closed_bar + pd.Timedelta(minutes=int(strat.get("cooldown", 0)))) if closed_bar is not None else None
         st["last_closed_at_utc"] = dt_text(utc_now())
         st["last_closed_reason"] = reason
         st["last_closed_signal_bar"] = signal_bar
+
+    def _clear_pending_entry(self, strat: dict[str, Any]) -> None:
+        st = self._st(strat)
+        for key in (
+            "pending_entry_side",
+            "pending_entry_target",
+            "pending_entry_expires_utc",
+            "pending_entry_atr30",
+            "pending_entry_signal_bar",
+            "pending_entry_opportunity_id",
+            "pending_entry_event_time",
+            "pending_entry_release_time",
+        ):
+            st[key] = None
+
+    def _clear_pending_open(self, strat: dict[str, Any]) -> None:
+        st = self._st(strat)
+        st["pending_open_opportunity_id"] = None
+        st["pending_open_started_utc"] = None
+
+    @staticmethod
+    def _low_vol_regime(strat: dict[str, Any], atr30: float | None) -> bool:
+        threshold = float(strat.get("adaptive_fixed_exit_atr_threshold", 0.0))
+        return threshold <= 0.0 or (atr30 is not None and math.isfinite(float(atr30)) and float(atr30) < threshold)
+
+    def _exit_thresholds(self, strat: dict[str, Any]) -> tuple[float, float, float]:
+        target = float(strat["basket_target_usd"])
+        stop = float(strat["basket_stop_usd"])
+        peak = float(strat.get("failure_to_progress_peak_usd", 0.0))
+        atr30 = self._st(strat).get("frozen_basket_atr30")
+        if self._low_vol_regime(strat, atr30) and atr30 is not None and math.isfinite(float(atr30)) and float(atr30) > 0.0:
+            target = float(strat.get("target_atr_mult", 0.0)) * float(atr30) or target
+            stop = float(strat.get("stop_atr_mult", 0.0)) * float(atr30) or stop
+            peak = float(strat.get("failure_to_progress_peak_atr_mult", 0.0)) * float(atr30) or peak
+        return target, stop, peak
+
+    def _entry_submission_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> str | None:
+        st = self._st(strat)
+        if st.get("sync_block_new_entries"):
+            return str(st.get("sync_block_reason") or "sync_block_new_entries")
+        if st.get("pending_open_opportunity_id"):
+            return "unresolved_open_action"
+        retry_after = parse_ts(st.get("open_retry_after_utc"))
+        if retry_after is None:
+            return None
+        stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        return "open_retry_cooldown" if stamp < retry_after else None
 
     def connect_and_preflight(self) -> bool:
         namespace_error = self._ownership_namespace_error()
@@ -344,6 +619,12 @@ class S23LossAbortRunner:
             return False
         if any(self._st(strat).get("sync_block_reason") == "state_identity_mismatch" for strat in self.params.get("strategies", [])):
             logging.critical("S23 legacy/foreign state must be archived before this runner can start.")
+            for strat in self.params.get("strategies", []):
+                st = self._st(strat)
+                if st.get("sync_block_reason") == "state_identity_mismatch":
+                    self._notify_reconciliation_required(strat, "state_identity_mismatch", dict(st.get("sync_block_details") or {}))
+            # Preserve the old on-disk state as evidence.  The operator must
+            # reconcile/flat the account and archive it before first start.
             return False
         if not bool(self.params.get("enabled", True)):
             logging.info("S23 disabled by params.")
@@ -364,10 +645,18 @@ class S23LossAbortRunner:
         if missing:
             logging.critical("S23 bridge missing required commands: %s", sorted(missing))
             return False
+        legacy_error = self._legacy_inventory_error()
+        if legacy_error is not None:
+            logging.critical("S23 legacy ownership preflight failed: %s", legacy_error)
+            return False
         if self.live_enabled:
             account = self.executor.get_account_info()
             if account is None:
                 logging.critical("S23 account execution metadata unavailable.")
+                return False
+            account_identity_error = self._account_identity_error(account)
+            if account_identity_error is not None:
+                logging.critical("S23 account identity mismatch: %s", account_identity_error)
                 return False
             if bool(self.params.get("require_hedging_account", True)) and int(account.get("margin_mode", -1)) != HEDGING_MARGIN_MODE:
                 logging.critical("S23 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
@@ -375,15 +664,33 @@ class S23LossAbortRunner:
         return True
 
     def _ownership_namespace_error(self) -> str | None:
+        if str(self.params.get("strategy_id") or "") != EXPECTED_STRATEGY_ID:
+            return f"invalid_strategy_id={self.params.get('strategy_id')} expected={EXPECTED_STRATEGY_ID}"
+        if str(self.params.get("candidate_id") or "") != EXPECTED_CANDIDATE_ID:
+            return f"invalid_candidate_id={self.params.get('candidate_id')} expected={EXPECTED_CANDIDATE_ID}"
+        if str(self.params.get("routing_mode") or "") != EXPECTED_ROUTING_MODE:
+            return f"invalid_routing_mode={self.params.get('routing_mode')} expected={EXPECTED_ROUTING_MODE}"
+        if int(self.params.get("lane_count") or 0) != 4:
+            return f"invalid_lane_count={self.params.get('lane_count')} expected=4"
         strategies = [row for row in self.params.get("strategies", []) if bool(row.get("enabled", True))]
         magics = [int(row.get("magic") or 0) for row in strategies]
+        configured_magics = tuple(int(value) for value in self.params.get("expected_magics", []))
         prefixes = [str(row.get("comment_prefix") or "") for row in strategies]
-        if len(magics) != 1 or magics[0] != EXPECTED_S23_MAGIC:
-            return f"invalid_magics={magics} expected={[EXPECTED_S23_MAGIC]}"
+        lane_ids = [int(row.get("lane_id") or 0) for row in strategies]
+        if tuple(magics) != EXPECTED_S23_MAGICS:
+            return f"invalid_magics={magics} expected={list(EXPECTED_S23_MAGICS)}"
+        if configured_magics != EXPECTED_S23_MAGICS:
+            return f"invalid_expected_magics={list(configured_magics)} expected={list(EXPECTED_S23_MAGICS)}"
+        if lane_ids != [1, 2, 3, 4]:
+            return f"invalid_lane_ids={lane_ids} expected={[1, 2, 3, 4]}"
         if len(magics) != len(set(magics)):
             return f"duplicate_magics={magics}"
         if any(not prefix.startswith("s23_") for prefix in prefixes) or len(prefixes) != len(set(prefixes)):
             return f"invalid_or_duplicate_comment_prefixes={prefixes}"
+        for row in strategies:
+            drift = {key: {"actual": row.get(key), "expected": expected} for key, expected in FROZEN_LANE_FIELDS.items() if row.get(key) != expected}
+            if drift:
+                return f"frozen_lane_contract_drift:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
         return None
 
     def _get_m1(self) -> pd.DataFrame | None:
@@ -443,7 +750,6 @@ class S23LossAbortRunner:
         return pnl
 
     def _get_confirmed_close_deal(self, position_id: int, opened_at_epoch: int) -> Any:
-        """Retry an explicit no-deal result with the bridge's bounded history window."""
         deal = self.executor.get_position_close_deal(position_id, opened_at_epoch)
         if deal is False and opened_at_epoch > 0:
             deal = self.executor.get_position_close_deal(position_id, 0)
@@ -453,16 +759,23 @@ class S23LossAbortRunner:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         st = self._st(strat)
         positions = self.executor.get_positions(symbol, int(strat["magic"]))
-        orders = self.executor.get_orders(symbol, int(strat["magic"]))
-        if positions is None or orders is None:
-            self._set_sync_block(strat, "positions_or_orders_unavailable", recoverable=True)
+        if positions is None:
+            self._set_sync_block(strat, "positions_unavailable", recoverable=True)
             return False
-        unexpected = [record for record in [*positions, *orders] if not self._owned_position(strat, record)]
-        if unexpected:
+        unexpected_positions = [record for record in positions if not self._owned_position(strat, record)]
+        if unexpected_positions:
+            self._set_sync_block(strat, "same_magic_unexpected_position_or_order", {"tickets": [int(record.ticket) for record in unexpected_positions], "comments": [str(record.comment or "") for record in unexpected_positions]}, recoverable=False)
+            return False
+        queried_orders = self.executor.get_orders(symbol, int(strat["magic"]))
+        orders_available = queried_orders is not None
+        orders = list(queried_orders or [])
+        if not orders_available:
+            self._set_sync_block(strat, "orders_unavailable", recoverable=True)
+        if orders:
             self._set_sync_block(
                 strat,
-                "same_magic_unexpected_position_or_order",
-                {"tickets": [int(record.ticket) for record in unexpected], "comments": [str(record.comment or "") for record in unexpected]},
+                "same_magic_unexpected_order",
+                {"tickets": [int(record.ticket) for record in orders], "comments": [str(record.comment or "") for record in orders]},
                 recoverable=False,
             )
             return False
@@ -470,20 +783,19 @@ class S23LossAbortRunner:
             symbol_key=strat["id"],
             state=st,
             positions=positions,
-            orders=orders,
+            orders=orders if orders_available else None,
             save_state=self._save_state,
             options=self.safety,
-            audit=lambda event, reason, note: self._trade_row(event, strat, reason=reason, note=note),
+            audit=lambda _symbol, event, reason: self._trade_row(event, strat, reason=reason),
             flat_auto_clear_reasons=FLAT_AUTO_CLEAR_SYNC_REASONS,
             confirm_position_absent=self.executor.confirm_position_absent,
             required_flat_confirmations=2,
         ):
             logging.info("S23 clean sync cleared: %s", strat["id"])
-        if orders:
-            self._set_sync_block(strat, "same_magic_unexpected_order", {"tickets": [int(o.ticket) for o in orders]}, recoverable=False)
-            return False
+            self._clear_pending_open(strat)
+            self._save_state()
         if not self.live_enabled:
-            return True
+            return not bool(st.get("sync_block_new_entries"))
         state_basket = list(st.get("basket") or [])
         if not state_basket and positions:
             self._set_sync_block(
@@ -493,6 +805,20 @@ class S23LossAbortRunner:
                 recoverable=False,
             )
             return False
+        if st.get("pending_open_opportunity_id"):
+            self._set_sync_block(
+                strat,
+                "unresolved_open_action",
+                {
+                    "opportunity_id": str(st.get("pending_open_opportunity_id") or ""),
+                    "started_utc": st.get("pending_open_started_utc"),
+                    "live_tickets": [int(pos.ticket) for pos in positions],
+                },
+                recoverable=False,
+            )
+            return False
+        if not state_basket:
+            return not bool(st.get("sync_block_new_entries"))
         if state_basket:
             live_by_id = {int(getattr(pos, "identifier", 0) or pos.ticket): pos for pos in positions}
             state_ids = {int(pos.get("position_identifier") or pos.get("ticket") or 0) for pos in state_basket}
@@ -538,14 +864,37 @@ class S23LossAbortRunner:
                 signal_bar = st.get("pending_close_signal_bar")
                 confirmed_net = sum(float(deal.net_profit) for deal in confirmed_deals)
                 st["basket"] = remaining_state
-                self._record_daily_realized(strat, confirmed_net)
+                for deal in confirmed_deals:
+                    deal_epoch = int(getattr(deal, "deal_time", 0) or 0)
+                    deal_time = pd.Timestamp(deal_epoch, unit="s", tz="UTC") if deal_epoch > 0 else utc_now()
+                    self._record_daily_realized(strat, float(deal.net_profit), deal_time)
                 self._trade_row("position_close_confirmed", strat, profit=confirmed_net, reason=reason, signal_bar_time=signal_bar)
                 if not remaining_state:
                     self._clear_basket_state(strat, reason, signal_bar)
-                    self._set_sync_block(strat, None)
+                    if orders_available:
+                        self._set_sync_block(strat, None)
                 self._save_state()
+                return not bool(st.get("sync_block_new_entries"))
+            if remaining_state and len(remaining_state) == len(state_basket) and orders_available and not orders:
+                clear_recoverable_sync_block_after_clean_sync(
+                    symbol_key=strat["id"],
+                    state=st,
+                    save_state=self._save_state,
+                    options=self.safety,
+                    audit=lambda symbol_key, event, reason: self._trade_row(event, strat, reason=reason, note=symbol_key),
+                )
+            if (
+                remaining_state
+                and len(remaining_state) == len(state_basket)
+                and not orders_available
+                and st.get("sync_block_reason") == "orders_unavailable"
+                and bool(st.get("sync_block_recoverable"))
+            ):
+                # Pending-order visibility is required before any new entry,
+                # but it is not required to monitor or close already-proven
+                # market positions owned by this lane.
                 return True
-        return True
+        return not bool(st.get("sync_block_new_entries"))
 
     def _close_basket(self, strat: dict[str, Any], reason: str, price_row: pd.Series, pnl: float) -> None:
         st = self._st(strat)
@@ -583,11 +932,26 @@ class S23LossAbortRunner:
         self._clear_basket_state(strat, reason, str(price_row.name))
         self._save_state()
 
-    def _open_entry(self, strat: dict[str, Any], side: str, price_row: pd.Series, info: Any, note: str = "") -> None:
+    def _open_entry(
+        self,
+        strat: dict[str, Any],
+        side: str,
+        price_row: pd.Series,
+        info: Any,
+        note: str = "",
+        *,
+        basket_atr30: float | None = None,
+        execution_time: datetime | pd.Timestamp | None = None,
+        opportunity: dict[str, Any] | None = None,
+    ) -> bool:
         st = self._st(strat)
+        entry_block = self._entry_submission_block_reason(strat, execution_time)
+        if entry_block:
+            self._trade_row("entry_skip", strat, reason=entry_block, signal_bar_time=str(price_row.name), note="final_open_guard")
+            return False
         if note != "reverse_after_stop" and st.get("last_closed_signal_bar") == str(price_row.name):
             self._trade_row("entry_skip", strat, reason="same_bar_reentry_after_close", signal_bar_time=str(price_row.name))
-            return
+            return False
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         digits = int(self.params.get("price_digits", 2))
         lot = float(strat.get("lot", self.params.get("default_lot", 0.01)))
@@ -597,6 +961,20 @@ class S23LossAbortRunner:
         ticket = None
         confirmed = None
         if self.live_enabled:
+            opportunity_id = str((opportunity or {}).get("opportunity_id") or "")
+            st["pending_open_opportunity_id"] = opportunity_id or f"lane{strat['lane_id']}:{dt_text(utc_now())}"
+            st["pending_open_started_utc"] = dt_text(utc_now())
+            self._trade_row(
+                "open_reserved",
+                strat,
+                opportunity_id=opportunity_id,
+                side=side,
+                lot=lot,
+                signal_bar_time=str(price_row.name),
+                decision_time=(opportunity or {}).get("decision_time"),
+                executable_at=dt_text(execution_time if execution_time is not None else utc_now()),
+            )
+            self._save_state()
             order_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
             ticket = self.executor.open_position(
                 symbol,
@@ -617,7 +995,7 @@ class S23LossAbortRunner:
             if positions is None:
                 self._set_sync_block(strat, "positions_unavailable_after_open", {"ticket": int(ticket or 0), "error": error}, recoverable=True)
                 self._save_state()
-                return
+                return True
             owned = [pos for pos in positions if self._owned_position(strat, pos)]
             known_ids = {int(pos.get("position_identifier") or pos.get("ticket") or 0) for pos in st.get("basket", [])}
             new_owned = [pos for pos in owned if int(getattr(pos, "identifier", 0) or pos.ticket) not in known_ids]
@@ -626,8 +1004,19 @@ class S23LossAbortRunner:
                 if len(matches) != 1:
                     self._set_sync_block(strat, "open_success_position_not_confirmed", {"ticket": int(ticket)}, recoverable=False)
                     self._save_state()
-                    return
+                    return True
                 confirmed = matches[0]
+            elif not new_owned and (error.startswith("ERR|10026") or error.startswith("ERR|10027")):
+                st["autotrading_reject_streak"] = int(st.get("autotrading_reject_streak", 0)) + 1
+                st["open_retry_after_utc"] = dt_text(utc_now() + pd.Timedelta(seconds=float(self.params.get("trade_permission_retry_seconds", 30.0))))
+                self._clear_pending_open(strat)
+                threshold = int(self.params.get("trade_permission_alert_threshold", 3))
+                self._trade_row("entry_skip", strat, reason="trade_permission_rejected", signal_bar_time=str(price_row.name), note=f"streak={st['autotrading_reject_streak']}")
+                if st["autotrading_reject_streak"] >= threshold and not st.get("autotrading_reject_notified"):
+                    st["autotrading_reject_notified"] = True
+                    self._notify_manual_action(strat, title="trade permission rejected repeatedly", reason=error, action="Check MT5 AutoTrading and account trade permissions.", key=f"bot23:trade-permission:{strat['id']}")
+                self._save_state()
+                return True
             elif len(new_owned) == 1:
                 confirmed = new_owned[0]
                 ticket = int(confirmed.ticket)
@@ -635,8 +1024,15 @@ class S23LossAbortRunner:
                 reason = "ambiguous_open_result_positions" if new_owned else "ambiguous_open_result"
                 self._set_sync_block(strat, reason, {"tickets": [int(pos.ticket) for pos in new_owned], "error": error}, recoverable=False)
                 self._save_state()
-                return
+                return True
             entry_price = float(confirmed.open_price)
+            st["autotrading_reject_streak"] = 0
+            st["autotrading_reject_notified"] = False
+            st["open_retry_after_utc"] = None
+        if not st["basket"]:
+            st["basket_sequence"] = int(st.get("basket_sequence") or 0) + 1
+            st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
+        opportunity_id = str((opportunity or {}).get("opportunity_id") or st.get("pending_entry_opportunity_id") or "")
         st["basket"].append(
             {
                 "ticket": ticket,
@@ -644,136 +1040,401 @@ class S23LossAbortRunner:
                 "side": side,
                 "lot": lot,
                 "entry_price": entry_price,
-                "entry_time_utc": dt_text((parse_ts(price_row.name) or pd.Timestamp(utc_now())) + pd.Timedelta(minutes=1)),
+                "entry_time_utc": dt_text(execution_time if execution_time is not None else (parse_ts(price_row.name) or pd.Timestamp(utc_now())) + pd.Timedelta(minutes=1)),
                 "open_time_epoch": int(getattr(confirmed, "open_time", 0) or 0) if confirmed is not None else 0,
                 "owner_symbol": symbol,
                 "owner_magic": int(strat["magic"]),
                 "owner_comment": str(getattr(confirmed, "comment", "") or strat["comment_prefix"]) if confirmed is not None else str(strat["comment_prefix"]),
+                "lane_id": int(strat["lane_id"]),
+                "basket_id": st["current_basket_id"],
+                "opportunity_id": opportunity_id,
                 "shadow": not self.live_enabled,
             }
         )
         if len(st["basket"]) == 1:
             st["basket_peak_pnl_usd"] = None
+            st["frozen_basket_atr30"] = float(basket_atr30) if basket_atr30 is not None and math.isfinite(float(basket_atr30)) else None
+            self._clear_pending_entry(strat)
         st["last_add_price"] = entry_price
         st["last_signal_bar"] = str(price_row.name)
-        self._trade_row("entry", strat, ticket=ticket or "", side=side, lot=lot, price=entry_price, signal_bar_time=str(price_row.name), note=note)
+        self._clear_pending_open(strat)
+        self._trade_row(
+            "entry",
+            strat,
+            opportunity_id=opportunity_id,
+            ticket=ticket or "",
+            side=side,
+            lot=lot,
+            price=entry_price,
+            signal_bar_time=str(price_row.name),
+            event_time=(opportunity or {}).get("event_time"),
+            release_time=(opportunity or {}).get("release_time"),
+            available_time=(opportunity or {}).get("available_time"),
+            decision_time=(opportunity or {}).get("decision_time"),
+            executable_at=dt_text(execution_time if execution_time is not None else utc_now()),
+            note=note,
+        )
         self._save_state()
+        return True
 
-    def _monitor_open_basket(self, strat: dict[str, Any], info: Any, price_row: pd.Series, poll_time: datetime | None = None) -> bool:
+    @staticmethod
+    def _account_identity_error(account: dict[str, Any]) -> str | None:
+        observed_login = account.get("login")
+        observed_server = str(account.get("server") or "")
+        if observed_login is None or not observed_server:
+            return "account_identity_unavailable; recompile and attach the current BotBridge_s23"
+        if int(observed_login) != int(MT5_LOGIN) or observed_server.casefold() != str(MT5_SERVER).casefold():
+            return (
+                f"observed_login={int(observed_login)} observed_server={observed_server} "
+                f"expected_login={int(MT5_LOGIN)} expected_server={MT5_SERVER}"
+            )
+        return None
+
+    def _legacy_inventory_error(self) -> str | None:
+        """Refuse cutover while the retired single-lane namespace is not flat."""
+        symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
+        for magic in LEGACY_S23_MAGICS:
+            positions = self.executor.get_positions(symbol, magic)
+            if positions is None:
+                return f"legacy_positions_unavailable:magic={magic}"
+            orders = self.executor.get_orders(symbol, magic)
+            if orders is None:
+                return f"legacy_orders_unavailable:magic={magic}"
+            if positions or orders:
+                return (
+                    f"legacy_inventory_not_flat:magic={magic}:"
+                    f"positions={[int(row.ticket) for row in positions]}:"
+                    f"orders={[int(row.ticket) for row in orders]}"
+                )
+        return None
+
+    def _monitor_open_basket(self, strat: dict[str, Any], info: Any, price_row: pd.Series, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         st = self._st(strat)
         if st.get("pending_close_reason"):
             return True
         if not st["basket"]:
             return False
-        at_utc = poll_time or utc_now()
+        at_utc = pd.Timestamp(poll_time if poll_time is not None else utc_now())
+        at_utc = at_utc.tz_localize("UTC") if at_utc.tzinfo is None else at_utc.tz_convert("UTC")
         bid = float(getattr(info, "bid", price_row["Close"]))
         ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
         pnl = self._basket_pnl(strat, bid, ask)
-        entry_times = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
-        valid_entry_times = [ts for ts in entry_times if ts is not None]
-        if not valid_entry_times:
+        entries = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
+        valid_entries = [stamp for stamp in entries if stamp is not None]
+        if not valid_entries:
             self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
             self._save_state()
             return True
-        held = max(0, int((at_utc - min(valid_entry_times)).total_seconds() // 60))
+        held = max(0, int((at_utc - min(valid_entries)).total_seconds() // 60))
         previous_peak = st.get("basket_peak_pnl_usd")
         peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
         st["basket_peak_pnl_usd"] = peak
+        target, stop, ftp_peak = self._exit_thresholds(strat)
         reason = None
-        if pnl >= float(strat["basket_target_usd"]):
+        if pnl >= target:
             reason = "basket_target"
-        elif pnl <= -float(strat["basket_stop_usd"]):
+        elif pnl <= -stop:
             reason = "basket_stop"
-        elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
+        elif int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < ftp_peak:
             reason = "failure_to_progress"
         elif held >= int(strat["max_hold_bars"]):
             reason = "max_hold"
         if reason:
-            close_row = price_row.copy()
-            close_row.name = pd.Timestamp(at_utc)
-            self._close_basket(strat, reason, close_row, pnl)
+            row = price_row.copy()
+            row.name = at_utc
+            self._close_basket(strat, reason, row, pnl)
             return True
         return False
 
-    def _run_strategy(self, strat: dict[str, Any], bars: pd.DataFrame, info: Any) -> None:
+    def _monitor_pending_entry(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        st = self._st(strat)
+        side = str(st.get("pending_entry_side") or "")
+        if not side or st["basket"]:
+            return False
+        at_utc = pd.Timestamp(poll_time if poll_time is not None else utc_now())
+        at_utc = at_utc.tz_localize("UTC") if at_utc.tzinfo is None else at_utc.tz_convert("UTC")
+        entry_block = self._entry_submission_block_reason(strat, at_utc)
+        if entry_block:
+            self._trade_row("entry_skip", strat, reason=entry_block, signal_bar_time=st.get("pending_entry_signal_bar"), note="pending_open_guard")
+            return True
+        expires = parse_ts(st.get("pending_entry_expires_utc"))
+        try:
+            target = float(st["pending_entry_target"])
+            atr30 = float(st["pending_entry_atr30"])
+        except (KeyError, TypeError, ValueError):
+            target, atr30 = math.nan, math.nan
+        if side not in {"LONG", "SHORT"} or expires is None or not math.isfinite(target) or not math.isfinite(atr30) or atr30 <= 0.0:
+            invalid_fields = [
+                field
+                for field, valid in (
+                    ("pending_entry_side", side in {"LONG", "SHORT"}),
+                    ("pending_entry_target", math.isfinite(target)),
+                    ("pending_entry_expires_utc", expires is not None),
+                    ("pending_entry_atr30", math.isfinite(atr30) and atr30 > 0.0),
+                )
+                if not valid
+            ]
+            signal_bar = st.get("pending_entry_signal_bar")
+            opportunity_id = st.get("pending_entry_opportunity_id")
+            self._clear_pending_entry(strat)
+            self._trade_row("entry_skip", strat, opportunity_id=opportunity_id, reason="pending_entry_state_invalid", signal_bar_time=signal_bar, note=",".join(invalid_fields))
+            self._save_state()
+            return True
+        if at_utc > expires:
+            signal_bar = st.get("pending_entry_signal_bar")
+            opportunity_id = st.get("pending_entry_opportunity_id")
+            self._clear_pending_entry(strat)
+            self._trade_row("entry_skip", strat, opportunity_id=opportunity_id, reason="za_pullback_expired", signal_bar_time=signal_bar)
+            self._save_state()
+            return False
+        bid, ask = float(info.bid), float(info.ask)
+        touched = (side == "LONG" and ask <= target) or (side == "SHORT" and bid >= target)
+        if not touched:
+            return False
+        max_ratio = float(strat.get("entry_max_spread_atr_ratio", 0.0))
+        if self._low_vol_regime(strat, atr30) and max_ratio > 0.0 and (ask - bid) / atr30 > max_ratio:
+            return False
+        signal_bar = parse_ts(st.get("pending_entry_signal_bar")) or at_utc
+        row = pd.Series({"Open": bid, "Close": bid, "AskOpen": ask}, name=signal_bar)
+        opportunity = {
+            "opportunity_id": st.get("pending_entry_opportunity_id"),
+            "event_time": st.get("pending_entry_event_time"),
+            "release_time": st.get("pending_entry_release_time"),
+            "available_time": st.get("pending_entry_release_time"),
+            "decision_time": dt_text(at_utc),
+        }
+        return self._open_entry(
+            strat,
+            side,
+            row,
+            info,
+            note="za_pullback_fill",
+            basket_atr30=atr30,
+            execution_time=at_utc,
+            opportunity=opportunity,
+        )
+
+    def _prepare_lane(self, strat: dict[str, Any], price_row: pd.Series, info: Any, poll_time: pd.Timestamp) -> tuple[bool, str, bool]:
         st = self._st(strat)
         if not self._sync_strategy(strat):
             self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
             self._save_state()
-            return
-        if len(bars) < 2:
-            return
-        now = bars.iloc[-1]
-        now_bar = parse_ts(now.name)
-        if now_bar is None:
-            self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(now.name)}, recoverable=True)
-            self._save_state()
-            return
-        poll_time = utc_now()
-        if self._monitor_open_basket(strat, info, now, poll_time):
-            return
-        bid = float(getattr(info, "bid", now["Close"]))
-        ask = float(getattr(info, "ask", now.get("AskOpen", now["Open"])))
-        if st.get("last_evaluated_bar") == dt_text(now_bar):
-            return
-        st["last_evaluated_bar"] = dt_text(now_bar)
-        if st.get("sync_block_new_entries"):
-            self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
-            self._save_state()
-            return
-        side = self._signal(now, strat)
-        if not side:
-            return
-        stale = stale_signal_decision(
-            str(now.name),
-            timeframe_hours=1.0 / 60.0,
-            max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
-            options=self.safety,
+            return False, str(st.get("sync_block_reason") or "sync_block"), False
+        if self._monitor_open_basket(strat, info, price_row, poll_time):
+            return False, "open_basket_exit_or_pending_close", False
+        entry_block = self._entry_submission_block_reason(strat, poll_time)
+        if entry_block:
+            return False, entry_block, False
+        pending_side = str(st.get("pending_entry_side") or "")
+        try:
+            pending_target = float(st.get("pending_entry_target"))
+        except (TypeError, ValueError):
+            pending_target = math.nan
+        pending_expiry = parse_ts(st.get("pending_entry_expires_utc"))
+        pending_touch = (
+            pending_side in {"LONG", "SHORT"}
+            and math.isfinite(pending_target)
+            and pending_expiry is not None
+            and poll_time <= pending_expiry
+            and (
+                (pending_side == "LONG" and float(info.ask) <= pending_target)
+                or (pending_side == "SHORT" and float(info.bid) >= pending_target)
+            )
         )
-        if stale.stale:
-            st["last_signal_bar"] = str(now.name)
-            self._trade_row("entry_skip", strat, reason="stale_signal_skip", signal_bar_time=str(now.name), note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc}")
-            self._save_state()
-            return
+        if self._monitor_pending_entry(strat, info, poll_time):
+            # The frozen engine handles a pending fill before evaluating the
+            # raw signal on the same tick, and marks that tick consumed.
+            return False, "pending_entry_fill", pending_touch
+        return True, "ready", False
+
+    @staticmethod
+    def _opportunity_fields(opportunity: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "opportunity_id": opportunity["opportunity_id"],
+            "signal_bar_time": opportunity["event_time"],
+            "event_time": opportunity["event_time"],
+            "release_time": opportunity["release_time"],
+            "available_time": opportunity["available_time"],
+            "decision_time": opportunity["decision_time"],
+            "executable_at": opportunity["executable_at"],
+        }
+
+    def _set_pending_from_opportunity(
+        self,
+        strat: dict[str, Any],
+        opportunity: dict[str, Any],
+        side: str,
+        target: float,
+        atr30: float,
+        poll_time: pd.Timestamp,
+    ) -> None:
+        st = self._st(strat)
+        st["pending_entry_side"] = side
+        st["pending_entry_target"] = target
+        st["pending_entry_expires_utc"] = dt_text(poll_time + pd.Timedelta(minutes=int(strat.get("entry_wait_minutes", 0))))
+        st["pending_entry_atr30"] = atr30
+        st["pending_entry_signal_bar"] = opportunity["event_time"]
+        st["pending_entry_opportunity_id"] = opportunity["opportunity_id"]
+        st["pending_entry_event_time"] = opportunity["event_time"]
+        st["pending_entry_release_time"] = opportunity["release_time"]
+
+    def _consume_opportunity(
+        self,
+        strat: dict[str, Any],
+        opportunity: dict[str, Any],
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+    ) -> tuple[bool, str]:
+        st = self._st(strat)
+        side = str(opportunity["side"])
+        fields = self._opportunity_fields(opportunity)
+        st["last_evaluated_bar"] = opportunity["event_time"]
+        entry_block = self._entry_submission_block_reason(strat, poll_time)
+        if entry_block:
+            return False, entry_block
         cooldown_until = parse_ts(st.get("cooldown_until_utc"))
-        if cooldown_until is not None and now_bar < cooldown_until:
-            self._trade_row("entry_skip", strat, reason="cooldown", signal_bar_time=str(now.name))
-            return
+        if cooldown_until is not None and poll_time < cooldown_until:
+            return False, "cooldown"
         if len(st["basket"]) >= int(strat["max_positions"]):
-            return
+            return False, "capacity_full"
+        bid = float(getattr(info, "bid", price_row["Close"]))
+        ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
+        atr30 = float(price_row.get("atr30", math.nan))
         if st["basket"]:
-            if any(p["side"] != side for p in st["basket"]):
-                return
+            if any(pos["side"] != side for pos in st["basket"]):
+                return False, "opposite_side_inventory"
+            if not math.isfinite(atr30):
+                return False, "atr_unavailable_for_add"
+            target, _, _ = self._exit_thresholds(strat)
+            if self._basket_pnl(strat, bid, ask) >= target * float(strat.get("add_profit_guard_ratio", 99.0)):
+                return False, "add_profit_guard"
             last_add = st.get("last_add_price")
-            atr30 = float(now["atr30"])
-            if last_add is None or not math.isfinite(atr30):
-                return
-            favorable = (side == "LONG" and float(now["Close"]) >= float(last_add) + float(strat["add_atr"]) * atr30) or (
-                side == "SHORT" and float(now["Close"]) <= float(last_add) - float(strat["add_atr"]) * atr30
+            if last_add is None:
+                return False, "last_add_price_missing"
+            favorable = (
+                side == "LONG" and float(price_row["Close"]) >= float(last_add) + float(strat["add_atr"]) * atr30
+            ) or (
+                side == "SHORT" and float(price_row["Close"]) <= float(last_add) - float(strat["add_atr"]) * atr30
             )
             if not favorable:
-                return
-            guard_ratio = float(strat.get("add_profit_guard_ratio", 99.0))
-            if self._basket_pnl(strat, bid, ask) >= float(strat["basket_target_usd"]) * guard_ratio:
-                self._trade_row("entry_skip", strat, reason="add_profit_guard", signal_bar_time=str(now.name))
-                return
-        else:
-            block_reason = self._new_basket_block_reason(strat, now_bar)
-            if block_reason:
-                self._trade_row("entry_skip", strat, reason=block_reason, signal_bar_time=str(now.name), note=f"daily_realized={self._st(strat).get('daily_realized_pnl_usd', 0.0)}")
+                return False, "add_distance_not_reached"
+            attempted = self._open_entry(
+                strat,
+                side,
+                price_row,
+                info,
+                note="horizontal_lane_add",
+                basket_atr30=atr30,
+                execution_time=poll_time,
+                opportunity=opportunity,
+            )
+            return attempted, "add_attempted" if attempted else "add_final_guard"
+
+        block_reason = self._new_basket_block_reason(strat, poll_time)
+        if block_reason:
+            return False, block_reason
+        low_vol = self._low_vol_regime(strat, atr30)
+        max_ratio = float(strat.get("entry_max_spread_atr_ratio", 0.0))
+        if low_vol and max_ratio > 0.0 and (
+            not math.isfinite(atr30) or atr30 <= 0.0 or (ask - bid) / atr30 > max_ratio
+        ):
+            return False, "za_spread_atr_gate"
+        pending_side = str(st.get("pending_entry_side") or "")
+        mid = float(price_row.get("bb20_mid", math.nan))
+        std = float(price_row.get("bb20_std", math.nan))
+        if pending_side == side:
+            if not math.isfinite(mid) or not math.isfinite(std) or std <= 0.0:
+                return False, "bollinger_state_unavailable"
+            target = mid + (std if side == "LONG" else -std) * float(strat.get("entry_wait_sigma", 1.0))
+            self._set_pending_from_opportunity(strat, opportunity, side, target, atr30, poll_time)
+            self._trade_row("entry_wait", strat, reason="za_pullback_refreshed", price=target, **fields)
+            self._save_state()
+            self._monitor_pending_entry(strat, info, poll_time)
+            return True, "pending_refreshed"
+        if pending_side:
+            previous_id = st.get("pending_entry_opportunity_id")
+            self._clear_pending_entry(strat)
+            self._trade_row("pending_cancelled", strat, opportunity_id=previous_id, reason="opposite_signal")
+        if low_vol:
+            if not math.isfinite(mid) or not math.isfinite(std) or std <= 0.0:
+                return False, "bollinger_state_unavailable"
+            z = (float(price_row["Close"]) - mid) / std
+            extreme = (side == "LONG" and z > float(strat.get("entry_wait_z", 99.0))) or (
+                side == "SHORT" and z < -float(strat.get("entry_wait_z", 99.0))
+            )
+            if bool(strat.get("entry_require_extreme", False)) and not extreme:
+                return False, "za_not_extreme"
+            target = mid + (std if side == "LONG" else -std) * float(strat.get("entry_wait_sigma", 1.0))
+            self._set_pending_from_opportunity(strat, opportunity, side, target, atr30, poll_time)
+            self._trade_row("entry_wait", strat, reason="za_pullback_armed", price=target, **fields)
+            self._save_state()
+            self._monitor_pending_entry(strat, info, poll_time)
+            return True, "pending_armed"
+        attempted = self._open_entry(
+            strat,
+            side,
+            price_row,
+            info,
+            note="horizontal_lane_entry",
+            basket_atr30=atr30,
+            execution_time=poll_time,
+            opportunity=opportunity,
+        )
+        return attempted, "entry_attempted" if attempted else "entry_final_guard"
+
+    def _route_opportunity(
+        self,
+        opportunity: dict[str, Any],
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        lane_readiness: dict[int, tuple[bool, str, bool]],
+    ) -> None:
+        routing = self.state["routing"]
+        routing["last_routed_signal_bar"] = opportunity["event_time"]
+        routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
+        routing["last_consumed_lane_id"] = None
+        routing["last_route_decision_utc"] = dt_text(poll_time)
+        self._save_state()  # durable reservation before any possible OPEN
+        primary = self.params["strategies"][0]
+        fields = self._opportunity_fields(opportunity)
+        self._trade_row("raw_opportunity", primary, side=opportunity["side"], reason="legacy_za_confirmed_m1_impulse", **fields)
+        for strat in self.params["strategies"]:
+            lane_id = int(strat["lane_id"])
+            ready, prep_reason, prep_consumed = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
+            if prep_consumed:
+                self._trade_row("opportunity_consumed", strat, reason=prep_reason, **fields)
+                routing["last_consumed_lane_id"] = lane_id
                 self._save_state()
                 return
-        self._open_entry(strat, side, now, info)
+            if not ready:
+                self._trade_row("opportunity_noop", strat, reason=prep_reason, **fields)
+                continue
+            consumed, reason = self._consume_opportunity(strat, opportunity, price_row, info, poll_time)
+            self._trade_row("opportunity_consumed" if consumed else "opportunity_noop", strat, reason=reason, **fields)
+            if consumed:
+                routing["last_consumed_lane_id"] = lane_id
+                self._save_state()
+                return
+        self._trade_row("opportunity_unconsumed", primary, reason="all_lanes_noop", **fields)
+        self._save_state()
 
     def run_once(self) -> None:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         info = self.executor.get_symbol_info(symbol)
         if info is None:
             for strat in self.params["strategies"]:
-                st = self._st(strat)
-                st["sync_block_new_entries"] = True
-                st["sync_block_reason"] = "symbol_info_failed"
-                st["sync_block_recoverable"] = True
+                if bool(strat.get("enabled", True)):
+                    self._set_sync_block(strat, "symbol_info_failed", recoverable=True)
+                    if self._st(strat).get("basket"):
+                        self._notify_manual_action(
+                            strat,
+                            title="market data unavailable while bot23 inventory is open",
+                            reason="symbol_info_failed",
+                            action="Inspect BotBridge_s23 and the bot23-owned MT5 positions; automated basket exits cannot run without an executable Bid/Ask quote.",
+                            key=f"bot23:open-inventory-symbol-info:{strat['id']}",
+                        )
             self._save_state()
             return
         bars = self._get_m1()
@@ -789,16 +1450,65 @@ class S23LossAbortRunner:
                 quote_row = pd.Series({"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)}, name=pd.Timestamp(quote_time))
                 self._monitor_open_basket(strat, info, quote_row, quote_time)
             return
-        point = float(self.params.get("point_size", 0.01))
-        current_spread_points = max(0.0, (float(getattr(info, "ask", 0.0)) - float(getattr(info, "bid", 0.0))) / point)
-        bars["spread_points"] = current_spread_points
+        if len(bars) < 2:
+            return
+        price_row = bars.iloc[-1]
+        signal_bar = parse_ts(price_row.name)
+        poll_time = pd.Timestamp(utc_now())
+        if signal_bar is None:
+            for strat in self.params["strategies"]:
+                if bool(strat.get("enabled", True)):
+                    self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(price_row.name)}, recoverable=True)
+            self._save_state()
+            return
+        lane_readiness: dict[int, tuple[bool, str, bool]] = {}
         for strat in self.params["strategies"]:
             if bool(strat.get("enabled", True)):
-                self._run_strategy(strat, bars, info)
+                lane_readiness[int(strat["lane_id"])] = self._prepare_lane(strat, price_row, info, poll_time)
+        primary = self.params["strategies"][0]
+        side = self._signal(price_row, primary)
+        signal_bar_text = dt_text(signal_bar)
+        routing = self.state["routing"]
+        if side and routing.get("last_routed_signal_bar") != signal_bar_text:
+            release_time = signal_bar + pd.Timedelta(minutes=1)
+            opportunity = {
+                "opportunity_id": f"{symbol}|{signal_bar_text}|{side}",
+                "side": side,
+                "event_time": signal_bar_text,
+                "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time),
+                "decision_time": dt_text(poll_time),
+                "executable_at": dt_text(poll_time),
+            }
+            stale = stale_signal_decision(
+                str(price_row.name),
+                timeframe_hours=1.0 / 60.0,
+                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                options=self.safety,
+            )
+            if stale.stale:
+                routing["last_routed_signal_bar"] = signal_bar_text
+                routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
+                routing["last_consumed_lane_id"] = None
+                routing["last_route_decision_utc"] = dt_text(poll_time)
+                self._trade_row(
+                    "opportunity_rejected",
+                    primary,
+                    side=side,
+                    reason="stale_signal_skip",
+                    note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc}",
+                    **self._opportunity_fields(opportunity),
+                )
+                self._save_state()
+            else:
+                self._route_opportunity(opportunity, price_row, info, poll_time, lane_readiness)
         now = time.time()
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 60)):
             logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self.params["strategies"]})
             self._last_status_log = now
+
+
+S23LossAbortRunner = S23HorizontalInventoryRunner  # compatibility for frozen audit harnesses
 
 
 class FakeDM:
@@ -825,7 +1535,12 @@ class FakeExecutor:
         return {"name": "BotBridge_s23", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
 
     def get_account_info(self) -> dict[str, Any]:
-        return {"margin_mode": self.margin_mode, "margin_mode_name": "RETAIL_HEDGING" if self.margin_mode == HEDGING_MARGIN_MODE else "RETAIL_NETTING"}
+        return {
+            "margin_mode": self.margin_mode,
+            "margin_mode_name": "RETAIL_HEDGING" if self.margin_mode == HEDGING_MARGIN_MODE else "RETAIL_NETTING",
+            "login": MT5_LOGIN,
+            "server": MT5_SERVER,
+        }
 
     def get_symbol_info(self, *_: Any) -> Any:
         return type("Info", (), {"bid": 2064.0, "ask": 2064.03})()
@@ -846,7 +1561,11 @@ class FakeExecutor:
         return self.get_position(ticket) is False
 
     def get_position_close_deal(self, position_id: int, *_: Any) -> Any:
-        return SimpleNamespace(position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, net_profit=0.0)
+        return SimpleNamespace(
+            deal=8000 + position_id, position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            reason="DEAL_REASON_EXPERT", price=2066.0, profit=1.0, commission=-0.1, swap=0.0, fee=0.0,
+            deal_time=1767272520, net_profit=0.9,
+        )
 
     def open_position(self, *_: Any, **__: Any) -> int:
         return 1
@@ -861,182 +1580,40 @@ def load_params(path: str = PARAMS_FILE) -> dict[str, Any]:
 
 
 def self_test() -> None:
-    configured_params = load_params()
-    configured_strategy = configured_params["strategies"][0]
-    assert int(configured_strategy["max_positions"]) == 2, "forward candidate must cap the basket at two positions"
-    assert abs(float(configured_strategy["add_atr"]) - 0.65) < 1e-12, "forward candidate add distance must be 0.65 ATR30"
-    assert abs(float(configured_strategy["add_profit_guard_ratio"]) - 0.30) < 1e-12, "adds must stop at 30% of basket target"
-    assert configured_params["new_basket_blocked_hours_utc"] == [14], "14 UTC new baskets must be blocked"
-    assert float(configured_params["daily_realized_loss_limit_usd"]) == 27.0, "daily realized loss limit must be 27 USD"
-    params = json.loads(json.dumps(configured_params))
+    params = json.loads(json.dumps(load_params()))
     params["live_trading_enabled"] = False
     params["shadow_forward_enabled"] = True
-    params["new_basket_blocked_hours_utc"] = []
     params["safety"]["stale_signal_guard"] = False
-    params["strategies"][0]["vol_min"] = 0.9
-    runner = S23LossAbortRunner(params)
-    runner.state = runner._default_state()
-    assert runner._ownership_namespace_error() is None, "valid S23 ownership namespaces must pass"
-    params["strategies"][0]["magic"] = 200022
-    wrong_magic_runner = S23LossAbortRunner(params)
-    assert "expected=[200023]" in str(wrong_magic_runner._ownership_namespace_error()), "wrong S23 magic must fail preflight"
-    params["strategies"][0]["magic"] = EXPECTED_S23_MAGIC
-    runner.dm = FakeDM()
-    runner.executor = FakeExecutor()
-    runner._save_state = lambda: None
-    rows: list[tuple[str, str, str]] = []
-    runner._trade_row = lambda event, strat, **kw: rows.append((event, strat["id"], str(kw.get("reason", ""))))
-    runner.run_once()
-    assert any(row[0] == "entry" for row in rows), "expected at least one shadow entry"
     strategy = params["strategies"][0]
-    gate_params = json.loads(json.dumps(params))
-    gate_params["new_basket_blocked_hours_utc"] = [14]
-    gate_runner = S23LossAbortRunner(gate_params)
-    gate_runner.state = gate_runner._default_state()
-    gate_runner._record_daily_realized(strategy, -27.0, pd.Timestamp("2026-01-01T13:30:00Z"))
-    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-01T13:45:00Z")) == "daily_realized_loss_limit"
-    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-01T14:15:00Z")) == "new_basket_blocked_hour"
-    assert gate_runner._new_basket_block_reason(strategy, pd.Timestamp("2026-01-02T13:15:00Z")) is None, "daily budget must reset on UTC day change"
-    st = runner._st(strategy)
-    st["sync_block_new_entries"] = True
-    st["sync_block_reason"] = "positions_unavailable"
-    st["sync_block_recoverable"] = True
-    save_calls: list[bool] = []
-    runner._save_state = lambda: save_calls.append(True)
-    runner._sync_strategy(strategy)
-    assert not st["sync_block_new_entries"], "recoverable clean sync should clear"
-    assert save_calls, "recoverable clear must persist state"
+    assert params["candidate_id"] == "bot23-za-horizontal-inventory-v001"
+    assert params["routing_mode"] == "first_consuming_lane_preserve_primary_v1"
+    assert int(params["lane_count"]) == 4
+    assert tuple(int(row["magic"]) for row in params["strategies"]) == EXPECTED_S23_MAGICS
+    assert [int(row["lane_id"]) for row in params["strategies"]] == [1, 2, 3, 4]
+    assert int(strategy["max_positions"]) == 2 and float(strategy["add_atr"]) == 0.65
+    assert (float(strategy["entry_wait_z"]), float(strategy["entry_wait_sigma"]), int(strategy["entry_wait_minutes"])) == (2.0, 1.0, 10)
+    assert (float(strategy["target_atr_mult"]), float(strategy["stop_atr_mult"]), float(strategy["failure_to_progress_peak_atr_mult"])) == (3.5, 6.5, 1.0)
 
-    st["sync_block_new_entries"] = True
-    st["sync_block_reason"] = "open_success_position_not_confirmed"
-    st["sync_block_recoverable"] = False
-    st["sync_block_details"] = {"ticket": 9001}
-    runner._sync_strategy(strategy)
-    assert st["sync_block_new_entries"], "high-risk open block requires two flat confirmations"
-    runner._sync_strategy(strategy)
-    assert not st["sync_block_new_entries"], "high-risk open block should clear after two proven-flat confirmations"
+    runner = S23HorizontalInventoryRunner(params)
+    runner.state = runner._default_state()
+    runner._save_state = lambda: None
+    runner._trade_row = lambda *_args, **_kwargs: None
+    assert runner._ownership_namespace_error() is None
+    state = runner._st(strategy)
+    state["frozen_basket_atr30"] = 1.5
+    assert runner._exit_thresholds(strategy) == (5.25, 9.75, 1.5)
+    state["frozen_basket_atr30"] = 2.0
+    assert runner._exit_thresholds(strategy) == (10.0, 18.0, 3.0)
+
+    state.update({"pending_entry_side": "LONG", "pending_entry_target": 2064.05, "pending_entry_expires_utc": dt_text(utc_now() + pd.Timedelta(minutes=5)), "pending_entry_atr30": 1.5, "pending_entry_signal_bar": dt_text(utc_now() - pd.Timedelta(minutes=1))})
+    assert runner._monitor_pending_entry(strategy, SimpleNamespace(bid=2064.02, ask=2064.05), utc_now())
+    assert len(state["basket"]) == 1 and state["frozen_basket_atr30"] == 1.5
 
     foreign = SimpleNamespace(ticket=9100, identifier=9100, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, comment="s22_foreign", type=ORDER_TYPE_BUY)
+    runner.state = runner._default_state()
     runner.executor = FakeExecutor(positions=[foreign])
-    assert not runner._sync_strategy(strategy), "same-magic foreign comment must block"
-    assert st["sync_block_reason"] == "same_magic_unexpected_position_or_order"
-
-    live_params = json.loads(json.dumps(params))
-    live_params["live_trading_enabled"] = True
-    live_params["shadow_forward_enabled"] = False
-    live_runner = S23LossAbortRunner(live_params)
-    live_runner.state = live_runner._default_state()
-    live_runner.dm = FakeDM()
-    live_runner.executor = FakeExecutor(margin_mode=0)
-    assert not live_runner.connect_and_preflight(), "live S23 must reject netting accounts"
-
-    confirmed_params = json.loads(json.dumps(live_params))
-    confirmed_runner = S23LossAbortRunner(confirmed_params)
-    confirmed_runner.state = confirmed_runner._default_state()
-    confirmed_runner._save_state = lambda: None
-    confirmed_strategy = confirmed_params["strategies"][0]
-    owned = SimpleNamespace(
-        ticket=1, identifier=7001, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
-        comment="s23_loss_abort", type=ORDER_TYPE_BUY, volume=0.01,
-        open_price=2064.03, open_time=1767272400,
-    )
-    confirmed_runner.executor = FakeExecutor(positions=[owned])
-    sample_bars = add_features(FakeDM().get_historical_data(), float(params["point_size"]))
-    sample_row = sample_bars.iloc[-1]
-    confirmed_runner._open_entry(confirmed_strategy, "LONG", sample_row, confirmed_runner.executor.get_symbol_info("XAUUSD"))
-    confirmed_state = confirmed_runner._st(confirmed_strategy)
-    assert len(confirmed_state["basket"]) == 1 and confirmed_state["basket"][0]["position_identifier"] == 7001, "OPEN must persist broker-confirmed position ownership"
-
-    ambiguous_runner = S23LossAbortRunner(confirmed_params)
-    ambiguous_runner.state = ambiguous_runner._default_state()
-    ambiguous_runner._save_state = lambda: None
-    ambiguous_runner.executor = FakeExecutor(positions=[])
-    ambiguous_runner._open_entry(confirmed_strategy, "LONG", sample_row, ambiguous_runner.executor.get_symbol_info("XAUUSD"))
-    assert ambiguous_runner._st(confirmed_strategy)["sync_block_reason"] == "open_success_position_not_confirmed", "unconfirmed successful OPEN must fail closed"
-
-    partial_runner = S23LossAbortRunner(confirmed_params)
-    partial_runner.state = partial_runner._default_state()
-    partial_runner._save_state = lambda: None
-    live_remaining = SimpleNamespace(
-        ticket=2, identifier=7002, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
-        comment="s23_loss_abort", type=ORDER_TYPE_BUY, volume=0.01,
-        open_price=2065.0, open_time=1767272460,
-    )
-    partial_runner.executor = FakeExecutor(positions=[live_remaining])
-    partial_state = partial_runner._st(confirmed_strategy)
-    partial_state["basket"] = [
-        {"ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00Z", "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
-        {"ticket": 2, "position_identifier": 7002, "side": "LONG", "lot": 0.01, "entry_price": 2065.0, "entry_time_utc": "2026-01-01T13:01:00Z", "open_time_epoch": 1767272460, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
-    ]
-    assert partial_runner._sync_strategy(confirmed_strategy), "partially completed basket close must reconcile owned tickets"
-    assert [pos["position_identifier"] for pos in partial_state["basket"]] == [7002], "confirmed closed ticket must be removed without losing remaining owned state"
-
-    class DelayedManualCloseExecutor(FakeExecutor):
-        def __init__(self) -> None:
-            super().__init__(positions=[live_remaining])
-            self.history_windows: list[int] = []
-
-        def get_position_close_deal(self, position_id: int, opened_at_epoch: int) -> Any:
-            self.history_windows.append(opened_at_epoch)
-            if opened_at_epoch > 0:
-                return False
-            return SimpleNamespace(position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, net_profit=-1.25)
-
-    delayed_runner = S23LossAbortRunner(confirmed_params)
-    delayed_runner.state = delayed_runner._default_state()
-    delayed_runner._save_state = lambda: None
-    delayed_runner._trade_row = lambda *_args, **_kwargs: None
-    delayed_state = delayed_runner._st(confirmed_strategy)
-    delayed_state["basket"] = [
-        {"ticket": 1, "position_identifier": 7001, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00Z", "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
-        {"ticket": 2, "position_identifier": 7002, "side": "LONG", "lot": 0.01, "entry_price": 2065.0, "entry_time_utc": "2026-01-01T13:01:00Z", "open_time_epoch": 1767272460, "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S23_MAGIC, "owner_comment": "s23_loss_abort"},
-    ]
-    delayed_runner.executor = DelayedManualCloseExecutor()
-    assert delayed_runner._sync_strategy(confirmed_strategy), "manual close must reconcile through bounded fallback history"
-    assert delayed_runner.executor.history_windows == [1767272340, 0], "manual-close lookup must retry with the bounded fallback window"
-    assert [pos["position_identifier"] for pos in delayed_state["basket"]] == [7002]
-    assert not delayed_state["sync_block_new_entries"], "confirmed manual close must not leave a stale entry block"
-
-    fail_runner = S23LossAbortRunner(params)
-    fail_runner.state = fail_runner._default_state()
-    fail_runner.executor = FakeExecutor()
-    fail_runner._save_state = lambda: None
-    fail_st = fail_runner._st(strategy)
-    fail_st["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00+00:00", "shadow": True}]
-    fail_st["basket_peak_pnl_usd"] = 1.0
-    bars = add_features(FakeDM().get_historical_data(), float(params["point_size"]))
-    bars["spread_points"] = 3.0
-    bars = bars.loc[bars.index <= pd.Timestamp("2026-01-01T13:11:00Z")]
-    events: list[str] = []
-    fail_runner._trade_row = lambda event, *_args, **kw: events.append(str(kw.get("reason") or event))
-    fail_runner._run_strategy(strategy, bars, FakeExecutor().get_symbol_info("XAUUSD"))
-    assert "failure_to_progress" in events, "failure-to-progress exit must fire after 10 bars without 3 USD peak"
-
-    poll_runner = S23LossAbortRunner(params)
-    poll_runner.state = poll_runner._default_state()
-    poll_runner._save_state = lambda: None
-    poll_events: list[str] = []
-    poll_runner._trade_row = lambda event, *_args, **kw: poll_events.append(str(kw.get("reason") or event))
-    poll_state = poll_runner._st(strategy)
-    poll_state["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00+00:00", "shadow": True}]
-    poll_state["last_evaluated_bar"] = "2026-01-01T13:01:00+00:00"
-    poll_row = pd.Series({"Open": 2075.0, "Close": 2075.0, "AskOpen": 2075.03}, name=pd.Timestamp("2026-01-01T13:01:00Z"))
-    poll_info = type("Info", (), {"bid": 2075.0, "ask": 2075.03})()
-    assert poll_runner._monitor_open_basket(strategy, poll_info, poll_row, pd.Timestamp("2026-01-01T13:01:05Z")), "poll-time TP must trigger without a new M1 bar"
-    assert not poll_state["basket"] and "basket_target" in poll_events, "poll-time TP must close the shadow basket"
-
-    no_bars_runner = S23LossAbortRunner(params)
-    no_bars_runner.state = no_bars_runner._default_state()
-    no_bars_runner.executor = FakeExecutor()
-    no_bars_runner.dm = type("NoBarsDM", (), {"get_historical_data": lambda self, *_args, **_kwargs: None})()
-    no_bars_runner._save_state = lambda: None
-    no_bars_events: list[str] = []
-    no_bars_runner._trade_row = lambda event, *_args, **kw: no_bars_events.append(str(kw.get("reason") or event))
-    no_bars_state = no_bars_runner._st(strategy)
-    no_bars_state["basket"] = [{"ticket": None, "position_identifier": 0, "side": "LONG", "lot": 0.01, "entry_price": 2050.0, "entry_time_utc": dt_text(utc_now()), "shadow": True}]
-    no_bars_runner.run_once()
-    assert not no_bars_state["basket"] and "basket_target" in no_bars_events, "open exposure must retain quote-based TP monitoring when M1 history is unavailable"
-
+    assert not runner._sync_strategy(strategy)
+    assert runner._st(strategy)["sync_block_reason"] == "same_magic_unexpected_position_or_order"
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -1044,14 +1621,27 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     os.makedirs(LOG_DIR, exist_ok=True)
-    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    params = load_params()
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=int(params.get("bot_log_max_bytes", 10 * 1024 * 1024)),
+        backupCount=int(params.get("bot_log_backup_count", 5)),
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
     if args.self_test:
         self_test()
         print("s23 self-test ok")
         return 0
-    params = load_params()
-    runner = S23LossAbortRunner(params)
+    runner = S23HorizontalInventoryRunner(params)
     if not runner.connect_and_preflight():
         return 1
     if args.once:

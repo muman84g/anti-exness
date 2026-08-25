@@ -191,6 +191,35 @@ def clean_sync_block_if_flat(
     return True
 
 
+def clear_recoverable_sync_block_after_clean_sync(
+    *,
+    symbol_key: str,
+    state: dict[str, Any],
+    save_state: Callable[[], None],
+    audit: Callable[[str, str, str], None] | None = None,
+    options: LiveSafetyOptions | None = None,
+) -> bool:
+    """Clear a recoverable block after the caller proves a complete owned sync."""
+
+    opts = options or LiveSafetyOptions()
+    if opts.clear_recoverable_sync_block is not True:
+        return False
+    if not state.get("sync_block_new_entries") or not state.get("sync_block_recoverable"):
+        return False
+    reason = str(state.get("sync_block_reason") or "")
+    state["sync_block_new_entries"] = False
+    state["sync_block_reason"] = None
+    state["sync_block_recoverable"] = False
+    state["sync_block_details"] = {}
+    state["flat_clear_confirmation_count"] = 0
+    state["flat_clear_confirmation_reason"] = None
+    if audit and opts.audit_log is True:
+        audit(symbol_key, "sync_block_cleared_owned", reason)
+    if opts.save_state_after_clear is True:
+        save_state()
+    return True
+
+
 def audit_sync_snapshot(
     *,
     symbol_key: str,
