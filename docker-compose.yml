@@ -600,7 +600,7 @@ services:
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
 
-  # ---- Bot 23 (S23 XAUUSD shadow-first) ----
+  # ---- Bot 23 (S23 XAUUSD ZA four-lane horizontal inventory) ----
   exness-bot-23:
     image: exness-bot:latest
     container_name: exness-bot-23
@@ -618,6 +618,7 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot23/live_config.py:/app/bot23/live_config.py:ro
       - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
+      - ./bot23/shadow_opportunity_observer.py:/app/bot23/shadow_opportunity_observer.py:ro
       - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro
       - ./bot23/live_executor.py:/app/bot23/live_executor.py:ro
       - ./bot23/live_safety.py:/app/bot23/live_safety.py:ro

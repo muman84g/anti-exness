@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""S23 ZA four-lane horizontal inventory shadow/live runner."""
+"""S23 ZA four-lane inventory with the frozen reverse_d60 entry policy."""
 
 from __future__ import annotations
 
@@ -41,6 +41,10 @@ from live_safety import (
 )
 from live_manual_alerts import notify_manual_action_required
 from live_config import MT5_LOGIN, MT5_SERVER
+try:
+    from shadow_opportunity_observer import ShadowOpportunityObserver
+except ImportError:
+    ShadowOpportunityObserver = None  # type: ignore[assignment,misc]
 
 
 UTC = timezone.utc
@@ -48,8 +52,13 @@ EXPECTED_S23_MAGICS = (230023, 230024, 230025, 230026)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-za-horizontal-inventory-v001"
+EXPECTED_CANDIDATE_ID = "bot23-late-short-30m-action-matrix-v001"
 EXPECTED_ROUTING_MODE = "first_consuming_lane_preserve_primary_v1"
+EXPECTED_ENTRY_POLICY_ID = "reverse_d60"
+EXPECTED_ENTRY_POLICY_PARAMS_HASH = "40475d07b84eabc1b1290bee6787113903f374ca90cf2ca271c82b825b313572"
+EXPECTED_LATE_SHORT_LOOKBACK = 30
+EXPECTED_LATE_SHORT_DROP_THRESHOLD = 0.006
+EXPECTED_LATE_SHORT_ACTION = "reverse_long"
 FROZEN_LANE_FIELDS = {
     "lot": 0.01,
     "session_start_utc": 13,
@@ -223,10 +232,79 @@ class S23HorizontalInventoryRunner:
         self.dm = MT5DataManager(self.safety)
         self.executor = MT5Executor()
         self._suppress_manual_alerts = False
+        self._entry_policy_state_migrated = False
         self.state = self._load_state()
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
         self._last_retained_block_warning: dict[int, tuple[str, str]] = {}
+        self.shadow_observer: Any = None
+        self._shadow_observer_error_signature: str | None = None
+        try:
+            if ShadowOpportunityObserver is None:
+                logging.error("S23 shadow observer module unavailable; trading continues without passive evidence")
+            else:
+                self.shadow_observer = ShadowOpportunityObserver(
+                    params.get("shadow_opportunity_observer", {}),
+                    log_dir=LOG_DIR,
+                    state_dir=STATE_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                    contract_size=float(params.get("contract_size", 100.0)),
+                    lot=float(params.get("default_lot", 0.01)),
+                )
+        except Exception as exc:
+            logging.error("S23 shadow observer disabled after initialization failure: %s", exc)
+
+    def _observer_call(self, method: str, **kwargs: Any) -> Any:
+        observer = self.shadow_observer
+        if observer is None or not observer.enabled:
+            return None
+        try:
+            result = getattr(observer, method)(**kwargs)
+            self._shadow_observer_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._shadow_observer_error_signature:
+                logging.error("S23 shadow observer failure ignored by trading path: %s", signature)
+                self._shadow_observer_error_signature = signature
+            return None
+
+    def _shadow_context(
+        self,
+        price_row: pd.Series,
+        info: Any,
+        lane_readiness: dict[int, tuple[bool, str, bool]],
+    ) -> dict[str, Any]:
+        lane_positions: dict[str, int] = {}
+        lane_pending: dict[str, bool] = {}
+        readiness: dict[str, dict[str, Any]] = {}
+        long_positions = 0
+        short_positions = 0
+        for strat in self.params["strategies"]:
+            lane_id = int(strat["lane_id"])
+            basket = list(self._st(strat).get("basket") or [])
+            lane_positions[str(lane_id)] = len(basket)
+            lane_pending[str(lane_id)] = bool(self._st(strat).get("pending_entry_side"))
+            ready, reason, consumed = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
+            readiness[str(lane_id)] = {"ready": bool(ready), "reason": str(reason), "consumed": bool(consumed)}
+            for position in basket:
+                side = str(position.get("side") or "").upper()
+                long_positions += int(side == "LONG")
+                short_positions += int(side == "SHORT")
+        point = float(self.params.get("point_size", 0.001))
+        spread_price = max(0.0, float(info.ask) - float(info.bid))
+        return {
+            "spread_points": spread_price / point if point > 0 else "",
+            "atr30": price_row.get("atr30", ""),
+            "ret10": price_row.get("ret10", ""),
+            "vol_ratio": price_row.get("vol_ratio", ""),
+            "portfolio_positions": long_positions + short_positions,
+            "long_positions": long_positions,
+            "short_positions": short_positions,
+            "lane_positions": lane_positions,
+            "lane_pending": lane_pending,
+            "lane_readiness": readiness,
+        }
 
     def _default_state(self) -> dict[str, Any]:
         return {
@@ -241,6 +319,8 @@ class S23HorizontalInventoryRunner:
                 "last_routed_opportunity_id": None,
                 "last_consumed_lane_id": None,
                 "last_route_decision_utc": None,
+                "entry_policy_id": str(self.params.get("entry_policy_id", EXPECTED_ENTRY_POLICY_ID)),
+                "entry_policy_params_hash": str(self.params.get("entry_policy_params_hash", EXPECTED_ENTRY_POLICY_PARAMS_HASH)),
             },
             "strategies": {
                 s["id"]: {
@@ -334,6 +414,9 @@ class S23HorizontalInventoryRunner:
                 st["sync_block_reason"] = "state_identity_mismatch"
                 st["sync_block_recoverable"] = False
                 st["sync_block_details"] = {"observed": observed_identity, "expected": {"bot": default["bot"], "strategy_id": default["strategy_id"], "version": default["version"]}}
+        observed_routing = state.get("routing") if isinstance(state.get("routing"), dict) else {}
+        observed_entry_policy_id = observed_routing.get("entry_policy_id")
+        observed_entry_policy_hash = observed_routing.get("entry_policy_params_hash")
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -342,6 +425,37 @@ class S23HorizontalInventoryRunner:
             state["strategies"].setdefault(sid, st)
             for key, value in st.items():
                 state["strategies"][sid].setdefault(key, value)
+        routing = state["routing"]
+        expected_policy_id = str(self.params.get("entry_policy_id", EXPECTED_ENTRY_POLICY_ID))
+        expected_policy_hash = str(self.params.get("entry_policy_params_hash", EXPECTED_ENTRY_POLICY_PARAMS_HASH))
+        if (
+            observed_entry_policy_id != expected_policy_id
+            or observed_entry_policy_hash != expected_policy_hash
+        ):
+            # Existing open baskets remain under the unchanged four-lane close
+            # contract.  Only unsubmitted local pending entries from the prior
+            # entry policy are discarded so they cannot fill after cutover.
+            pending_fields = (
+                "pending_entry_side",
+                "pending_entry_target",
+                "pending_entry_expires_utc",
+                "pending_entry_atr30",
+                "pending_entry_signal_bar",
+                "pending_entry_opportunity_id",
+                "pending_entry_event_time",
+                "pending_entry_release_time",
+            )
+            for strat in self.params["strategies"]:
+                lane_state = state["strategies"][strat["id"]]
+                for key in pending_fields:
+                    lane_state[key] = None
+            routing["entry_policy_id"] = expected_policy_id
+            routing["entry_policy_params_hash"] = expected_policy_hash
+            self._entry_policy_state_migrated = True
+            logging.warning(
+                "S23 entry policy state migrated to %s; prior unsubmitted pending entries were cleared",
+                expected_policy_id,
+            )
         return state
 
     def _save_state(self) -> None:
@@ -661,6 +775,9 @@ class S23HorizontalInventoryRunner:
             if bool(self.params.get("require_hedging_account", True)) and int(account.get("margin_mode", -1)) != HEDGING_MARGIN_MODE:
                 logging.critical("S23 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
                 return False
+        if self._entry_policy_state_migrated:
+            self._save_state()
+            self._entry_policy_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -670,6 +787,23 @@ class S23HorizontalInventoryRunner:
             return f"invalid_candidate_id={self.params.get('candidate_id')} expected={EXPECTED_CANDIDATE_ID}"
         if str(self.params.get("routing_mode") or "") != EXPECTED_ROUTING_MODE:
             return f"invalid_routing_mode={self.params.get('routing_mode')} expected={EXPECTED_ROUTING_MODE}"
+        if str(self.params.get("entry_policy_id") or "") != EXPECTED_ENTRY_POLICY_ID:
+            return f"invalid_entry_policy_id={self.params.get('entry_policy_id')} expected={EXPECTED_ENTRY_POLICY_ID}"
+        if str(self.params.get("entry_policy_params_hash") or "") != EXPECTED_ENTRY_POLICY_PARAMS_HASH:
+            return "invalid_entry_policy_params_hash"
+        if not bool(self.params.get("late_short_30m_action_enabled", False)):
+            return "late_short_30m_action_disabled"
+        if int(self.params.get("late_short_lookback_completed_m1_bars") or 0) != EXPECTED_LATE_SHORT_LOOKBACK:
+            return f"invalid_late_short_lookback={self.params.get('late_short_lookback_completed_m1_bars')}"
+        if not math.isclose(
+            float(self.params.get("late_short_drop_threshold") or 0.0),
+            EXPECTED_LATE_SHORT_DROP_THRESHOLD,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            return f"invalid_late_short_drop_threshold={self.params.get('late_short_drop_threshold')}"
+        if str(self.params.get("late_short_action") or "") != EXPECTED_LATE_SHORT_ACTION:
+            return f"invalid_late_short_action={self.params.get('late_short_action')}"
         if int(self.params.get("lane_count") or 0) != 4:
             return f"invalid_lane_count={self.params.get('lane_count')} expected=4"
         strategies = [row for row in self.params.get("strategies", []) if bool(row.get("enabled", True))]
@@ -688,6 +822,9 @@ class S23HorizontalInventoryRunner:
         if any(not prefix.startswith("s23_") for prefix in prefixes) or len(prefixes) != len(set(prefixes)):
             return f"invalid_or_duplicate_comment_prefixes={prefixes}"
         for row in strategies:
+            expected_spec = f"bot23_late_short_30m_action_matrix_v001_reverse_d60_lane_{int(row['lane_id'])}"
+            if str(row.get("spec_id") or "") != expected_spec:
+                return f"invalid_lane_spec_id:{row.get('id')}:{row.get('spec_id')} expected={expected_spec}"
             drift = {key: {"actual": row.get(key), "expected": expected} for key, expected in FROZEN_LANE_FIELDS.items() if row.get(key) != expected}
             if drift:
                 return f"frozen_lane_contract_drift:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
@@ -737,6 +874,70 @@ class S23HorizontalInventoryRunner:
         if short_ok:
             return "SHORT"
         return None
+
+    def _apply_entry_policy(
+        self,
+        raw_side: str,
+        bars: pd.DataFrame,
+        info: Any,
+    ) -> tuple[str | None, dict[str, Any]]:
+        policy = {
+            "policy_id": str(self.params.get("entry_policy_id", "")),
+            "raw_side": raw_side,
+            "effective_side": raw_side,
+            "action": "unchanged",
+            "reason": "not_short",
+            "lookback_completed_m1_bars": int(self.params.get("late_short_lookback_completed_m1_bars", 0)),
+            "drop_threshold": float(self.params.get("late_short_drop_threshold", 0.0)),
+            "prior30_close": None,
+            "signal_bid": None,
+            "decline_ratio": None,
+        }
+        if raw_side != "SHORT" or not bool(self.params.get("late_short_30m_action_enabled", False)):
+            return raw_side, policy
+        lookback = int(policy["lookback_completed_m1_bars"])
+        if lookback <= 0 or len(bars) < lookback + 1:
+            policy.update({"effective_side": None, "action": "blocked", "reason": "insufficient_completed_m1_history"})
+            return None, policy
+        try:
+            # At the first executable poll after signal-bar completion, -31 is
+            # the completed-M1 close exactly 30 minutes before the current
+            # executable quote.  The quote itself, not the signal-bar close,
+            # matches the frozen tick replay definition.
+            prior_close = float(bars["Close"].iloc[-(lookback + 1)])
+            signal_bid = float(info.bid)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            policy.update({"effective_side": None, "action": "blocked", "reason": "late_short_price_unavailable"})
+            return None, policy
+        if not math.isfinite(prior_close) or prior_close <= 0.0 or not math.isfinite(signal_bid):
+            policy.update({"effective_side": None, "action": "blocked", "reason": "late_short_price_invalid"})
+            return None, policy
+        decline = (signal_bid - prior_close) / prior_close
+        policy.update({"prior30_close": prior_close, "signal_bid": signal_bid, "decline_ratio": decline})
+        if decline <= -float(policy["drop_threshold"]):
+            if str(self.params.get("late_short_action")) != "reverse_long":
+                policy.update({"effective_side": None, "action": "blocked", "reason": "unsupported_late_short_action"})
+                return None, policy
+            policy.update({"effective_side": "LONG", "action": "reverse_long", "reason": "late_short_drop_threshold_met"})
+            return "LONG", policy
+        policy["reason"] = "late_short_drop_threshold_not_met"
+        return "SHORT", policy
+
+    @staticmethod
+    def _entry_policy_note(policy: dict[str, Any]) -> str:
+        values = {
+            "policy": policy.get("policy_id"),
+            "raw_side": policy.get("raw_side"),
+            "effective_side": policy.get("effective_side"),
+            "action": policy.get("action"),
+            "reason": policy.get("reason"),
+            "lookback": policy.get("lookback_completed_m1_bars"),
+            "threshold": policy.get("drop_threshold"),
+            "prior30_close": policy.get("prior30_close"),
+            "signal_bid": policy.get("signal_bid"),
+            "decline_ratio": policy.get("decline_ratio"),
+        }
+        return ";".join(f"{key}={value}" for key, value in values.items())
 
     def _basket_pnl(self, strat: dict[str, Any], bid: float, ask: float) -> float:
         pnl = 0.0
@@ -1390,7 +1591,7 @@ class S23HorizontalInventoryRunner:
         info: Any,
         poll_time: pd.Timestamp,
         lane_readiness: dict[int, tuple[bool, str, bool]],
-    ) -> None:
+    ) -> tuple[int | None, str]:
         routing = self.state["routing"]
         routing["last_routed_signal_bar"] = opportunity["event_time"]
         routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
@@ -1399,7 +1600,15 @@ class S23HorizontalInventoryRunner:
         self._save_state()  # durable reservation before any possible OPEN
         primary = self.params["strategies"][0]
         fields = self._opportunity_fields(opportunity)
-        self._trade_row("raw_opportunity", primary, side=opportunity["side"], reason="legacy_za_confirmed_m1_impulse", **fields)
+        policy = dict(opportunity.get("entry_policy") or {})
+        self._trade_row(
+            "raw_opportunity",
+            primary,
+            side=opportunity["side"],
+            reason=str(policy.get("reason") or "legacy_za_confirmed_m1_impulse"),
+            note=self._entry_policy_note(policy) if policy else "",
+            **fields,
+        )
         for strat in self.params["strategies"]:
             lane_id = int(strat["lane_id"])
             ready, prep_reason, prep_consumed = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
@@ -1407,7 +1616,7 @@ class S23HorizontalInventoryRunner:
                 self._trade_row("opportunity_consumed", strat, reason=prep_reason, **fields)
                 routing["last_consumed_lane_id"] = lane_id
                 self._save_state()
-                return
+                return lane_id, prep_reason
             if not ready:
                 self._trade_row("opportunity_noop", strat, reason=prep_reason, **fields)
                 continue
@@ -1416,9 +1625,10 @@ class S23HorizontalInventoryRunner:
             if consumed:
                 routing["last_consumed_lane_id"] = lane_id
                 self._save_state()
-                return
+                return lane_id, reason
         self._trade_row("opportunity_unconsumed", primary, reason="all_lanes_noop", **fields)
         self._save_state()
+        return None, "all_lanes_noop"
 
     def run_once(self) -> None:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
@@ -1437,6 +1647,7 @@ class S23HorizontalInventoryRunner:
                         )
             self._save_state()
             return
+        self._observer_call("observe_quote", at=utc_now(), bid=float(info.bid), ask=float(info.ask))
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -1466,27 +1677,33 @@ class S23HorizontalInventoryRunner:
             if bool(strat.get("enabled", True)):
                 lane_readiness[int(strat["lane_id"])] = self._prepare_lane(strat, price_row, info, poll_time)
         primary = self.params["strategies"][0]
-        side = self._signal(price_row, primary)
+        raw_side = self._signal(price_row, primary)
         signal_bar_text = dt_text(signal_bar)
         routing = self.state["routing"]
-        if side and routing.get("last_routed_signal_bar") != signal_bar_text:
+        if raw_side and routing.get("last_routed_signal_bar") != signal_bar_text:
+            side, entry_policy = self._apply_entry_policy(raw_side, bars, info)
             release_time = signal_bar + pd.Timedelta(minutes=1)
             opportunity = {
-                "opportunity_id": f"{symbol}|{signal_bar_text}|{side}",
-                "side": side,
+                "opportunity_id": f"{symbol}|{signal_bar_text}|{raw_side}|{side or 'BLOCKED'}|{entry_policy['policy_id']}",
+                "side": side or raw_side,
+                "raw_side": raw_side,
+                "effective_side": side or "",
+                "entry_policy": entry_policy,
                 "event_time": signal_bar_text,
                 "release_time": dt_text(release_time),
                 "available_time": dt_text(release_time),
                 "decision_time": dt_text(poll_time),
                 "executable_at": dt_text(poll_time),
             }
-            stale = stale_signal_decision(
-                str(price_row.name),
-                timeframe_hours=1.0 / 60.0,
-                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
-                options=self.safety,
+            self._observer_call(
+                "register_opportunity",
+                opportunity=opportunity,
+                at=poll_time,
+                bid=float(info.bid),
+                ask=float(info.ask),
+                context=self._shadow_context(price_row, info, lane_readiness),
             )
-            if stale.stale:
+            if side is None:
                 routing["last_routed_signal_bar"] = signal_bar_text
                 routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
                 routing["last_consumed_lane_id"] = None
@@ -1494,14 +1711,61 @@ class S23HorizontalInventoryRunner:
                 self._trade_row(
                     "opportunity_rejected",
                     primary,
-                    side=side,
-                    reason="stale_signal_skip",
-                    note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc}",
+                    side=raw_side,
+                    reason=str(entry_policy["reason"]),
+                    note=self._entry_policy_note(entry_policy),
                     **self._opportunity_fields(opportunity),
+                )
+                self._observer_call(
+                    "record_route",
+                    opportunity_id=opportunity["opportunity_id"],
+                    at=poll_time,
+                    status="policy_rejected",
+                    consumed_lane_id=None,
+                    reason=str(entry_policy["reason"]),
                 )
                 self._save_state()
             else:
-                self._route_opportunity(opportunity, price_row, info, poll_time, lane_readiness)
+                stale = stale_signal_decision(
+                    str(price_row.name),
+                    timeframe_hours=1.0 / 60.0,
+                    max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                    options=self.safety,
+                )
+                if stale.stale:
+                    routing["last_routed_signal_bar"] = signal_bar_text
+                    routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
+                    routing["last_consumed_lane_id"] = None
+                    routing["last_route_decision_utc"] = dt_text(poll_time)
+                    self._trade_row(
+                        "opportunity_rejected",
+                        primary,
+                        side=side,
+                        reason="stale_signal_skip",
+                        note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc};{self._entry_policy_note(entry_policy)}",
+                        **self._opportunity_fields(opportunity),
+                    )
+                    self._observer_call(
+                        "record_route",
+                        opportunity_id=opportunity["opportunity_id"],
+                        at=poll_time,
+                        status="stale_rejected",
+                        consumed_lane_id=None,
+                        reason="stale_signal_skip",
+                    )
+                    self._save_state()
+                else:
+                    consumed_lane_id, route_reason = self._route_opportunity(
+                        opportunity, price_row, info, poll_time, lane_readiness
+                    )
+                    self._observer_call(
+                        "record_route",
+                        opportunity_id=opportunity["opportunity_id"],
+                        at=poll_time,
+                        status="consumed" if consumed_lane_id is not None else "unconsumed",
+                        consumed_lane_id=consumed_lane_id,
+                        reason=route_reason,
+                    )
         now = time.time()
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 60)):
             logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self.params["strategies"]})
@@ -1583,10 +1847,16 @@ def self_test() -> None:
     params = json.loads(json.dumps(load_params()))
     params["live_trading_enabled"] = False
     params["shadow_forward_enabled"] = True
+    params["shadow_opportunity_observer"]["enabled"] = False
     params["safety"]["stale_signal_guard"] = False
     strategy = params["strategies"][0]
-    assert params["candidate_id"] == "bot23-za-horizontal-inventory-v001"
+    assert params["candidate_id"] == EXPECTED_CANDIDATE_ID
     assert params["routing_mode"] == "first_consuming_lane_preserve_primary_v1"
+    assert params["entry_policy_id"] == EXPECTED_ENTRY_POLICY_ID
+    assert params["entry_policy_params_hash"] == EXPECTED_ENTRY_POLICY_PARAMS_HASH
+    assert int(params["late_short_lookback_completed_m1_bars"]) == EXPECTED_LATE_SHORT_LOOKBACK
+    assert math.isclose(float(params["late_short_drop_threshold"]), EXPECTED_LATE_SHORT_DROP_THRESHOLD)
+    assert params["late_short_action"] == EXPECTED_LATE_SHORT_ACTION
     assert int(params["lane_count"]) == 4
     assert tuple(int(row["magic"]) for row in params["strategies"]) == EXPECTED_S23_MAGICS
     assert [int(row["lane_id"]) for row in params["strategies"]] == [1, 2, 3, 4]
@@ -1599,6 +1869,16 @@ def self_test() -> None:
     runner._save_state = lambda: None
     runner._trade_row = lambda *_args, **_kwargs: None
     assert runner._ownership_namespace_error() is None
+    policy_bars = pd.DataFrame(
+        {"Close": [4640.0] + [4615.0] * 30},
+        index=pd.date_range("2026-08-25 12:30:00", periods=31, freq="1min", tz="UTC"),
+    )
+    effective, policy = runner._apply_entry_policy("SHORT", policy_bars, SimpleNamespace(bid=4610.0, ask=4610.2))
+    assert effective == "LONG" and policy["action"] == "reverse_long"
+    effective, policy = runner._apply_entry_policy("SHORT", policy_bars, SimpleNamespace(bid=4615.0, ask=4615.2))
+    assert effective == "SHORT" and policy["action"] == "unchanged"
+    effective, policy = runner._apply_entry_policy("LONG", policy_bars, SimpleNamespace(bid=4610.0, ask=4610.2))
+    assert effective == "LONG" and policy["reason"] == "not_short"
     state = runner._st(strategy)
     state["frozen_basket_atr30"] = 1.5
     assert runner._exit_thresholds(strategy) == (5.25, 9.75, 1.5)
