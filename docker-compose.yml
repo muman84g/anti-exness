@@ -692,7 +692,7 @@ services:
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
 
-  # ---- Bot 25 (S25 XAUUSD shadow-first) ----
+  # ---- Bot 25 (S25 man_231 XAUUSD bilateral book; live authorized) ----
   exness-bot-25:
     image: exness-bot:latest
     container_name: exness-bot-25
@@ -713,6 +713,7 @@ services:
       - ./bot25/live_data_fetcher.py:/app/bot25/live_data_fetcher.py:ro
       - ./bot25/live_executor.py:/app/bot25/live_executor.py:ro
       - ./bot25/live_safety.py:/app/bot25/live_safety.py:ro
+      - ./bot25/live_manual_alerts.py:/app/bot25/live_manual_alerts.py:ro
       - ./bot25/ea_bridge.py:/app/bot25/ea_bridge.py:ro
       - ./bot25/s25_params.json:/app/bot25/s25_params.json:ro
       - ./bot25/BotBridge_s25.mq5:/app/bot25/BotBridge_s25.mq5:ro
@@ -735,6 +736,11 @@ services:
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_ENABLED=1
+      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+      - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - BOT25_ENABLE_REAL_TRADING=MAN231_LIVE_ACK
 
   # ---- Bot 22 (S22 EURUSD squeeze-pullback shadow-first) ----
   exness-bot-22:

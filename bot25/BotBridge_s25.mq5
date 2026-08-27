@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s25"
-#define BRIDGE_VERSION "2026-08-14-s25-shared-account-v1"
+#define BRIDGE_VERSION "2026-08-27-s25-man231-ops-v5"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,CLOSEDEAL,MODIFY,CANCEL,CLOSE"
 
 input string InpCommandFile = "cmd_s25.txt";
@@ -120,13 +120,19 @@ string HandleCommand(const string command)
       long account_trade_expert = AccountInfoInteger(ACCOUNT_TRADE_EXPERT);
       long terminal_trade_allowed = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
       long mql_trade_allowed = MQLInfoInteger(MQL_TRADE_ALLOWED);
-      return StringFormat("OK|%d|%s|%d|%d|%d|%d",
+      long account_login = AccountInfoInteger(ACCOUNT_LOGIN);
+      string account_server = AccountInfoString(ACCOUNT_SERVER);
+      string account_currency = AccountInfoString(ACCOUNT_CURRENCY);
+      return StringFormat("OK|%d|%s|%d|%d|%d|%d|%I64d|%s|%s",
          (int)margin_mode,
          MarginModeName(margin_mode),
          (int)account_trade_allowed,
          (int)account_trade_expert,
          (int)terminal_trade_allowed,
-         (int)mql_trade_allowed);
+         (int)mql_trade_allowed,
+         account_login,
+         account_server,
+         account_currency);
    }
 
    if(op == "INFO" && n >= 2)
@@ -144,9 +150,9 @@ string HandleCommand(const string command)
       double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
       int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
-      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d",
+      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d|%I64d",
          tick.ask, tick.bid, AccountInfoDouble(ACCOUNT_MARGIN_FREE), point, min_vol, max_vol, vol_step,
-         tick_value, tick_size, contract, digits, stops_level);
+         tick_value, tick_size, contract, digits, stops_level, (long)tick.time_msc);
    }
 
    if(op == "HIST" && n >= 4)
@@ -170,13 +176,14 @@ string HandleCommand(const string command)
       for(int i = copied - 1; i >= 0; --i)
       {
          string bar_time = TimeToString(rates[i].time, TIME_DATE | TIME_MINUTES);
-         response += "|" + StringFormat("%s,%.10f,%.10f,%.10f,%.10f,%I64d",
+         response += "|" + StringFormat("%s,%.10f,%.10f,%.10f,%.10f,%I64d,%I64d",
             bar_time,
             rates[i].open,
             rates[i].high,
             rates[i].low,
             rates[i].close,
-            (long)rates[i].tick_volume);
+            (long)rates[i].tick_volume,
+            (long)rates[i].time);
       }
       return response;
    }
@@ -296,6 +303,16 @@ string HandleCommand(const string command)
       if(!HistorySelect(from_time, TimeCurrent() + 60))
          return StringFormat("ERR|CLOSEDEAL_HISTORY|%d", GetLastError());
       int total = HistoryDealsTotal();
+      ulong close_deal = 0;
+      string close_symbol = "";
+      long close_magic = 0;
+      long close_reason = 0;
+      double close_price = 0.0;
+      datetime close_time = 0;
+      double total_profit = 0.0;
+      double total_commission = 0.0;
+      double total_swap = 0.0;
+      double total_fee = 0.0;
       for(int i = total - 1; i >= 0; --i)
       {
          ulong deal = HistoryDealGetTicket(i);
@@ -304,21 +321,25 @@ string HandleCommand(const string command)
          if((ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != position_id)
             continue;
          long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
-            continue;
-         string symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
-         long magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
-         long reason = HistoryDealGetInteger(deal, DEAL_REASON);
-         double price = HistoryDealGetDouble(deal, DEAL_PRICE);
-         double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
-         double commission = HistoryDealGetDouble(deal, DEAL_COMMISSION);
-         double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
-         double fee = HistoryDealGetDouble(deal, DEAL_FEE);
+         total_profit += HistoryDealGetDouble(deal, DEAL_PROFIT);
+         total_commission += HistoryDealGetDouble(deal, DEAL_COMMISSION);
+         total_swap += HistoryDealGetDouble(deal, DEAL_SWAP);
+         total_fee += HistoryDealGetDouble(deal, DEAL_FEE);
          datetime deal_time = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
-         return StringFormat("OK|FOUND|%I64u|%I64u|%s|%d|%s|%.10f|%.2f|%.2f|%.2f|%.2f|%d",
-            deal, position_id, symbol, (int)magic, EnumToString((ENUM_DEAL_REASON)reason),
-            price, profit, commission, swap, fee, (int)deal_time);
+         if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && deal_time >= close_time)
+         {
+            close_deal = deal;
+            close_symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
+            close_magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+            close_reason = HistoryDealGetInteger(deal, DEAL_REASON);
+            close_price = HistoryDealGetDouble(deal, DEAL_PRICE);
+            close_time = deal_time;
+         }
       }
+      if(close_deal > 0)
+         return StringFormat("OK|FOUND|%I64u|%I64u|%s|%d|%s|%.10f|%.2f|%.2f|%.2f|%.2f|%d",
+            close_deal, position_id, close_symbol, (int)close_magic, EnumToString((ENUM_DEAL_REASON)close_reason),
+            close_price, total_profit, total_commission, total_swap, total_fee, (int)close_time);
       return "OK|NONE";
    }
 

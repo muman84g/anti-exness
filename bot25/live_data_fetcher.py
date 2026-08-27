@@ -37,7 +37,7 @@ class MT5DataManager:
         rows: list[dict[str, Any]] = []
         for item in res[3:].split("|"):
             parts = [part.strip() for part in item.split(",")]
-            if len(parts) < 6:
+            if len(parts) < 7:
                 continue
             try:
                 rows.append(
@@ -48,6 +48,7 @@ class MT5DataManager:
                         "Low": float(parts[3]),
                         "Close": float(parts[4]),
                         "Volume": int(float(parts[5])),
+                        "Epoch": int(float(parts[6])),
                     }
                 )
             except ValueError:
@@ -55,10 +56,7 @@ class MT5DataManager:
         if not rows:
             return None
         df = pd.DataFrame(rows)
-        try:
-            idx = pd.DatetimeIndex(pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M"))
-        except ValueError:
-            idx = pd.DatetimeIndex(pd.to_datetime(df["time"]))
+        idx = pd.DatetimeIndex(pd.to_datetime(df["Epoch"], unit="s", utc=True))
         df.index = idx
         bars = df[["Open", "High", "Low", "Close", "Volume"]]
         return normalize_hist_bars(

@@ -1,6 +1,6 @@
 # Bot / Backtest Map
 
-Last updated: 2026-08-25
+Last updated: 2026-08-27
 
 This file is the central entry point for bot-to-backtest mapping. Check this before relying on scattered README, HANDOFF, or SOURCE_BACKTEST notes.
 
@@ -23,7 +23,7 @@ Runtime status is intentionally not authoritative in this file. Verify current c
 | bot22 / S22 | `exness-bot-22` | `bot22` | `bot関連backtest/backtest108_1_bot22` | `SOURCE_BACKTEST.md`: Bollinger squeeze-breakout pullback `man_024_v002 / EURUSD_005_1h`, params hash `f97149f97d028e98`. | Live-order params enabled by explicit user instruction on 2026-07-26. `clean_reusable_eval=false`; forward/live operation only. Service deployment, bridge attachment, or restart are separate runtime actions. |
 | bot23 / S23 | `exness-bot-23` | `bot23` | `bot関連backtest/backtest152` | `SOURCE_BACKTEST.md`: forward-only XAUUSD true-tick candidate `ZA_atr20_regime_switch`, final evidence `20260823_bot23_weekly_diagnosis_dev_cycle_v1/rebased_v8`. | ATR30<2.0でz2→1σ pullback、spread/ATR<=0.10、ATR出口3.5/6.5/1.0。close/pending fillはcurrent Bid/Askを5秒poll。Deploy/restart未実施。 |
 | bot24 / S24 | `exness-bot-24` | `bot24` | `bot関連backtest/backtest152/archive/bot23_fixed3_opt2_20260814` | `SOURCE_BACKTEST.md`: frozen XAUUSD M1 candidate `visual_no_adverse_c:target16` (`man_028_v002`, hash `54324f...`). | Historical source was consolidated under backtest152; live configuration unchanged. |
-| bot25 / S25 | `exness-bot-25` | `bot25` | `bot関連backtest/backtest152/archive/bot23_fixed3_opt2_20260814` | `SOURCE_BACKTEST.md`: frozen XAUUSD M1 candidate `h14_18_h120_tp12_dd40_vol105_impulseonly_all_all:target16` (`man_028_v002`, hash `54324f...`). | Historical source was consolidated under backtest152; live configuration unchanged. |
+| bot25 / S25 | `exness-bot-25` | `bot25` | `検討中/chatgpt案/多重ポジ/20260827_XAUUSD_break比率wavefront` | `SOURCE_BACKTEST.md`: XAUUSD completed-M5 `man_231` continuous bilateral inventory, best-price core + profitable satellite release (hash `589b6e...`). | 2026-08-27に旧ReactVolを置換し、ユーザー明示承認により`live=true` / `shadow=false`と独立環境gateを設定。CentOS service recreation、更新EA装着、runtime preflightと初回約定確認は現在証跡で確認する。 |
 | bot26 / S26 | `exness-bot-26` | `bot26` | `bot関連backtest/0_bot26実装PV2C520_OOS_001` | `SOURCE_BACKTEST.md`: 注文対象USTEC、参照専用USOIL、XAUUSD非対象。`PV2C520_DEVQ80_H75_FORWARD_R1`、actual fill基準75分hold。USTEC最小/configured lot `0.05`。 | User-authorized live (`live=true`, `shadow=false`)。Observed leakcheck反転悪化により2026-08-24に改善前へ復元。Deploy/restart/real order未実施。 |
 | bot27 / S27 | `exness-bot-27` | `bot27` | `backtest/bot関連backtest/0_bot27実装PV2C859_OOS_001` | `SOURCE_BACKTEST.md`: 注文対象USTEC、XAUUSD非対象。`PV2C859_DEVQ825_H90_FORWARD_R1`、actual fill基準90分hold。USTEC最小/configured lot `0.05`。 | User-authorized live (`live=true`, `shadow=false`)。Observed leakcheck反転悪化により2026-08-24に改善前へ復元。Deploy/restart/real order未実施。 |
 | bot28 / S28 | `exness-bot-28` | `bot28` | `bot関連backtest/0_bot28実装PV2C560_OOS_001` | `SOURCE_BACKTEST.md`: 注文対象USTEC、XAUUSD非対象。`PV2C560_DEVQ80_H75_FORWARD_R1`、decision基準75分hold。USTEC最小/configured lot `0.05`。 | User-authorized live (`live=true`, `shadow=false`)。DEV固定選択、既観測診断は昇格根拠外。Deploy/restart/real order未検証。 |

@@ -29,6 +29,7 @@ class SymbolInfo:
     volume_step: float
     digits: int
     stops_level: int
+    quote_time_msc: int
 
 
 @dataclass
@@ -82,6 +83,8 @@ class CloseResult:
 class MT5Executor:
     def __init__(self) -> None:
         self.last_order_error: str | None = None
+        self.last_open_deal: int | None = None
+        self.last_open_price: float | None = None
 
     def get_bridge_capabilities(self) -> dict[str, Any] | None:
         res = ea_bridge.send_command("CAPS|", timeout=10)
@@ -104,6 +107,9 @@ class MT5Executor:
                 "margin_mode": int(parts[1]), "margin_mode_name": parts[2],
                 "account_trade_allowed": bool(int(parts[3])), "account_trade_expert": bool(int(parts[4])),
                 "terminal_trade_allowed": bool(int(parts[5])), "mql_trade_allowed": bool(int(parts[6])),
+                "login": int(parts[7]) if len(parts) >= 9 else None,
+                "server": parts[8] if len(parts) >= 9 else None,
+                "currency": parts[9] if len(parts) >= 10 else None,
             }
         except (TypeError, ValueError):
             return None
@@ -113,13 +119,14 @@ class MT5Executor:
         if not res or not res.startswith("OK|"):
             return None
         parts = res.split("|")
-        if len(parts) < 13:
+        if len(parts) < 14:
             return None
         try:
             return SymbolInfo(
                 ask=float(parts[1]), bid=float(parts[2]), point=float(parts[4]),
                 volume_min=float(parts[5]), volume_max=float(parts[6]), volume_step=float(parts[7]),
                 digits=int(float(parts[11])), stops_level=int(float(parts[12])),
+                quote_time_msc=int(float(parts[13])),
             )
         except (TypeError, ValueError):
             return None
@@ -205,6 +212,8 @@ class MT5Executor:
         deviation: int, magic: int, comment: str, digits: int,
     ) -> int | None:
         self.last_order_error = None
+        self.last_open_deal = None
+        self.last_open_price = None
         safe_comment = str(comment).replace("|", "_").replace(",", "_")[:31]
         sl_text = f"{float(sl):.{digits}f}" if sl else "0"
         tp_text = f"{float(tp):.{digits}f}" if tp else "0"
@@ -222,6 +231,8 @@ class MT5Executor:
             ticket, deal, price = int(parts[1]), int(parts[2]), float(parts[3])
             if ticket <= 0 or deal <= 0 or price <= 0:
                 raise ValueError(res)
+            self.last_open_deal = deal
+            self.last_open_price = price
             return ticket
         except (TypeError, ValueError, IndexError):
             self.last_order_error = f"MALFORMED_OK:{res}"
@@ -239,4 +250,6 @@ class MT5Executor:
                 return CloseResult(False, "MALFORMED_OK")
         if res in {"ERR|POSITION_NOT_FOUND", "ERR|Position Not Found", "ERR|0", "ERR|10009"}:
             return CloseResult(False, "MISSING_UNCONFIRMED")
+        if res and (res == "ERR|10018" or res.startswith("ERR|10018|")):
+            return CloseResult(False, "MARKET_CLOSED")
         return CloseResult(False, "FAILED")
