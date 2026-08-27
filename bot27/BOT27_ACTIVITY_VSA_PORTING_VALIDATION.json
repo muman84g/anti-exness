@@ -1,0 +1,40 @@
+{
+  "status": "PASS_WITH_WARNINGS",
+  "candidate": "OLD_BEST_ACTIVITY_075_VSA_075_FORWARD_WINNER",
+  "runtime_strategy_id": "PV2C859_L3_ACTIVITY_VSA_FORWARD_R1",
+  "forward_tick": {
+    "start_utc": "2026-08-14T05:43:00.026000+00:00",
+    "end_utc": "2026-08-27T15:28:56.547000+00:00",
+    "old_short_trades": 146,
+    "old_short_pnl_bps": 232.592367,
+    "old_short_pf": 1.364702,
+    "old_combined_mtm_mdd_bps": 459.538004,
+    "old_combined_daily_std_bps": 135.315827,
+    "new_path_short_trades": 114,
+    "new_path_short_pnl_bps": 206.035712,
+    "new_path_short_pf": 1.479360,
+    "new_path_combined_mtm_mdd_bps": 477.964508,
+    "new_path_combined_daily_std_bps": 143.397370
+  },
+  "live_mapping": {
+    "long_lanes": 3,
+    "short_lanes": 2,
+    "long_lot": 0.20,
+    "short_lot": 0.15,
+    "max_positions": 5,
+    "relative_short_weight": 0.75
+  },
+  "checks": {
+    "json": "PASS",
+    "py_compile": "PASS",
+    "bot27_self_test": "PASS",
+    "bot27_porting_parity": "PASS",
+    "bot28_shared_base_parity": "PASS",
+    "bot29_shared_base_parity": "PASS",
+    "deploy_restart": "NOT_RUN"
+  },
+  "warnings": [
+    "Live Short Close uses MidClose while Open/High/Low use MT5 Bid bars; historical backtest used midpoint OHLC.",
+    "Exact 0.75 relative exposure requires 4x lot scaling, so absolute USD PnL and DD scale by four versus a 0.05 long unit."
+  ]
+}

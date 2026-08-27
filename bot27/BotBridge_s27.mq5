@@ -130,13 +130,17 @@ string HandleCommand(const string command)
       long account_trade_expert = AccountInfoInteger(ACCOUNT_TRADE_EXPERT);
       long terminal_trade_allowed = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
       long mql_trade_allowed = MQLInfoInteger(MQL_TRADE_ALLOWED);
-      return StringFormat("OK|%d|%s|%d|%d|%d|%d",
+      long account_login = AccountInfoInteger(ACCOUNT_LOGIN);
+      string account_server = AccountInfoString(ACCOUNT_SERVER);
+      return StringFormat("OK|%d|%s|%d|%d|%d|%d|%I64d|%s",
          (int)margin_mode,
          MarginModeName(margin_mode),
          (int)account_trade_allowed,
          (int)account_trade_expert,
          (int)terminal_trade_allowed,
-         (int)mql_trade_allowed);
+         (int)mql_trade_allowed,
+         account_login,
+         account_server);
    }
 
    if(op == "INFO" && n >= 2)

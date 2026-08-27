@@ -466,11 +466,14 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot27/live_config.py:/app/bot27/live_config.py:ro
       - ./bot27/live_s27_bot.py:/app/bot27/live_s27_bot.py:ro
+      - ./bot27/shadow_opportunity_observer.py:/app/bot27/shadow_opportunity_observer.py:ro
+      - ./bot27/shadow_state_tagger.py:/app/bot27/shadow_state_tagger.py:ro
       - ./bot27/protocol_v2_strategy.py:/app/bot27/protocol_v2_strategy.py:ro
       - ./bot27/c4566_exit_policy.py:/app/bot27/c4566_exit_policy.py:ro
       - ./bot27/live_data_fetcher.py:/app/bot27/live_data_fetcher.py:ro
       - ./bot27/live_executor.py:/app/bot27/live_executor.py:ro
       - ./bot27/live_safety.py:/app/bot27/live_safety.py:ro
+      - ./bot27/live_manual_alerts.py:/app/bot27/live_manual_alerts.py:ro
       - ./bot27/ea_bridge.py:/app/bot27/ea_bridge.py:ro
       - ./bot27/s27_params.json:/app/bot27/s27_params.json:ro
       - ./bot27/BotBridge_s27.mq5:/app/bot27/BotBridge_s27.mq5:ro
@@ -493,6 +496,8 @@ services:
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 
   # ---- Bot 28 (S28 USTEC PV2C560 shadow-first) ----
   exness-bot-28:
@@ -619,6 +624,7 @@ services:
       - ./bot23/live_config.py:/app/bot23/live_config.py:ro
       - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
       - ./bot23/shadow_opportunity_observer.py:/app/bot23/shadow_opportunity_observer.py:ro
+      - ./bot23/shadow_state_tagger.py:/app/bot23/shadow_state_tagger.py:ro
       - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro
       - ./bot23/live_executor.py:/app/bot23/live_executor.py:ro
       - ./bot23/live_safety.py:/app/bot23/live_safety.py:ro

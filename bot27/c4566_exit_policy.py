@@ -36,6 +36,7 @@ def build_policy_state(entry_time: str | datetime, vol30_bps: float, config: dic
     branch = dict(config["inner_branch"] if inner_regime else config["outer_branch"])
     return {
         "policy_id": str(config["id"]),
+        "reason_prefix": str(config.get("reason_prefix", "c4566")),
         "mode": str(branch["mode"]),
         "entry_vol30_bps": float(vol30_bps),
         "floor_bps": float(config["floor_bps"]),
@@ -82,7 +83,7 @@ def evaluate_policy(
     required_milliseconds = int(round(float(updated["required_seconds"]) * 1000.0))
     reason = None
     if accumulated_milliseconds >= required_milliseconds:
-        reason = f"c4566_{mode}_positive_time"
+        reason = f"{updated.get('reason_prefix', 'c4566')}_{mode}_positive_time"
     elif mode == "continuous" and (not reliable_gap or current_profit_bps < float(updated["floor_bps"])):
         accumulated_milliseconds = 0
     updated["accumulated_milliseconds"] = accumulated_milliseconds

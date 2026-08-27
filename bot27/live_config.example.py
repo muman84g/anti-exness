@@ -4,5 +4,5 @@ MT5_PASSWORD = ""
 MT5_SERVER = ""
 
 MIN_LOT_OVERRIDES = {
-    "USTEC": 0.01,
+    "USTEC": 0.05,
 }

@@ -2,23 +2,43 @@
   "enabled": true,
   "live_trading_enabled": true,
   "shadow_forward_enabled": false,
+  "durable_open_reservation_enabled": true,
+  "strict_trade_csv_schema": true,
+  "shadow_opportunity_observer": {
+    "enabled": true,
+    "horizons_minutes": [1, 5, 15, 30, 60],
+    "completed_id_retention_days": 14,
+    "opportunity_csv": "s27_shadow_opportunities.csv",
+    "markout_csv": "s27_shadow_markouts.csv",
+    "state_file": "s27_shadow_observer_state.json"
+  },
+  "shadow_state_tagger": {
+    "enabled": true,
+    "csv": "s27_shadow_state_tags.csv"
+  },
   "bot_number": 27,
   "bot_suffix": "s27",
-  "strategy_id": "PV2C859_DEVQ825_H90_FORWARD_R1",
+  "strategy_id": "PV2C859_L3_ACTIVITY_VSA_FORWARD_R1",
   "magic": 200027,
   "expected_magic": 200027,
   "expected_bridge_name": "BotBridge_s27",
+  "require_account_identity": true,
+  "require_trade_permissions": true,
   "require_hedging_account": true,
   "symbol": "USTEC",
   "mt5_symbol": "USTEC",
   "price_digits": 2,
   "point_size": 0.01,
+  "contract_size": 1.0,
   "require_midpoint_close": false,
   "m1_timeframe": 1,
   "history_bars": 240,
   "broker_timezone": "UTC",
   "poll_interval_seconds": 5,
   "status_log_interval_seconds": 60,
+  "diagnostic_repeat_summary_seconds": 300,
+  "bot_log_max_bytes": 10485760,
+  "bot_log_backup_count": 5,
   "time_close_spread_guard_enabled": true,
   "time_close_max_defer_minutes": 30,
   "time_close_spread_stable_polls": 3,
@@ -36,21 +56,111 @@
     "audit_log": true
   },
   "strategy": {
-    "id": "PV2C859_DEVQ825_H90_FORWARD_R1",
+    "id": "PV2C859_L3_ACTIVITY_VSA_FORWARD_R1",
     "strategy_type": "PV2C859",
-    "candidate": "PV2C859_DEVQ825_H90_FORWARD_R1",
+    "candidate": "OLD_BEST_ACTIVITY_075_VSA_075_FORWARD_WINNER",
+    "state_compatible_strategy_ids": ["PV2C859_C4560_GAP15_FORWARD_R1"],
     "enabled": true,
     "comment_prefix": "s27_pv2c859",
-    "side": "LONG",
-    "action": "MAGNITUDE_GATE",
+    "side": "MIXED",
+    "action": "LONG_L3_PLUS_TWO_SHORT_OVERLAYS",
     "engine": "ret25_sign_long",
     "feature": "absret_std_ratio30_120",
     "tail": "low",
     "threshold": 0.6693523825105777,
+    "lane_parameters": [
+      {
+        "lane_id": 1,
+        "role": "baseline",
+        "signal_type": "long",
+        "side": "LONG",
+        "lot": 0.20,
+        "hold_min": 90,
+        "threshold": 0.6693523825105777,
+        "ret25_floor_bps": 0.0,
+        "exit_floor_bps": 4.0,
+        "exit_required_min": 20
+      },
+      {
+        "lane_id": 2,
+        "role": "lower_exit_floor_forward",
+        "signal_type": "long",
+        "side": "LONG",
+        "lot": 0.20,
+        "hold_min": 90,
+        "threshold": 0.6693523825105777,
+        "ret25_floor_bps": 0.0,
+        "exit_floor_bps": 2.0,
+        "exit_required_min": 20
+      },
+      {
+        "lane_id": 3,
+        "role": "spread_gated_long",
+        "signal_type": "long",
+        "side": "LONG",
+        "lot": 0.20,
+        "hold_min": 90,
+        "threshold": 0.6693523825105777,
+        "ret25_floor_bps": 0.0,
+        "entry_spread_bps_max": 0.595764962212364,
+        "exit_floor_bps": 4.0,
+        "exit_required_min": 20
+      },
+      {
+        "lane_id": 4,
+        "role": "activity_short_overlay",
+        "signal_type": "activity",
+        "side": "SHORT",
+        "lot": 0.15,
+        "hold_min": 60,
+        "exit_floor_bps": 4.0,
+        "exit_required_min": 10
+      },
+      {
+        "lane_id": 5,
+        "role": "vsa_short_overlay",
+        "signal_type": "vsa",
+        "side": "SHORT",
+        "lot": 0.15,
+        "hold_min": 60,
+        "exit_floor_bps": 4.0,
+        "exit_required_min": 10
+      }
+    ],
     "hold_clock": "actual_entry_time",
     "hold_min": 90,
+    "max_positions": 5,
     "max_time_close_spread_points": 260,
-    "lot": 0.05,
-    "minimum_bars": 130
+    "lot": 0.20,
+    "minimum_bars": 130,
+    "short_overlays": {
+      "activity": {
+        "prior_activity_min": 1.3,
+        "prior_abs_ret1_max_bps": 0.5,
+        "break_min_bps": 0.0
+      },
+      "vsa": {
+        "activity_min": 1.2,
+        "upper_wick_ratio_min": 0.35
+      }
+    },
+    "exit_policy": {
+      "id": "PV2C859_L3_ACTIVITY_VSA_FORWARD_R1",
+      "reason_prefix": "c4560",
+      "floor_bps": 4.0,
+      "inner_vol_lower_bps_exclusive": -1000000000.0,
+      "inner_vol_upper_bps_inclusive": 1000000000.0,
+      "inner_branch": {
+        "mode": "continuous",
+        "grace_min": 0,
+        "required_min": 20
+      },
+      "outer_branch": {
+        "mode": "continuous",
+        "grace_min": 0,
+        "required_min": 20
+      },
+      "max_observation_gap_seconds": 15
+    }
   }
 }

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from protocol_v2_strategy import cycle859_latest, latest_signal
+from protocol_v2_strategy import cycle859_latest, latest_signal, short_overlay_signals
 import live_executor as executor_module
+import live_s27_bot as runner_module
 
 
 def resolve_source(root: Path) -> Path:
@@ -60,9 +62,18 @@ def main() -> int:
     strategy = params["strategy"]
     assert params["require_midpoint_close"] is False
     assert strategy["strategy_type"] == "PV2C859"
-    assert strategy["candidate"] == "PV2C859_DEVQ825_H90_FORWARD_R1"
+    assert strategy["candidate"] == "OLD_BEST_ACTIVITY_075_VSA_075_FORWARD_WINNER"
+    assert strategy["max_positions"] == 5
+    assert [row["signal_type"] for row in strategy["lane_parameters"]] == ["long", "long", "long", "activity", "vsa"]
     assert strategy["hold_min"] == 90
-    assert "exit_policy" not in strategy
+    exit_policy = strategy.get("exit_policy")
+    assert exit_policy is not None
+    assert exit_policy["id"] == "PV2C859_L3_ACTIVITY_VSA_FORWARD_R1"
+    assert exit_policy["reason_prefix"] == "c4560"
+    assert exit_policy["floor_bps"] == 4.0
+    assert exit_policy["inner_branch"] == {"mode": "continuous", "grace_min": 0, "required_min": 20}
+    assert exit_policy["outer_branch"] == {"mode": "continuous", "grace_min": 0, "required_min": 20}
+    assert exit_policy["max_observation_gap_seconds"] == 15
     bars = build_bid_m1(root / "backtest" / "leakcheck_data" / "USTEC_tick_leakcheck.csv")
     ledger = pd.read_csv(source / "CORRECTED_DIAGNOSTIC_R1_LEDGER.csv.gz")
     eligible = ledger.loc[ledger.feature_value <= float(strategy["threshold"])]
@@ -75,6 +86,41 @@ def main() -> int:
         expected_vol30 = np.log(bars.loc[:signal_time, "Close"]).diff().mul(10000.0).rolling(30, min_periods=30).std().iloc[-1]
         assert abs(result["vol30_bps"] - float(expected_vol30)) < 1e-12
         assert result["eligible"]
+    overlay_bars = bars.iloc[-130:].copy()
+    overlay_bars["Open"] = overlay_bars["Close"]
+    overlay_bars["High"] = overlay_bars["Close"]
+    overlay_bars["Low"] = overlay_bars["Close"]
+    overlay_bars["Volume"] = 100
+    overlay_bars["MidClose"] = overlay_bars["Close"]
+    overlay_result = short_overlay_signals(overlay_bars, strategy)
+    assert set(overlay_result) == {"activity", "vsa"}
+    assert overlay_result["activity"]["side"] == "SHORT"
+    assert overlay_result["vsa"]["side"] == "SHORT"
+    synthetic_index = pd.date_range("2026-08-01", periods=80, freq="min", tz="UTC")
+    activity_bars = pd.DataFrame({"Open": 100.0, "High": 100.01, "Low": 99.99, "Close": 100.0, "MidClose": 100.0, "Volume": 100}, index=synthetic_index)
+    activity_bars.iloc[-2, activity_bars.columns.get_loc("Volume")] = 200
+    activity_bars.iloc[-1, activity_bars.columns.get_loc("Open")] = 100.0
+    activity_bars.iloc[-1, activity_bars.columns.get_loc("High")] = 100.0
+    activity_bars.iloc[-1, activity_bars.columns.get_loc("Low")] = 99.97
+    activity_bars.iloc[-1, activity_bars.columns.get_loc("Close")] = 99.98
+    activity_bars.iloc[-1, activity_bars.columns.get_loc("MidClose")] = 99.98
+    assert short_overlay_signals(activity_bars, strategy)["activity"]["eligible"]
+    vsa_bars = pd.DataFrame({"Open": 100.0, "High": 100.01, "Low": 99.99, "Close": 100.0, "MidClose": 100.0, "Volume": 100}, index=synthetic_index)
+    vsa_bars.iloc[-2, vsa_bars.columns.get_loc("Close")] = 101.0
+    vsa_bars.iloc[-2, vsa_bars.columns.get_loc("MidClose")] = 101.0
+    vsa_bars.iloc[-1] = [101.0, 102.0, 100.0, 100.5, 100.5, 200]
+    assert short_overlay_signals(vsa_bars, strategy)["vsa"]["eligible"]
+    original_state_file = runner_module.STATE_FILE
+    with tempfile.TemporaryDirectory() as temporary:
+        runner_module.STATE_FILE = str(Path(temporary) / "state.json")
+        legacy = runner_module.ProtocolV2FixedHoldRunner(params)._default_state()
+        legacy["strategy_id"] = "PV2C859_C4560_GAP15_FORWARD_R1"
+        legacy["positions"] = [{"lane_id": 1, "ticket": 123, "side": "LONG"}]
+        Path(runner_module.STATE_FILE).write_text(json.dumps(legacy), encoding="utf-8")
+        migrated = runner_module.ProtocolV2FixedHoldRunner(params).state
+        assert migrated["strategy_id"] == strategy["id"]
+        assert migrated["positions"] == legacy["positions"]
+    runner_module.STATE_FILE = original_state_file
     original_send = executor_module.ea_bridge.send_command
     executor_module.ea_bridge.send_command = lambda *_args, **_kwargs: "OK|101|100|1000|0.01|0.01|100|0.01|1|0.01|1|2|0|1787306465000"
     try:

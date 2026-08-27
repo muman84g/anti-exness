@@ -1,0 +1,27 @@
+{
+  "schema_version": "bot27_c4560_porting_validation_v1",
+  "bot": "bot27",
+  "candidate": "PV2C859_C4560_GAP15_FORWARD_R1",
+  "runtime_strategy_id": "PV2C859_C4560_GAP15_FORWARD_R1",
+  "live_trading_enabled": true,
+  "shadow_forward_enabled": false,
+  "checks": {
+    "config_switch": "PASS_C4560_GAP15",
+    "exit_policy_unit": "PASS_RESET_AND_20M_CONTINUOUS",
+    "early_policy_exit": "PASS",
+    "dev_exit_parity": "PASS_526_TRADES",
+    "runner_self_test": "PASS_C4560_CONFIGURED_H90_FALLBACK",
+    "entry_feature_parity": "PASS_3_SAMPLES",
+    "foundation_tests": "PASS_22",
+    "real_order_test": "NOT_RUN",
+    "live_restart": "NOT_RUN"
+  },
+  "safety": {
+    "existing_live_params_file_updated": true,
+    "sub_bot_namespace_used": false,
+    "magic_preserved": 200027,
+    "comment_prefix_preserved": "s27_pv2c859",
+    "strict_promotion": "FAIL_MDD_NONWORSE",
+    "note": "C4560 is explicitly enabled in the existing bot27 forward config per user request; no EA/service restart was performed by this change."
+  }
+}
