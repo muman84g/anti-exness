@@ -1,0 +1,30 @@
+{
+  "candidate_id": "bot23-x-archive-plus-jst0911-plus-jst1113-round-s2p5-d0p05-r0p03-v001",
+  "validated_at": "2026-08-28T05:08:31Z",
+  "scope": "local bot23 implementation only; no deployment, restart, state edit, order, commit, or push",
+  "checks": {
+    "params_json": "PASS",
+    "python_compile": "PASS",
+    "runner_self_test": "PASS",
+    "bot23_regressions": "PASS 84/84",
+    "shadow_observer_regressions": "PASS 6/6",
+    "shadow_state_tagger_regressions": "PASS 3/3",
+    "docker_compose_config": "PASS",
+    "semantic_deletion_review": "PASS; no existing behavior or persisted field intentionally removed"
+  },
+  "candidate_manifest": {
+    "bot/bot23/live_s23_bot.py": "85c4a56a925ec8f0dc081ab294b4a780d4ea73fadd1567961f070fd87dbc841b",
+    "bot/bot23/s23_params.json": "d2bc44bf53ac7ca4dbc5a064e8ff3579e1f7ac29e5c6d29cec8a9f768d6a9c33",
+    "bot/bot23/test_s23_regressions.py": "146cddd9f1ba45ae71e3ca56fba3db4eb6690892ae8587bd83144a5f0d6cf1f4",
+    "bot/bot23/README.md": "de6e7d388b3e53596e2ede1fb90cc4355f4b227042b676217b5ef745834ae210",
+    "bot/bot23/SOURCE_BACKTEST.md": "899fe2fe5f3bc99f68b9bfdbe068e30aa30d457d69afb57b9f7172d8822a79a3",
+    "bot/bot23/PORTING_AUDIT.md": "7034402182da4f89654fe893dc584478a90c98bc114d059ad1e90ac4f62a6f11",
+    "bot/BOT_BACKTEST_MAP_ja.md": "09893b81439cad0e0e2a4e87875d8036e67af9263aa5d24f5b3701d65c69fb8e",
+    "bot/docker-compose.yml": "b54963beaf6ce3892ede14203bb5181401d588829809535e981e9a5da107a942"
+  },
+  "known_limits": [
+    "Research M1 and first-eligible ordered-tick execution are not byte-equivalent to live HIST M1 plus polling quote.",
+    "The INFO bridge does not expose broker quote time, so fresh-quote and market-reopen close parity is unproven.",
+    "The consumed forward sample contains four trades and is not independent evidence."
+  ]
+}

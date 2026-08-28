@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""S23 ZA four-lane inventory with the frozen reverse_d60 entry policy."""
+"""S23 ZA inventory with independent JST09-11 and JST11-13 overlays."""
 
 from __future__ import annotations
 
@@ -41,21 +41,58 @@ from live_safety import (
 )
 from live_manual_alerts import notify_manual_action_required
 from live_config import MT5_LOGIN, MT5_SERVER
+from eu_entry_admission_clock import classify_entry_admission, is_eu_summer_time, is_us_summer_time
+from position_lifecycle_clock import fixed_hold_due_at
 try:
     from shadow_opportunity_observer import ShadowOpportunityObserver
 except ImportError:
     ShadowOpportunityObserver = None  # type: ignore[assignment,misc]
+try:
+    from shadow_state_tagger import ShadowStateTagger
+except ImportError:
+    ShadowStateTagger = None  # type: ignore[assignment,misc]
 
 
 UTC = timezone.utc
 EXPECTED_S23_MAGICS = (230023, 230024, 230025, 230026)
+EXPECTED_MORNING_MAGICS = (230027, 230028, 230029)
+EXPECTED_MIDDAY_MAGICS = (230030,)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-late-short-30m-action-matrix-v001"
+EXPECTED_CANDIDATE_ID = "bot23-x-archive-plus-jst0911-plus-jst1113-round-s2p5-d0p05-r0p03-v001"
+EXPECTED_MORNING_POLICY_ID = "jst0911_stable001_param_15_55_45_v001"
+EXPECTED_MORNING_POLICY_PARAMS_HASH = "c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e"
+EXPECTED_MORNING_SESSION_START_UTC = 0
+EXPECTED_MORNING_SESSION_END_UTC = 2
+EXPECTED_MORNING_MAX_POSITIONS = 3
+EXPECTED_MIDDAY_POLICY_ID = "jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001"
+EXPECTED_MIDDAY_POLICY_PARAMS_HASH = "526d90e6dc16981ba5e60d31750f1b4862fbe3d9170382ed624fea53ef55fd83"
+EXPECTED_MIDDAY_SESSION_START_UTC = 2
+EXPECTED_MIDDAY_SESSION_END_UTC = 4
+EXPECTED_MIDDAY_MAX_POSITIONS = 1
+EXPECTED_ENTRY_ADMISSION_EU_TIMEZONE = "Europe/London"
+EXPECTED_ENTRY_ADMISSION_US_TIMEZONE = "America/New_York"
+EXPECTED_ENTRY_ADMISSION_NOTATION = "per_market_dst"
+EXPECTED_ENTRY_ADMISSION_SCOPE = "new_entry_admission_only"
+EXPECTED_POSITION_LIFECYCLE = "confirmed_fill_utc_independent"
+EXPECTED_ENTRY_ADMISSION_BLOCKS = (
+    ("jst1300_pre_eu30", "fixed_jst", "13:00", "13:00", "Europe/London", "15:30", "16:30"),
+    ("eu_open_to_us_preopen", "Europe/London", "15:30", "16:30", "America/New_York", "20:30", "21:30"),
+    ("us_to_eu_late", "America/New_York", "20:30", "21:30", "America/New_York", "05:30", "06:30"),
+)
 EXPECTED_ROUTING_MODE = "first_consuming_lane_preserve_primary_v1"
 EXPECTED_ENTRY_POLICY_ID = "reverse_d60"
 EXPECTED_ENTRY_POLICY_PARAMS_HASH = "40475d07b84eabc1b1290bee6787113903f374ca90cf2ca271c82b825b313572"
+EXPECTED_PORTFOLIO_REARM_POLICY_ID = "long_target_portfolio_rearm_8m"
+EXPECTED_PORTFOLIO_REARM_PARAMS_HASH = "0f8f3fc3e32c74ce00344b01fbc335d9ac6cfbf4801357e768d87c851229afb4"
+EXPECTED_PORTFOLIO_REARM_MINUTES = 8
+EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID = "balanced_book_false_break_fade_w15_c2_both"
+EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH = "d02b82730f7f686d97317f96aab26762168c8396f40c21f4787ab8bd4296bab0"
+EXPECTED_INVENTORY_RANGE_RETURN_DEPTH = 0.0
+EXPECTED_INVENTORY_RANGE_MAX_WAIT_MINUTES = 15
+EXPECTED_INVENTORY_RANGE_CONFIRM_BARS = 2
+EXPECTED_INVENTORY_RANGE_BREAK_SIDE_FILTER = "both"
 EXPECTED_LATE_SHORT_LOOKBACK = 30
 EXPECTED_LATE_SHORT_DROP_THRESHOLD = 0.006
 EXPECTED_LATE_SHORT_ACTION = "reverse_long"
@@ -89,6 +126,7 @@ FROZEN_LANE_FIELDS = {
 }
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
+    "unresolved_open_action",
     "live_time_close_failed",
     "live_time_close_unconfirmed",
 }
@@ -119,8 +157,12 @@ TRADE_FIELDS = [
     "opportunity_id",
     "basket_id",
     "ticket",
+    "position_identifier",
+    "deal_id",
     "side",
     "lot",
+    "entry_price",
+    "exit_price",
     "price",
     "profit",
     "reason",
@@ -193,6 +235,18 @@ def append_csv(path: str, row: dict[str, Any], fields: list[str]) -> None:
         writer.writerow({name: row.get(name, "") for name in fields})
 
 
+def validate_csv_schema(path: str, fields: list[str]) -> None:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+    with open(path, "r", newline="", encoding="utf-8") as existing_file:
+        observed_fields = next(csv.reader(existing_file), [])
+    if observed_fields != fields:
+        raise RuntimeError(
+            f"CSV schema mismatch for {path}; archive/reset the old trades CSV before starting bot23"
+        )
+    _CSV_SCHEMAS_VALIDATED.add(path)
+
+
 def normalize_price(value: float, digits: int) -> float:
     return round(float(value), int(digits))
 
@@ -223,6 +277,14 @@ def in_session(ts: pd.Timestamp, start: int, end: int) -> bool:
     return hour >= start or hour < end
 
 
+def completed_align(series: pd.Series, minutes: int, bars: pd.DataFrame) -> pd.Series:
+    """Expose a resampled value only after its source bar has completed."""
+    released = series.copy()
+    released.index = released.index + pd.Timedelta(minutes=minutes)
+    decision_clock = bars.index + pd.Timedelta(minutes=1)
+    return released.reindex(decision_clock, method="ffill").set_axis(bars.index)
+
+
 class S23HorizontalInventoryRunner:
     def __init__(self, params: dict[str, Any]):
         self.params = params
@@ -233,12 +295,22 @@ class S23HorizontalInventoryRunner:
         self.executor = MT5Executor()
         self._suppress_manual_alerts = False
         self._entry_policy_state_migrated = False
+        self._portfolio_rearm_state_migrated = False
+        self._inventory_range_fade_state_migrated = False
+        self._morning_session_state_migrated = False
+        self._midday_session_state_migrated = False
         self.state = self._load_state()
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
         self._last_retained_block_warning: dict[int, tuple[str, str]] = {}
         self.shadow_observer: Any = None
         self._shadow_observer_error_signature: str | None = None
+        self.shadow_state_tagger: Any = None
+        self._shadow_state_tagger_error_signature: str | None = None
+        self.midday_shadow_observer: Any = None
+        self._midday_shadow_observer_error_signature: str | None = None
+        self.midday_shadow_state_tagger: Any = None
+        self._midday_shadow_state_tagger_error_signature: str | None = None
         try:
             if ShadowOpportunityObserver is None:
                 logging.error("S23 shadow observer module unavailable; trading continues without passive evidence")
@@ -253,6 +325,55 @@ class S23HorizontalInventoryRunner:
                 )
         except Exception as exc:
             logging.error("S23 shadow observer disabled after initialization failure: %s", exc)
+        try:
+            if ShadowStateTagger is None:
+                logging.error("S23 shadow state tagger module unavailable; trading continues without passive state tags")
+            else:
+                self.shadow_state_tagger = ShadowStateTagger(
+                    params.get("shadow_state_tagger", {}),
+                    log_dir=LOG_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                )
+        except Exception as exc:
+            logging.error("S23 shadow state tagger disabled after initialization failure: %s", exc)
+        try:
+            if ShadowOpportunityObserver is None:
+                logging.error("S23 midday shadow observer module unavailable; trading continues without passive evidence")
+            else:
+                self.midday_shadow_observer = ShadowOpportunityObserver(
+                    params.get("midday_shadow_opportunity_observer", {}),
+                    log_dir=LOG_DIR,
+                    state_dir=STATE_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                    contract_size=float(params.get("contract_size", 100.0)),
+                    lot=float(params.get("default_lot", 0.01)),
+                )
+        except Exception as exc:
+            logging.error("S23 midday shadow observer disabled after initialization failure: %s", exc)
+        try:
+            if ShadowStateTagger is None:
+                logging.error("S23 midday shadow state tagger module unavailable; trading continues without passive state tags")
+            else:
+                self.midday_shadow_state_tagger = ShadowStateTagger(
+                    params.get("midday_shadow_state_tagger", {}),
+                    log_dir=LOG_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                )
+        except Exception as exc:
+            logging.error("S23 midday shadow state tagger disabled after initialization failure: %s", exc)
+
+    def _morning_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("morning_session_strategies", []))
+
+    def _midday_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("midday_session_strategies", []))
+
+    def _all_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("strategies", [])) + self._morning_strategies() + self._midday_strategies()
+
+    def _entry_admission_block(self, at_utc: datetime):
+        """Classify only new-entry admission; never manage an owned position."""
+        return classify_entry_admission(at_utc)
 
     def _observer_call(self, method: str, **kwargs: Any) -> Any:
         observer = self.shadow_observer
@@ -269,6 +390,50 @@ class S23HorizontalInventoryRunner:
                 self._shadow_observer_error_signature = signature
             return None
 
+    def _state_tagger_call(self, method: str, **kwargs: Any) -> Any:
+        tagger = self.shadow_state_tagger
+        if tagger is None or not tagger.enabled:
+            return None
+        try:
+            result = getattr(tagger, method)(**kwargs)
+            self._shadow_state_tagger_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._shadow_state_tagger_error_signature:
+                logging.error("S23 shadow state tagger failure ignored by trading path: %s", signature)
+                self._shadow_state_tagger_error_signature = signature
+            return None
+
+    def _midday_observer_call(self, method: str, **kwargs: Any) -> Any:
+        observer = self.midday_shadow_observer
+        if observer is None or not observer.enabled:
+            return None
+        try:
+            result = getattr(observer, method)(**kwargs)
+            self._midday_shadow_observer_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._midday_shadow_observer_error_signature:
+                logging.error("S23 midday shadow observer failure ignored by trading path: %s", signature)
+                self._midday_shadow_observer_error_signature = signature
+            return None
+
+    def _midday_state_tagger_call(self, method: str, **kwargs: Any) -> Any:
+        tagger = self.midday_shadow_state_tagger
+        if tagger is None or not tagger.enabled:
+            return None
+        try:
+            result = getattr(tagger, method)(**kwargs)
+            self._midday_shadow_state_tagger_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._midday_shadow_state_tagger_error_signature:
+                logging.error("S23 midday shadow state tagger failure ignored by trading path: %s", signature)
+                self._midday_shadow_state_tagger_error_signature = signature
+            return None
     def _shadow_context(
         self,
         price_row: pd.Series,
@@ -280,12 +445,16 @@ class S23HorizontalInventoryRunner:
         readiness: dict[str, dict[str, Any]] = {}
         long_positions = 0
         short_positions = 0
-        for strat in self.params["strategies"]:
+        for strat in self._all_strategies():
             lane_id = int(strat["lane_id"])
             basket = list(self._st(strat).get("basket") or [])
             lane_positions[str(lane_id)] = len(basket)
             lane_pending[str(lane_id)] = bool(self._st(strat).get("pending_entry_side"))
-            ready, reason, consumed = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
+            readiness_value = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
+            if isinstance(readiness_value, tuple):
+                ready, reason, consumed = readiness_value
+            else:
+                ready, reason, consumed = bool(readiness_value), "ready" if readiness_value else "not_ready", False
             readiness[str(lane_id)] = {"ready": bool(ready), "reason": str(reason), "consumed": bool(consumed)}
             for position in basket:
                 side = str(position.get("side") or "").upper()
@@ -321,6 +490,35 @@ class S23HorizontalInventoryRunner:
                 "last_route_decision_utc": None,
                 "entry_policy_id": str(self.params.get("entry_policy_id", EXPECTED_ENTRY_POLICY_ID)),
                 "entry_policy_params_hash": str(self.params.get("entry_policy_params_hash", EXPECTED_ENTRY_POLICY_PARAMS_HASH)),
+                "portfolio_rearm_policy_id": str(self.params.get("portfolio_rearm_policy_id", EXPECTED_PORTFOLIO_REARM_POLICY_ID)),
+                "portfolio_rearm_params_hash": str(self.params.get("portfolio_rearm_params_hash", EXPECTED_PORTFOLIO_REARM_PARAMS_HASH)),
+                "inventory_range_fade_policy_id": str(self.params.get("inventory_range_fade_policy_id", EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID)),
+                "inventory_range_fade_params_hash": str(self.params.get("inventory_range_fade_params_hash", EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH)),
+                "morning_policy_id": str(self.params.get("morning_session_policy_id", EXPECTED_MORNING_POLICY_ID)),
+                "morning_policy_params_hash": str(self.params.get("morning_session_params_hash", EXPECTED_MORNING_POLICY_PARAMS_HASH)),
+                "midday_policy_id": str(self.params.get("midday_session_policy_id", EXPECTED_MIDDAY_POLICY_ID)),
+                "midday_policy_params_hash": str(self.params.get("midday_session_params_hash", EXPECTED_MIDDAY_POLICY_PARAMS_HASH)),
+                "inventory_range_fade": {
+                    "active": False,
+                    "low": None,
+                    "high": None,
+                    "break_phase": 0,
+                    "break_side": None,
+                    "break_time_utc": None,
+                    "return_confirm_count": 0,
+                    "pending_side": None,
+                    "pending_origin_bar": None,
+                    "pending_break_side": None,
+                    "last_state_bar": None,
+                    "last_dispatch_bar": None,
+                },
+                "long_target_rearm_pending_confirmation": False,
+                "long_target_rearm_request_utc": None,
+                "long_target_rearm_until_utc": None,
+                "long_target_rearm_confirmed_utc": None,
+                "long_target_rearm_trigger_lane_id": None,
+                "long_target_rearm_trigger_basket_id": None,
+                "long_target_rearm_expired_utc": None,
             },
             "strategies": {
                 s["id"]: {
@@ -344,6 +542,11 @@ class S23HorizontalInventoryRunner:
                     "basket_peak_pnl_usd": None,
                     "pending_close_reason": None,
                     "pending_close_signal_bar": None,
+                    "time_close_defer_started_utc": None,
+                    "time_close_last_quote_msc": None,
+                    "time_close_stable_count": 0,
+                    "time_close_retry_after_utc": None,
+                    "time_close_wide_seen": False,
                     "cooldown_until_utc": None,
                     "last_evaluated_bar": None,
                     "daily_realized_date_utc": None,
@@ -366,7 +569,7 @@ class S23HorizontalInventoryRunner:
                     "manual_alert_last_reason": None,
                     "manual_alert_last_at_utc": None,
                 }
-                for s in self.params["strategies"]
+                for s in self._all_strategies()
             },
         }
 
@@ -417,6 +620,14 @@ class S23HorizontalInventoryRunner:
         observed_routing = state.get("routing") if isinstance(state.get("routing"), dict) else {}
         observed_entry_policy_id = observed_routing.get("entry_policy_id")
         observed_entry_policy_hash = observed_routing.get("entry_policy_params_hash")
+        observed_rearm_policy_id = observed_routing.get("portfolio_rearm_policy_id")
+        observed_rearm_policy_hash = observed_routing.get("portfolio_rearm_params_hash")
+        observed_range_policy_id = observed_routing.get("inventory_range_fade_policy_id")
+        observed_range_policy_hash = observed_routing.get("inventory_range_fade_params_hash")
+        observed_morning_policy_id = observed_routing.get("morning_policy_id")
+        observed_morning_policy_hash = observed_routing.get("morning_policy_params_hash")
+        observed_midday_policy_id = observed_routing.get("midday_policy_id")
+        observed_midday_policy_hash = observed_routing.get("midday_policy_params_hash")
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -456,6 +667,80 @@ class S23HorizontalInventoryRunner:
                 "S23 entry policy state migrated to %s; prior unsubmitted pending entries were cleared",
                 expected_policy_id,
             )
+        expected_rearm_policy_id = str(self.params.get("portfolio_rearm_policy_id", EXPECTED_PORTFOLIO_REARM_POLICY_ID))
+        expected_rearm_policy_hash = str(self.params.get("portfolio_rearm_params_hash", EXPECTED_PORTFOLIO_REARM_PARAMS_HASH))
+        if observed_rearm_policy_id != expected_rearm_policy_id or observed_rearm_policy_hash != expected_rearm_policy_hash:
+            routing["portfolio_rearm_policy_id"] = expected_rearm_policy_id
+            routing["portfolio_rearm_params_hash"] = expected_rearm_policy_hash
+            self._portfolio_rearm_state_migrated = True
+            logging.warning(
+                "S23 portfolio rearm state initialized to %s; existing baskets and pending entries were preserved",
+                expected_rearm_policy_id,
+            )
+        expected_range_policy_id = str(self.params.get("inventory_range_fade_policy_id", EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID))
+        expected_range_policy_hash = str(self.params.get("inventory_range_fade_params_hash", EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH))
+        expected_range_state = default["routing"]["inventory_range_fade"]
+        observed_range_state = routing.get("inventory_range_fade")
+        if (
+            observed_range_policy_id != expected_range_policy_id
+            or observed_range_policy_hash != expected_range_policy_hash
+            or not isinstance(observed_range_state, dict)
+        ):
+            routing["inventory_range_fade_policy_id"] = expected_range_policy_id
+            routing["inventory_range_fade_params_hash"] = expected_range_policy_hash
+            routing["inventory_range_fade"] = dict(expected_range_state)
+            self._inventory_range_fade_state_migrated = True
+            logging.warning(
+                "S23 inventory range-fade state initialized to %s; existing baskets and pending ZA entries were preserved",
+                expected_range_policy_id,
+            )
+        else:
+            for key, value in expected_range_state.items():
+                observed_range_state.setdefault(key, value)
+        expected_morning_policy_id = str(self.params.get("morning_session_policy_id", EXPECTED_MORNING_POLICY_ID))
+        expected_morning_policy_hash = str(self.params.get("morning_session_params_hash", EXPECTED_MORNING_POLICY_PARAMS_HASH))
+        if observed_morning_policy_id is None and observed_morning_policy_hash is None:
+            routing["morning_policy_id"] = expected_morning_policy_id
+            routing["morning_policy_params_hash"] = expected_morning_policy_hash
+            self._morning_session_state_migrated = True
+            logging.warning(
+                "S23 morning-session state initialized to %s; existing ZA baskets and pending entries were preserved",
+                expected_morning_policy_id,
+            )
+        elif observed_morning_policy_id != expected_morning_policy_id or observed_morning_policy_hash != expected_morning_policy_hash:
+            for strat in self._morning_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "morning_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_morning_policy_id,
+                    "observed_policy_hash": observed_morning_policy_hash,
+                    "expected_policy_id": expected_morning_policy_id,
+                    "expected_policy_hash": expected_morning_policy_hash,
+                }
+        expected_midday_policy_id = str(self.params.get("midday_session_policy_id", EXPECTED_MIDDAY_POLICY_ID))
+        expected_midday_policy_hash = str(self.params.get("midday_session_params_hash", EXPECTED_MIDDAY_POLICY_PARAMS_HASH))
+        if observed_midday_policy_id is None and observed_midday_policy_hash is None:
+            routing["midday_policy_id"] = expected_midday_policy_id
+            routing["midday_policy_params_hash"] = expected_midday_policy_hash
+            self._midday_session_state_migrated = True
+            logging.warning(
+                "S23 midday-session state initialized to %s; existing ZA and JST09-11 state was preserved",
+                expected_midday_policy_id,
+            )
+        elif observed_midday_policy_id != expected_midday_policy_id or observed_midday_policy_hash != expected_midday_policy_hash:
+            for strat in self._midday_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "midday_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_midday_policy_id,
+                    "observed_policy_hash": observed_midday_policy_hash,
+                    "expected_policy_id": expected_midday_policy_id,
+                    "expected_policy_hash": expected_midday_policy_hash,
+                }
         return state
 
     def _save_state(self) -> None:
@@ -670,6 +955,11 @@ class S23HorizontalInventoryRunner:
         st["frozen_basket_atr30"] = None
         st["pending_close_reason"] = None
         st["pending_close_signal_bar"] = None
+        st["time_close_defer_started_utc"] = None
+        st["time_close_last_quote_msc"] = None
+        st["time_close_stable_count"] = 0
+        st["time_close_retry_after_utc"] = None
+        st["time_close_wide_seen"] = False
         st["current_basket_id"] = None
         st["cooldown_until_bar"] = -1
         closed_bar = parse_ts(signal_bar)
@@ -691,6 +981,363 @@ class S23HorizontalInventoryRunner:
             "pending_entry_release_time",
         ):
             st[key] = None
+
+    def _cancel_portfolio_pending_longs(self, trigger_strat: dict[str, Any], reason: str) -> int:
+        cancelled = 0
+        trigger_lane = int(trigger_strat["lane_id"])
+        for strat in self.params["strategies"]:
+            st = self._st(strat)
+            if str(st.get("pending_entry_side") or "") != "LONG":
+                continue
+            opportunity_id = st.get("pending_entry_opportunity_id")
+            signal_bar = st.get("pending_entry_signal_bar")
+            self._clear_pending_entry(strat)
+            self._trade_row(
+                "pending_cancelled",
+                strat,
+                opportunity_id=opportunity_id,
+                reason=reason,
+                signal_bar_time=signal_bar,
+                note=f"trigger_lane={trigger_lane}",
+            )
+            cancelled += 1
+        return cancelled
+
+    def _basket_is_long(self, strat: dict[str, Any]) -> bool:
+        basket = list(self._st(strat).get("basket") or [])
+        return bool(basket) and all(str(pos.get("side") or "") == "LONG" for pos in basket)
+
+    def _arm_long_target_portfolio_rearm(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp) -> None:
+        routing = self.state["routing"]
+        stamp = pd.Timestamp(at_utc)
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        routing["long_target_rearm_pending_confirmation"] = True
+        routing["long_target_rearm_request_utc"] = dt_text(stamp)
+        routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
+        routing["long_target_rearm_trigger_basket_id"] = self._st(strat).get("current_basket_id")
+        routing["long_target_rearm_expired_utc"] = None
+        cancelled = self._cancel_portfolio_pending_longs(strat, "long_target_rearm_armed")
+        self._trade_row(
+            "portfolio_rearm_armed",
+            strat,
+            side="LONG",
+            reason="basket_target",
+            executable_at=dt_text(stamp),
+            note=f"pending_long_cancelled={cancelled}",
+        )
+
+    def _confirm_long_target_portfolio_rearm(
+        self,
+        strat: dict[str, Any],
+        confirmed_at_utc: datetime | pd.Timestamp,
+        basket_id: str | None,
+    ) -> None:
+        routing = self.state["routing"]
+        stamp = pd.Timestamp(confirmed_at_utc)
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        minutes = int(self.params.get("long_target_portfolio_rearm_minutes", EXPECTED_PORTFOLIO_REARM_MINUTES))
+        until = stamp + pd.Timedelta(minutes=minutes)
+        routing["long_target_rearm_pending_confirmation"] = False
+        routing["long_target_rearm_confirmed_utc"] = dt_text(stamp)
+        routing["long_target_rearm_until_utc"] = dt_text(until)
+        routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
+        routing["long_target_rearm_trigger_basket_id"] = basket_id
+        routing["long_target_rearm_expired_utc"] = None
+        cancelled = self._cancel_portfolio_pending_longs(strat, "long_target_rearm_started")
+        self._trade_row(
+            "portfolio_rearm_started",
+            strat,
+            side="LONG",
+            reason="basket_target_confirmed",
+            executable_at=dt_text(stamp),
+            note=f"until={dt_text(until)};pending_long_cancelled={cancelled}",
+        )
+
+    def _portfolio_new_long_basket_block_reason(
+        self,
+        side: str,
+        at_utc: datetime | pd.Timestamp | None,
+    ) -> str | None:
+        if side != "LONG" or not bool(self.params.get("long_target_portfolio_rearm_enabled", False)):
+            return None
+        routing = self.state["routing"]
+        if bool(routing.get("long_target_rearm_pending_confirmation")):
+            return "long_target_rearm_pending_close_confirmation"
+        raw_until = routing.get("long_target_rearm_until_utc")
+        if not raw_until:
+            return None
+        until = parse_ts(raw_until)
+        if until is None:
+            return "long_target_rearm_state_invalid"
+        stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        if stamp < until:
+            return "long_target_portfolio_rearm"
+        routing["long_target_rearm_until_utc"] = None
+        routing["long_target_rearm_expired_utc"] = dt_text(stamp)
+        logging.info("S23 LONG-target portfolio rearm expired at %s", dt_text(stamp))
+        self._save_state()
+        return None
+
+    def _inventory_range_snapshot(self) -> tuple[bool, float | None, float | None, int, int]:
+        long_positions = 0
+        short_positions = 0
+        entry_prices: list[float] = []
+        for strat in self.params["strategies"]:
+            for position in self._st(strat).get("basket") or []:
+                side = str(position.get("side") or "").upper()
+                long_positions += int(side == "LONG")
+                short_positions += int(side == "SHORT")
+                try:
+                    entry_price = float(position.get("entry_price"))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(entry_price):
+                    entry_prices.append(entry_price)
+        balanced = long_positions > 0 and long_positions == short_positions
+        if not entry_prices:
+            return balanced, None, None, long_positions, short_positions
+        return balanced, min(entry_prices), max(entry_prices), long_positions, short_positions
+
+    @staticmethod
+    def _clear_inventory_range_break(range_state: dict[str, Any]) -> None:
+        range_state["break_phase"] = 0
+        range_state["break_side"] = None
+        range_state["break_time_utc"] = None
+        range_state["return_confirm_count"] = 0
+
+    def _advance_inventory_range_fade(self, price_row: pd.Series) -> None:
+        """Advance the fixed completed-M1 range-fade state exactly once per bar."""
+        if not bool(self.params.get("inventory_range_fade_enabled", False)):
+            return
+        bar_time = parse_ts(price_row.name)
+        try:
+            completed_close = float(price_row["Close"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if bar_time is None or not math.isfinite(completed_close):
+            return
+        bar_text = dt_text(bar_time)
+        routing = self.state["routing"]
+        range_state = routing["inventory_range_fade"]
+        if range_state.get("last_state_bar") == bar_text:
+            return
+        range_state["last_state_bar"] = bar_text
+        try:
+            phase = int(range_state.get("break_phase") or 0)
+            confirm_count = int(range_state.get("return_confirm_count") or 0)
+            pending_side = range_state.get("pending_side")
+            frozen_low = float(range_state.get("low")) if range_state.get("low") is not None else math.nan
+            frozen_high = float(range_state.get("high")) if range_state.get("high") is not None else math.nan
+            frozen_valid = math.isfinite(frozen_low) and math.isfinite(frozen_high) and frozen_high > frozen_low
+            range_state_valid = (
+                phase in {0, 1}
+                and confirm_count >= 0
+                and pending_side in {None, "LONG", "SHORT"}
+                and (not bool(range_state.get("active")) or frozen_valid)
+                and (
+                    phase == 0
+                    or (
+                        frozen_valid
+                        and range_state.get("break_side") in {"LONG", "SHORT"}
+                        and parse_ts(range_state.get("break_time_utc")) is not None
+                    )
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            range_state_valid = False
+        if not range_state_valid:
+            reset_state = dict(self._default_state()["routing"]["inventory_range_fade"])
+            reset_state["last_state_bar"] = bar_text
+            routing["inventory_range_fade"] = reset_state
+            self._trade_row(
+                "inventory_range_invalidated",
+                self.params["strategies"][0],
+                reason="malformed_persisted_range_state",
+                signal_bar_time=bar_text,
+            )
+            self._save_state()
+            return
+        balanced, range_low_now, range_high_now, long_count, short_count = self._inventory_range_snapshot()
+        primary = self.params["strategies"][0]
+        broke_range = False
+
+        if int(range_state.get("break_phase") or 0) != 0 and not balanced:
+            self._trade_row(
+                "inventory_range_invalidated",
+                primary,
+                reason="inventory_unbalanced",
+                signal_bar_time=bar_text,
+                note=f"long={long_count};short={short_count}",
+            )
+            self._clear_inventory_range_break(range_state)
+
+        break_time = parse_ts(range_state.get("break_time_utc"))
+        max_wait = int(self.params.get("inventory_range_max_wait_minutes", EXPECTED_INVENTORY_RANGE_MAX_WAIT_MINUTES))
+        if (
+            int(range_state.get("break_phase") or 0) != 0
+            and max_wait > 0
+            and break_time is not None
+            and bar_time > break_time + pd.Timedelta(minutes=max_wait)
+        ):
+            self._trade_row(
+                "inventory_range_invalidated",
+                primary,
+                reason="return_timeout",
+                signal_bar_time=bar_text,
+                note=f"break_time={dt_text(break_time)};max_wait_minutes={max_wait}",
+            )
+            self._clear_inventory_range_break(range_state)
+
+        if int(range_state.get("break_phase") or 0) == 1:
+            try:
+                frozen_low = float(range_state.get("low"))
+                frozen_high = float(range_state.get("high"))
+            except (TypeError, ValueError):
+                frozen_low = math.nan
+                frozen_high = math.nan
+            break_side = str(range_state.get("break_side") or "")
+            if not math.isfinite(frozen_low) or not math.isfinite(frozen_high) or frozen_high <= frozen_low or break_side not in {"LONG", "SHORT"}:
+                self._trade_row("inventory_range_invalidated", primary, reason="invalid_frozen_range", signal_bar_time=bar_text)
+                self._clear_inventory_range_break(range_state)
+            else:
+                depth = float(self.params.get("inventory_range_return_depth_fraction", EXPECTED_INVENTORY_RANGE_RETURN_DEPTH))
+                width = frozen_high - frozen_low
+                upper_return_level = frozen_high - depth * width
+                lower_return_level = frozen_low + depth * width
+                returned_inside = (
+                    break_side == "LONG" and completed_close <= upper_return_level
+                ) or (
+                    break_side == "SHORT" and completed_close >= lower_return_level
+                )
+                range_state["return_confirm_count"] = int(range_state.get("return_confirm_count") or 0) + 1 if returned_inside else 0
+                confirm_bars = int(self.params.get("inventory_range_confirm_bars", EXPECTED_INVENTORY_RANGE_CONFIRM_BARS))
+                if int(range_state["return_confirm_count"]) >= confirm_bars:
+                    synthetic_side = "SHORT" if break_side == "LONG" else "LONG"
+                    if not range_state.get("pending_side"):
+                        range_state["pending_side"] = synthetic_side
+                        range_state["pending_origin_bar"] = bar_text
+                        range_state["pending_break_side"] = break_side
+                        self._trade_row(
+                            "inventory_range_opportunity_created",
+                            primary,
+                            side=synthetic_side,
+                            reason="false_break_return_confirmed",
+                            signal_bar_time=bar_text,
+                            note=f"break_side={break_side};low={frozen_low};high={frozen_high};confirm_bars={confirm_bars}",
+                        )
+                    else:
+                        self._trade_row(
+                            "inventory_range_opportunity_dropped",
+                            primary,
+                            side=synthetic_side,
+                            reason="pending_already_exists",
+                            signal_bar_time=bar_text,
+                        )
+                    self._clear_inventory_range_break(range_state)
+
+        if bool(range_state.get("active")) and int(range_state.get("break_phase") or 0) == 0:
+            try:
+                frozen_low = float(range_state.get("low"))
+                frozen_high = float(range_state.get("high"))
+            except (TypeError, ValueError):
+                frozen_low = math.nan
+                frozen_high = math.nan
+            breakout_side = "LONG" if completed_close > frozen_high else "SHORT" if completed_close < frozen_low else None
+            if breakout_side is not None:
+                side_filter = str(self.params.get("inventory_range_break_side_filter", EXPECTED_INVENTORY_RANGE_BREAK_SIDE_FILTER)).lower()
+                if side_filter == "both" or side_filter == breakout_side.lower():
+                    range_state["break_phase"] = 1
+                    range_state["break_side"] = breakout_side
+                    range_state["break_time_utc"] = bar_text
+                    range_state["return_confirm_count"] = 0
+                    self._trade_row(
+                        "inventory_range_break",
+                        primary,
+                        side=breakout_side,
+                        reason="completed_m1_close_outside",
+                        signal_bar_time=bar_text,
+                        note=f"close={completed_close};low={frozen_low};high={frozen_high}",
+                    )
+                range_state["active"] = False
+                broke_range = True
+            elif not balanced:
+                range_state["active"] = False
+                self._trade_row(
+                    "inventory_range_invalidated",
+                    primary,
+                    reason="inventory_unbalanced_before_break",
+                    signal_bar_time=bar_text,
+                    note=f"long={long_count};short={short_count}",
+                )
+
+        if (
+            not broke_range
+            and int(range_state.get("break_phase") or 0) == 0
+            and not bool(range_state.get("active"))
+            and balanced
+            and range_low_now is not None
+            and range_high_now is not None
+            and range_high_now > range_low_now
+            and range_low_now <= completed_close <= range_high_now
+        ):
+            range_state["active"] = True
+            range_state["low"] = float(range_low_now)
+            range_state["high"] = float(range_high_now)
+            self._trade_row(
+                "inventory_range_armed",
+                primary,
+                reason="balanced_book_close_inside",
+                signal_bar_time=bar_text,
+                note=f"long={long_count};short={short_count};low={range_low_now};high={range_high_now}",
+            )
+        self._save_state()
+
+    def _take_inventory_range_fade_opportunity(
+        self,
+        *,
+        raw_side: str | None,
+        signal_bar: pd.Timestamp,
+        poll_time: pd.Timestamp,
+        symbol: str,
+    ) -> dict[str, Any] | None:
+        """Return one pending synthetic opportunity only when ZA is absent."""
+        if raw_side or not bool(self.params.get("inventory_range_fade_enabled", False)):
+            return None
+        routing = self.state["routing"]
+        range_state = routing["inventory_range_fade"]
+        side = str(range_state.get("pending_side") or "")
+        signal_bar_text = dt_text(signal_bar)
+        if side not in {"LONG", "SHORT"} or range_state.get("last_dispatch_bar") == signal_bar_text:
+            return None
+        origin_bar = range_state.get("pending_origin_bar")
+        break_side = range_state.get("pending_break_side")
+        range_state["pending_side"] = None
+        range_state["pending_origin_bar"] = None
+        range_state["pending_break_side"] = None
+        range_state["last_dispatch_bar"] = signal_bar_text
+        self._save_state()  # durable take before any lane can submit an OPEN
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        policy = {
+            "policy_id": str(self.params.get("inventory_range_fade_policy_id", EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID)),
+            "reason": "balanced_inventory_false_break_return",
+            "action": "opposite_breakout",
+            "origin_bar": origin_bar,
+            "break_side": break_side,
+        }
+        return {
+            "opportunity_id": f"{symbol}|{signal_bar_text}|INVENTORY_RANGE_FADE|{side}|{policy['policy_id']}",
+            "source": "inventory_range_false_break_fade",
+            "side": side,
+            "raw_side": "",
+            "effective_side": side,
+            "entry_policy": policy,
+            "event_time": signal_bar_text,
+            "release_time": dt_text(release_time),
+            "available_time": dt_text(release_time),
+            "decision_time": dt_text(poll_time),
+            "executable_at": dt_text(poll_time),
+        }
 
     def _clear_pending_open(self, strat: dict[str, Any]) -> None:
         st = self._st(strat)
@@ -731,14 +1378,29 @@ class S23HorizontalInventoryRunner:
         if namespace_error:
             logging.critical("S23 ownership namespace invalid: %s", namespace_error)
             return False
-        if any(self._st(strat).get("sync_block_reason") == "state_identity_mismatch" for strat in self.params.get("strategies", [])):
+        if any(self._st(strat).get("sync_block_reason") == "state_identity_mismatch" for strat in self._all_strategies()):
             logging.critical("S23 legacy/foreign state must be archived before this runner can start.")
-            for strat in self.params.get("strategies", []):
+            for strat in self._all_strategies():
                 st = self._st(strat)
                 if st.get("sync_block_reason") == "state_identity_mismatch":
                     self._notify_reconciliation_required(strat, "state_identity_mismatch", dict(st.get("sync_block_details") or {}))
             # Preserve the old on-disk state as evidence.  The operator must
             # reconcile/flat the account and archive it before first start.
+            return False
+        clock_now = utc_now()
+        current_block = self._entry_admission_block(clock_now)
+        eu_summer_time = is_eu_summer_time(clock_now)
+        us_summer_time = is_us_summer_time(clock_now)
+        logging.info(
+            "S23 entry-admission clock loaded: eu_regime=%s us_regime=%s block=%s routing_enabled=false",
+            "summer_time" if eu_summer_time else "standard_time",
+            "summer_time" if us_summer_time else "standard_time",
+            current_block.id if current_block else "off_block",
+        )
+        try:
+            validate_csv_schema(TRADE_LOG_FILE, TRADE_FIELDS)
+        except RuntimeError as exc:
+            logging.critical("S23 trade audit schema preflight failed: %s", exc)
             return False
         if not bool(self.params.get("enabled", True)):
             logging.info("S23 disabled by params.")
@@ -775,9 +1437,17 @@ class S23HorizontalInventoryRunner:
             if bool(self.params.get("require_hedging_account", True)) and int(account.get("margin_mode", -1)) != HEDGING_MARGIN_MODE:
                 logging.critical("S23 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
                 return False
-        if self._entry_policy_state_migrated:
+            symbol_info = self.executor.get_symbol_info(str(self.params.get("mt5_symbol", self.params["symbol"])))
+            if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
+                logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
+                return False
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated:
             self._save_state()
             self._entry_policy_state_migrated = False
+            self._portfolio_rearm_state_migrated = False
+            self._inventory_range_fade_state_migrated = False
+            self._morning_session_state_migrated = False
+            self._midday_session_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -791,6 +1461,33 @@ class S23HorizontalInventoryRunner:
             return f"invalid_entry_policy_id={self.params.get('entry_policy_id')} expected={EXPECTED_ENTRY_POLICY_ID}"
         if str(self.params.get("entry_policy_params_hash") or "") != EXPECTED_ENTRY_POLICY_PARAMS_HASH:
             return "invalid_entry_policy_params_hash"
+        if not bool(self.params.get("long_target_portfolio_rearm_enabled", False)):
+            return "long_target_portfolio_rearm_disabled"
+        if str(self.params.get("portfolio_rearm_policy_id") or "") != EXPECTED_PORTFOLIO_REARM_POLICY_ID:
+            return f"invalid_portfolio_rearm_policy_id={self.params.get('portfolio_rearm_policy_id')}"
+        if str(self.params.get("portfolio_rearm_params_hash") or "") != EXPECTED_PORTFOLIO_REARM_PARAMS_HASH:
+            return "invalid_portfolio_rearm_params_hash"
+        if int(self.params.get("long_target_portfolio_rearm_minutes") or 0) != EXPECTED_PORTFOLIO_REARM_MINUTES:
+            return f"invalid_long_target_portfolio_rearm_minutes={self.params.get('long_target_portfolio_rearm_minutes')}"
+        if not bool(self.params.get("inventory_range_fade_enabled", False)):
+            return "inventory_range_fade_disabled"
+        if str(self.params.get("inventory_range_fade_policy_id") or "") != EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID:
+            return f"invalid_inventory_range_fade_policy_id={self.params.get('inventory_range_fade_policy_id')}"
+        if str(self.params.get("inventory_range_fade_params_hash") or "") != EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH:
+            return "invalid_inventory_range_fade_params_hash"
+        if not math.isclose(
+            float(self.params.get("inventory_range_return_depth_fraction") or 0.0),
+            EXPECTED_INVENTORY_RANGE_RETURN_DEPTH,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            return f"invalid_inventory_range_return_depth={self.params.get('inventory_range_return_depth_fraction')}"
+        if int(self.params.get("inventory_range_max_wait_minutes") or 0) != EXPECTED_INVENTORY_RANGE_MAX_WAIT_MINUTES:
+            return f"invalid_inventory_range_max_wait_minutes={self.params.get('inventory_range_max_wait_minutes')}"
+        if int(self.params.get("inventory_range_confirm_bars") or 0) != EXPECTED_INVENTORY_RANGE_CONFIRM_BARS:
+            return f"invalid_inventory_range_confirm_bars={self.params.get('inventory_range_confirm_bars')}"
+        if str(self.params.get("inventory_range_break_side_filter") or "").lower() != EXPECTED_INVENTORY_RANGE_BREAK_SIDE_FILTER:
+            return f"invalid_inventory_range_break_side_filter={self.params.get('inventory_range_break_side_filter')}"
         if not bool(self.params.get("late_short_30m_action_enabled", False)):
             return "late_short_30m_action_disabled"
         if int(self.params.get("late_short_lookback_completed_m1_bars") or 0) != EXPECTED_LATE_SHORT_LOOKBACK:
@@ -828,6 +1525,101 @@ class S23HorizontalInventoryRunner:
             drift = {key: {"actual": row.get(key), "expected": expected} for key, expected in FROZEN_LANE_FIELDS.items() if row.get(key) != expected}
             if drift:
                 return f"frozen_lane_contract_drift:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
+        if not bool(self.params.get("morning_session_enabled", False)):
+            return "morning_session_disabled"
+        if str(self.params.get("morning_session_policy_id") or "") != EXPECTED_MORNING_POLICY_ID:
+            return f"invalid_morning_policy_id={self.params.get('morning_session_policy_id')}"
+        if str(self.params.get("morning_session_params_hash") or "") != EXPECTED_MORNING_POLICY_PARAMS_HASH:
+            return "invalid_morning_policy_params_hash"
+        if int(self.params.get("morning_session_start_utc", -1)) != EXPECTED_MORNING_SESSION_START_UTC:
+            return f"invalid_morning_session_start_utc={self.params.get('morning_session_start_utc')}"
+        if int(self.params.get("morning_session_end_utc", -1)) != EXPECTED_MORNING_SESSION_END_UTC:
+            return f"invalid_morning_session_end_utc={self.params.get('morning_session_end_utc')}"
+        if int(self.params.get("morning_session_max_positions", 0)) != EXPECTED_MORNING_MAX_POSITIONS:
+            return f"invalid_morning_session_max_positions={self.params.get('morning_session_max_positions')}"
+        morning = [row for row in self._morning_strategies() if bool(row.get("enabled", True))]
+        morning_magics = [int(row.get("magic") or 0) for row in morning]
+        configured_morning_magics = tuple(int(value) for value in self.params.get("expected_morning_magics", []))
+        if tuple(morning_magics) != EXPECTED_MORNING_MAGICS or configured_morning_magics != EXPECTED_MORNING_MAGICS:
+            return f"invalid_morning_magics={morning_magics} configured={list(configured_morning_magics)}"
+        if [int(row.get("lane_id") or 0) for row in morning] != [5, 6, 7]:
+            return "invalid_morning_lane_ids"
+        expected_morning = [
+            ("jst09_range_false_break_confirm_direction_control", 15, "s23_am_l1"),
+            ("price_effort_divergence_edge_direction_control", 55, "s23_am_l2"),
+            ("m15_compression_m5_edge_release_primary", 45, "s23_am_l3"),
+        ]
+        for row, (signal_id, hold_minutes, comment) in zip(morning, expected_morning):
+            if (
+                str(row.get("signal_id") or "") != signal_id
+                or int(row.get("hold_minutes") or 0) != hold_minutes
+                or str(row.get("comment_prefix") or "") != comment
+                or not math.isclose(float(row.get("lot") or 0.0), 0.01, rel_tol=0.0, abs_tol=1e-12)
+                or int(row.get("max_positions") or 0) != 1
+                or int(row.get("cooldown", -1)) != 0
+            ):
+                return f"invalid_morning_lane_contract:{row.get('id')}"
+        if not bool(self.params.get("midday_session_enabled", False)):
+            return "midday_session_disabled"
+        if str(self.params.get("midday_session_policy_id") or "") != EXPECTED_MIDDAY_POLICY_ID:
+            return f"invalid_midday_policy_id={self.params.get('midday_session_policy_id')}"
+        if str(self.params.get("midday_session_params_hash") or "") != EXPECTED_MIDDAY_POLICY_PARAMS_HASH:
+            return "invalid_midday_policy_params_hash"
+        if int(self.params.get("midday_session_start_utc", -1)) != EXPECTED_MIDDAY_SESSION_START_UTC:
+            return f"invalid_midday_session_start_utc={self.params.get('midday_session_start_utc')}"
+        if int(self.params.get("midday_session_end_utc", -1)) != EXPECTED_MIDDAY_SESSION_END_UTC:
+            return f"invalid_midday_session_end_utc={self.params.get('midday_session_end_utc')}"
+        if int(self.params.get("midday_session_max_positions", 0)) != EXPECTED_MIDDAY_MAX_POSITIONS:
+            return f"invalid_midday_session_max_positions={self.params.get('midday_session_max_positions')}"
+        midday = [row for row in self._midday_strategies() if bool(row.get("enabled", True))]
+        midday_magics = [int(row.get("magic") or 0) for row in midday]
+        configured_midday_magics = tuple(int(value) for value in self.params.get("expected_midday_magics", []))
+        if tuple(midday_magics) != EXPECTED_MIDDAY_MAGICS or configured_midday_magics != EXPECTED_MIDDAY_MAGICS:
+            return f"invalid_midday_magics={midday_magics} configured={list(configured_midday_magics)}"
+        if [int(row.get("lane_id") or 0) for row in midday] != [8]:
+            return "invalid_midday_lane_ids"
+        expected_midday = {
+            "signal_id": "round_s2p5_d0p05_r0p03", "hold_minutes": 60, "comment_prefix": "s23_md_l1",
+            "lot": 0.01, "max_positions": 1, "cooldown": 0, "level_step": 2.5, "atr_period": 60,
+            "min_sweep_depth_atr": 0.05, "reclaim_atr": 0.03,
+        }
+        for row in midday:
+            drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected_midday.items() if row.get(key) != value}
+            if str(row.get("spec_id") or "") != EXPECTED_MIDDAY_POLICY_ID or drift:
+                return f"invalid_midday_lane_contract:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
+        all_magics = magics + morning_magics + midday_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday]
+        if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
+            return "duplicate_combined_ownership_namespace"
+        admission_clock = self.params.get("eu_entry_admission_clock")
+        if not isinstance(admission_clock, dict):
+            return "missing_eu_entry_admission_clock"
+        if str(admission_clock.get("eu_timezone") or "") != EXPECTED_ENTRY_ADMISSION_EU_TIMEZONE:
+            return f"invalid_entry_admission_eu_timezone={admission_clock.get('eu_timezone')}"
+        if str(admission_clock.get("us_timezone") or "") != EXPECTED_ENTRY_ADMISSION_US_TIMEZONE:
+            return f"invalid_entry_admission_us_timezone={admission_clock.get('us_timezone')}"
+        if str(admission_clock.get("notation") or "") != EXPECTED_ENTRY_ADMISSION_NOTATION:
+            return f"invalid_entry_admission_notation={admission_clock.get('notation')}"
+        if str(admission_clock.get("scope") or "") != EXPECTED_ENTRY_ADMISSION_SCOPE:
+            return f"invalid_entry_admission_scope={admission_clock.get('scope')}"
+        if str(admission_clock.get("position_lifecycle") or "") != EXPECTED_POSITION_LIFECYCLE:
+            return f"invalid_position_lifecycle={admission_clock.get('position_lifecycle')}"
+        if bool(admission_clock.get("routing_enabled", True)):
+            return "entry_admission_routing_must_remain_disabled_until_signal_adoption"
+        observed_blocks = tuple(
+            (
+                str(row.get("id") or ""),
+                str((row.get("start") or {}).get("reference_clock") or ""),
+                str((row.get("start") or {}).get("dst_jst") or ""),
+                str((row.get("start") or {}).get("standard_jst") or ""),
+                str((row.get("end") or {}).get("reference_clock") or ""),
+                str((row.get("end") or {}).get("dst_jst") or ""),
+                str((row.get("end") or {}).get("standard_jst") or ""),
+            )
+            for row in admission_clock.get("blocks", [])
+        )
+        if observed_blocks != EXPECTED_ENTRY_ADMISSION_BLOCKS:
+            return f"invalid_entry_admission_blocks={observed_blocks}"
         return None
 
     def _get_m1(self) -> pd.DataFrame | None:
@@ -874,6 +1666,129 @@ class S23HorizontalInventoryRunner:
         if short_ok:
             return "SHORT"
         return None
+
+    @staticmethod
+    def _morning_signal_sides(bars: pd.DataFrame) -> dict[str, str | None]:
+        """Return stable_001 sides for the latest completed M1 bar."""
+        signal_ids = (
+            "jst09_range_false_break_confirm_direction_control",
+            "price_effort_divergence_edge_direction_control",
+            "m15_compression_m5_edge_release_primary",
+        )
+        result = {signal_id: None for signal_id in signal_ids}
+        if bars.empty:
+            return result
+        frame = bars.copy()
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        else:
+            frame.index = frame.index.tz_convert("UTC")
+        required = {"Open", "High", "Low", "Close"}
+        if not required.issubset(frame.columns):
+            return result
+        o = frame["Open"].astype(float)
+        h = frame["High"].astype(float)
+        low = frame["Low"].astype(float)
+        c = frame["Close"].astype(float)
+        activity = frame.get("Volume", pd.Series(0.0, index=frame.index)).astype(float)
+        decision_time = frame.index[-1] + pd.Timedelta(minutes=1)
+        if not in_session(decision_time, EXPECTED_MORNING_SESSION_START_UTC, EXPECTED_MORNING_SESSION_END_UTC):
+            return result
+
+        day = pd.Series(frame.index.date, index=frame.index)
+        minute = frame.index.hour * 60 + frame.index.minute
+        hour0 = minute < 60
+        hour1 = (minute >= 60) & (minute < 120)
+        h0_high = h.where(hour0).groupby(day).transform("max")
+        h0_low = low.where(hour0).groupby(day).transform("min")
+        swept_high = hour1 & (h > h0_high) & (c < h0_high)
+        swept_low = hour1 & (low < h0_low) & (c > h0_low)
+        primary_short = swept_high.shift(1, fill_value=False) & (c < o) & (c < c.shift(1))
+        primary_long = swept_low.shift(1, fill_value=False) & (c > o) & (c > c.shift(1))
+        if bool(primary_long.iloc[-1]):
+            result[signal_ids[0]] = "SHORT"
+        elif bool(primary_short.iloc[-1]):
+            result[signal_ids[0]] = "LONG"
+
+        delta = c.diff()
+        pressure = (delta.apply(lambda value: 1.0 if value > 0 else (-1.0 if value < 0 else 0.0)) * activity).rolling(15, min_periods=15).sum()
+        prior_high = h.shift(1).rolling(15, min_periods=15).max()
+        prior_low = low.shift(1).rolling(15, min_periods=15).min()
+        primary_div_short = (h > prior_high) & (c < prior_high) & (pressure < 0)
+        primary_div_long = (low < prior_low) & (c > prior_low) & (pressure > 0)
+        if bool(primary_div_long.iloc[-1]):
+            result[signal_ids[1]] = "SHORT"
+        elif bool(primary_div_short.iloc[-1]):
+            result[signal_ids[1]] = "LONG"
+
+        aggregate = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        m5 = frame.assign(Volume=activity).resample("5min", label="left", closed="left").agg(aggregate).dropna(subset=["Open", "High", "Low", "Close"])
+        m15 = frame.assign(Volume=activity).resample("15min", label="left", closed="left").agg(aggregate).dropna(subset=["Open", "High", "Low", "Close"])
+        if not m5.empty and not m15.empty:
+            m15_range = (m15["High"] - m15["Low"]).clip(lower=0.001)
+            reference = m15_range.shift(1).rolling(4, min_periods=4).median()
+            compressed = m15_range <= 0.60 * reference
+            comp_high = completed_align(m15["High"].where(compressed), 15, m5).ffill(limit=3)
+            comp_low = completed_align(m15["Low"].where(compressed), 15, m5).ffill(limit=3)
+            m5_side = pd.Series(0, index=m5.index, dtype=int)
+            m5_side = m5_side.mask(m5["Close"] > comp_high, 1).mask(m5["Close"] < comp_low, -1)
+            aligned = completed_align(m5_side, 5, frame).fillna(0).astype(int)
+            m1_pulse = aligned.where(aligned.ne(aligned.shift(1)), 0)
+            if int(m1_pulse.iloc[-1]) > 0:
+                result[signal_ids[2]] = "LONG"
+            elif int(m1_pulse.iloc[-1]) < 0:
+                result[signal_ids[2]] = "SHORT"
+        return result
+
+    @staticmethod
+    def _midday_signal_side(bars: pd.DataFrame, strat: dict[str, Any]) -> str | None:
+        """Return the fixed round-level sweep onset for the latest completed M1."""
+        if bars.empty:
+            return None
+        frame = bars.copy()
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        else:
+            frame.index = frame.index.tz_convert("UTC")
+        required = {"High", "Low", "Close"}
+        if not required.issubset(frame.columns):
+            return None
+        decision_time = frame.index[-1] + pd.Timedelta(minutes=1)
+        if not in_session(decision_time, EXPECTED_MIDDAY_SESSION_START_UTC, EXPECTED_MIDDAY_SESSION_END_UTC):
+            return None
+        atr_period = int(strat.get("atr_period", 60))
+        if atr_period <= 0 or len(frame) < atr_period + 2:
+            return None
+        high = frame["High"].astype(float)
+        low = frame["Low"].astype(float)
+        close = frame["Close"].astype(float)
+        previous_close = close.shift(1)
+        true_range = pd.concat(
+            [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+            axis=1,
+        ).max(axis=1)
+        atr = true_range.rolling(atr_period, min_periods=atr_period).mean()
+        step = float(strat.get("level_step", 2.5))
+        min_depth = float(strat.get("min_sweep_depth_atr", 0.05))
+        reclaim = float(strat.get("reclaim_atr", 0.03))
+        if step <= 0.0:
+            return None
+        scaled_previous = previous_close / step
+        upper_level = scaled_previous.apply(lambda value: math.ceil(value) if pd.notna(value) else math.nan) * step
+        lower_level = scaled_previous.apply(lambda value: math.floor(value) if pd.notna(value) else math.nan) * step
+        valid_atr = atr.where(atr > 0.0)
+        long_depth = (lower_level - low) / valid_atr
+        short_depth = (high - upper_level) / valid_atr
+        long_raw = (low < lower_level) & (long_depth >= min_depth) & (close > lower_level + reclaim * valid_atr)
+        short_raw = (high > upper_level) & (short_depth >= min_depth) & (close < upper_level - reclaim * valid_atr)
+        raw = pd.Series(
+            [1 if bool(long_ok) else (-1 if bool(short_ok) else 0) for long_ok, short_ok in zip(long_raw.fillna(False), short_raw.fillna(False))],
+            index=frame.index,
+            dtype=int,
+        )
+        onset = raw.where(raw.ne(raw.shift(1).fillna(0)), 0)
+        latest = int(onset.iloc[-1])
+        return "LONG" if latest > 0 else ("SHORT" if latest < 0 else None)
 
     def _apply_entry_policy(
         self,
@@ -957,6 +1872,13 @@ class S23HorizontalInventoryRunner:
         return deal
 
     def _sync_strategy(self, strat: dict[str, Any]) -> bool:
+        """Reconcile ownership and report whether known inventory may be monitored.
+
+        A True result does not imply that new entries are permitted.  Entry and
+        add admission remains controlled by ``sync_block_new_entries``.  This
+        distinction lets an exactly reconciled existing basket retain its
+        quote-based exits while an ambiguous later OPEN remains fail-closed.
+        """
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         st = self._st(strat)
         positions = self.executor.get_positions(symbol, int(strat["magic"]))
@@ -990,7 +1912,9 @@ class S23HorizontalInventoryRunner:
             audit=lambda _symbol, event, reason: self._trade_row(event, strat, reason=reason),
             flat_auto_clear_reasons=FLAT_AUTO_CLEAR_SYNC_REASONS,
             confirm_position_absent=self.executor.confirm_position_absent,
-            required_flat_confirmations=2,
+            required_flat_confirmations=(
+                3 if st.get("sync_block_reason") == "unresolved_open_action" else 2
+            ),
         ):
             logging.info("S23 clean sync cleared: %s", strat["id"])
             self._clear_pending_open(strat)
@@ -998,6 +1922,7 @@ class S23HorizontalInventoryRunner:
         if not self.live_enabled:
             return not bool(st.get("sync_block_new_entries"))
         state_basket = list(st.get("basket") or [])
+        unresolved_open = bool(st.get("pending_open_opportunity_id"))
         if not state_basket and positions:
             self._set_sync_block(
                 strat,
@@ -1006,7 +1931,7 @@ class S23HorizontalInventoryRunner:
                 recoverable=False,
             )
             return False
-        if st.get("pending_open_opportunity_id"):
+        if not state_basket and unresolved_open:
             self._set_sync_block(
                 strat,
                 "unresolved_open_action",
@@ -1041,6 +1966,31 @@ class S23HorizontalInventoryRunner:
                     if not self._state_matches_live(strat, state_pos, live_pos):
                         self._set_sync_block(strat, "state_position_ownership_mismatch", {"ticket": position_id}, recoverable=False)
                         return False
+                    if "hold_minutes" in strat:
+                        broker_open_epoch = int(getattr(live_pos, "open_time", 0) or 0)
+                        if broker_open_epoch <= 0:
+                            self._set_sync_block(
+                                strat,
+                                "confirmed_fill_time_unavailable",
+                                {"ticket": position_id},
+                                recoverable=True,
+                            )
+                            return False
+                        broker_entry_time = pd.Timestamp(broker_open_epoch, unit="s", tz="UTC")
+                        persisted_entry_time = parse_ts(state_pos.get("entry_time_utc"))
+                        if persisted_entry_time != broker_entry_time:
+                            previous_entry_time = state_pos.get("entry_time_utc")
+                            state_pos["entry_time_utc"] = dt_text(broker_entry_time)
+                            state_pos["open_time_epoch"] = broker_open_epoch
+                            self._trade_row(
+                                "position_lifecycle_recovered",
+                                strat,
+                                ticket=int(state_pos.get("ticket") or position_id),
+                                position_identifier=position_id,
+                                reason="confirmed_broker_fill_time_restored",
+                                note=f"previous_entry_time_utc={previous_entry_time};broker_entry_time_utc={dt_text(broker_entry_time)}",
+                            )
+                            self._save_state()
                     remaining_state.append(state_pos)
                     continue
                 opened_at_epoch = max(0, int(state_pos.get("open_time_epoch") or 0) - 60)
@@ -1059,23 +2009,76 @@ class S23HorizontalInventoryRunner:
                         recoverable=False,
                     )
                     return False
-                confirmed_deals.append(deal)
+                confirmed_deals.append((state_pos, deal))
             if confirmed_deals:
                 reason = str(st.get("pending_close_reason") or "broker_or_external_close_confirmed")
                 signal_bar = st.get("pending_close_signal_bar")
-                confirmed_net = sum(float(deal.net_profit) for deal in confirmed_deals)
+                closed_basket_id = st.get("current_basket_id")
+                closed_basket_was_long = bool(state_basket) and all(
+                    str(pos.get("side") or "") == "LONG" for pos in state_basket
+                )
+                confirmed_net = sum(float(deal.net_profit) for _state_pos, deal in confirmed_deals)
                 st["basket"] = remaining_state
-                for deal in confirmed_deals:
+                confirmed_times: list[pd.Timestamp] = []
+                for state_pos, deal in confirmed_deals:
                     deal_epoch = int(getattr(deal, "deal_time", 0) or 0)
                     deal_time = pd.Timestamp(deal_epoch, unit="s", tz="UTC") if deal_epoch > 0 else utc_now()
+                    confirmed_times.append(pd.Timestamp(deal_time))
                     self._record_daily_realized(strat, float(deal.net_profit), deal_time)
-                self._trade_row("position_close_confirmed", strat, profit=confirmed_net, reason=reason, signal_bar_time=signal_bar)
+                    position_id = int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0)
+                    self._trade_row(
+                        "position_close_confirmed", strat,
+                        ticket=int(state_pos.get("ticket") or position_id), position_identifier=position_id,
+                        deal_id=int(getattr(deal, "deal", 0) or 0), side=str(state_pos.get("side") or ""),
+                        lot=float(state_pos.get("lot") or 0.0), entry_price=float(state_pos.get("entry_price") or 0.0),
+                        exit_price=float(getattr(deal, "price", 0.0) or 0.0), price=float(getattr(deal, "price", 0.0) or 0.0),
+                        profit=float(deal.net_profit), reason=reason, signal_bar_time=signal_bar,
+                        note=f"deal_time_utc={dt_text(deal_time)}",
+                    )
                 if not remaining_state:
+                    if reason == "basket_target" and closed_basket_was_long:
+                        self._confirm_long_target_portfolio_rearm(
+                            strat,
+                            max(confirmed_times),
+                            closed_basket_id,
+                        )
                     self._clear_basket_state(strat, reason, signal_bar)
                     if orders_available:
                         self._set_sync_block(strat, None)
                 self._save_state()
+                if unresolved_open:
+                    self._set_sync_block(
+                        strat,
+                        "unresolved_open_action",
+                        {
+                            "opportunity_id": str(st.get("pending_open_opportunity_id") or ""),
+                            "started_utc": st.get("pending_open_started_utc"),
+                            "live_tickets": [int(pos.ticket) for pos in positions],
+                        },
+                        recoverable=False,
+                    )
+                    self._save_state()
+                    # Confirmed remaining state is safe to close, but a flat
+                    # or fully reconciled-away basket has nothing to monitor.
+                    return bool(remaining_state)
                 return not bool(st.get("sync_block_new_entries"))
+            if unresolved_open:
+                self._set_sync_block(
+                    strat,
+                    "unresolved_open_action",
+                    {
+                        "opportunity_id": str(st.get("pending_open_opportunity_id") or ""),
+                        "started_utc": st.get("pending_open_started_utc"),
+                        "live_tickets": [int(pos.ticket) for pos in positions],
+                    },
+                    recoverable=False,
+                )
+                self._save_state()
+                # Every live position has already matched a persisted ticket,
+                # side, lot, symbol, magic, and comment.  Keep the unresolved
+                # OPEN as a hard entry/add block while allowing only those
+                # proven positions to reach target/stop/FTP/max-hold exits.
+                return bool(remaining_state) and len(remaining_state) == len(state_basket)
             if remaining_state and len(remaining_state) == len(state_basket) and orders_available and not orders:
                 clear_recoverable_sync_block_after_clean_sync(
                     symbol_key=strat["id"],
@@ -1097,7 +2100,7 @@ class S23HorizontalInventoryRunner:
                 return True
         return not bool(st.get("sync_block_new_entries"))
 
-    def _close_basket(self, strat: dict[str, Any], reason: str, price_row: pd.Series, pnl: float) -> None:
+    def _close_basket(self, strat: dict[str, Any], reason: str, price_row: pd.Series, pnl: float) -> str:
         st = self._st(strat)
         if self.live_enabled:
             for pos in list(st["basket"]):
@@ -1107,31 +2110,53 @@ class S23HorizontalInventoryRunner:
                 if live_pos is None:
                     self._set_sync_block(strat, "position_query_unavailable_before_close", {"ticket": ticket}, recoverable=False)
                     self._save_state()
-                    return
+                    return "failed"
                 if live_pos is False or not self._owned_position(strat, live_pos) or int(getattr(live_pos, "identifier", 0) or live_pos.ticket) != position_id:
                     self._set_sync_block(strat, "state_ticket_unowned_or_foreign", {"ticket": ticket, "position_identifier": position_id}, recoverable=False)
                     self._save_state()
-                    return
+                    return "failed"
             st["pending_close_reason"] = reason
             st["pending_close_signal_bar"] = str(price_row.name)
+            if reason == "basket_target" and self._basket_is_long(strat):
+                self._arm_long_target_portfolio_rearm(strat, utc_now())
             self._save_state()
             for pos in list(st["basket"]):
                 ticket = int(pos.get("ticket") or 0)
                 close_result = self.executor.close_position(ticket, int(self.params.get("deviation_points", 50)))
                 if not close_result:
                     close_status = str(getattr(close_result, "status", "FAILED"))
+                    if close_status == "MARKET_CLOSED" and reason in {"morning_fixed_hold", "midday_fixed_hold"}:
+                        st["pending_close_reason"] = None
+                        st["pending_close_signal_bar"] = None
+                        self._trade_row(
+                            "time_close_deferred", strat, ticket=ticket,
+                            position_identifier=int(pos.get("position_identifier") or ticket),
+                            reason="market_closed_10018", signal_bar_time=str(price_row.name),
+                            note=f"retcode={getattr(close_result, 'retcode', None)}",
+                        )
+                        self._save_state()
+                        return "market_closed"
                     block_reason = "live_time_close_unconfirmed" if close_status in {"MISSING_UNCONFIRMED", "MALFORMED_OK"} else "live_time_close_failed"
-                    self._set_sync_block(strat, block_reason, {"ticket": ticket, "status": close_status}, recoverable=False)
+                    self._set_sync_block(
+                        strat, block_reason,
+                        {"ticket": ticket, "status": close_status, "retcode": getattr(close_result, "retcode", None)},
+                        recoverable=False,
+                    )
                     self._save_state()
-                    return
+                    return "failed"
                 pos["close_requested"] = True
             self._trade_row("basket_close_requested", strat, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
             self._save_state()
             return
+        closed_basket_id = st.get("current_basket_id")
+        closed_basket_was_long = self._basket_is_long(strat)
         self._trade_row("basket_close", strat, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
         self._record_daily_realized(strat, pnl, price_row.name)
+        if reason == "basket_target" and closed_basket_was_long:
+            self._confirm_long_target_portfolio_rearm(strat, price_row.name, closed_basket_id)
         self._clear_basket_state(strat, reason, str(price_row.name))
         self._save_state()
+        return "closed"
 
     def _open_entry(
         self,
@@ -1144,8 +2169,21 @@ class S23HorizontalInventoryRunner:
         basket_atr30: float | None = None,
         execution_time: datetime | pd.Timestamp | None = None,
         opportunity: dict[str, Any] | None = None,
+        apply_portfolio_rearm: bool = True,
+        use_confirmed_fill_time: bool = False,
     ) -> bool:
         st = self._st(strat)
+        if not st["basket"] and apply_portfolio_rearm:
+            portfolio_block = self._portfolio_new_long_basket_block_reason(side, execution_time)
+            if portfolio_block:
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    reason=portfolio_block,
+                    signal_bar_time=str(price_row.name),
+                    note="final_portfolio_rearm_guard",
+                )
+                return False
         entry_block = self._entry_submission_block_reason(strat, execution_time)
         if entry_block:
             self._trade_row("entry_skip", strat, reason=entry_block, signal_bar_time=str(price_row.name), note="final_open_guard")
@@ -1234,6 +2272,13 @@ class S23HorizontalInventoryRunner:
             st["basket_sequence"] = int(st.get("basket_sequence") or 0) + 1
             st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
         opportunity_id = str((opportunity or {}).get("opportunity_id") or st.get("pending_entry_opportunity_id") or "")
+        entry_time = execution_time if execution_time is not None else (parse_ts(price_row.name) or pd.Timestamp(utc_now())) + pd.Timedelta(minutes=1)
+        confirmed_open_epoch = int(getattr(confirmed, "open_time", 0) or 0) if confirmed is not None else 0
+        fill_time_unavailable = bool(self.live_enabled and use_confirmed_fill_time and confirmed_open_epoch <= 0)
+        if use_confirmed_fill_time and confirmed_open_epoch > 0:
+            entry_time = pd.Timestamp(confirmed_open_epoch, unit="s", tz="UTC")
+        elif fill_time_unavailable:
+            entry_time = None
         st["basket"].append(
             {
                 "ticket": ticket,
@@ -1241,8 +2286,8 @@ class S23HorizontalInventoryRunner:
                 "side": side,
                 "lot": lot,
                 "entry_price": entry_price,
-                "entry_time_utc": dt_text(execution_time if execution_time is not None else (parse_ts(price_row.name) or pd.Timestamp(utc_now())) + pd.Timedelta(minutes=1)),
-                "open_time_epoch": int(getattr(confirmed, "open_time", 0) or 0) if confirmed is not None else 0,
+                "entry_time_utc": dt_text(entry_time) if entry_time is not None else None,
+                "open_time_epoch": confirmed_open_epoch,
                 "owner_symbol": symbol,
                 "owner_magic": int(strat["magic"]),
                 "owner_comment": str(getattr(confirmed, "comment", "") or strat["comment_prefix"]) if confirmed is not None else str(strat["comment_prefix"]),
@@ -1259,6 +2304,22 @@ class S23HorizontalInventoryRunner:
         st["last_add_price"] = entry_price
         st["last_signal_bar"] = str(price_row.name)
         self._clear_pending_open(strat)
+        if fill_time_unavailable:
+            self._set_sync_block(
+                strat,
+                "confirmed_fill_time_unavailable",
+                {"ticket": int(ticket or 0), "position_identifier": int(getattr(confirmed, "identifier", 0) or ticket or 0)},
+                recoverable=True,
+            )
+            self._trade_row(
+                "position_lifecycle_deferred",
+                strat,
+                ticket=ticket or "",
+                position_identifier=int(getattr(confirmed, "identifier", 0) or ticket or 0),
+                reason="confirmed_fill_time_unavailable",
+                signal_bar_time=str(price_row.name),
+                note="poll time was not substituted; next exact owned-position sync may recover broker open_time",
+            )
         self._trade_row(
             "entry",
             strat,
@@ -1347,6 +2408,328 @@ class S23HorizontalInventoryRunner:
             return True
         return False
 
+    def _monitor_fixed_hold_position(
+        self,
+        strat: dict[str, Any],
+        info: Any,
+        poll_time: datetime | pd.Timestamp | None,
+        close_reason: str,
+    ) -> bool:
+        st = self._st(strat)
+        if st.get("pending_close_reason"):
+            return True
+        if not st["basket"]:
+            return False
+        at_utc = pd.Timestamp(poll_time if poll_time is not None else utc_now())
+        at_utc = at_utc.tz_localize("UTC") if at_utc.tzinfo is None else at_utc.tz_convert("UTC")
+        entries = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
+        valid_entries = [stamp for stamp in entries if stamp is not None]
+        if not valid_entries:
+            raw_entries = [pos.get("entry_time_utc") for pos in st["basket"]]
+            missing_confirmed_fill = all(value is None or value == "" for value in raw_entries)
+            self._set_sync_block(
+                strat,
+                "confirmed_fill_time_unavailable" if missing_confirmed_fill else "state_entry_time_invalid",
+                recoverable=missing_confirmed_fill,
+            )
+            self._save_state()
+            return True
+        # Once filled, this lane owns an absolute UTC lifecycle. Session/DST
+        # classification is intentionally absent from the close deadline.
+        due = fixed_hold_due_at(valid_entries, int(strat["hold_minutes"]))
+        quote_time_msc = getattr(info, "quote_time_msc", None)
+        if quote_time_msc is None:
+            if self.live_enabled:
+                self._trade_row(
+                    "time_close_deferred", strat, reason="quote_timestamp_unavailable",
+                    signal_bar_time=str(due), note="updated BotBridge_s23 INFO response is required",
+                )
+                return True
+            quote_time_msc = int(at_utc.timestamp() * 1000)
+        try:
+            quote_time_msc = int(quote_time_msc)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        quote_time = pd.Timestamp(quote_time_msc, unit="ms", tz="UTC")
+        # The broker quote clock is authoritative for a live fixed-hold exit.
+        # Host/poll clock drift must neither advance nor delay the deadline.
+        if quote_time < due:
+            return False if at_utc < due else True
+        retry_after = parse_ts(st.get("time_close_retry_after_utc"))
+        if retry_after is not None and quote_time < retry_after:
+            return True
+        last_quote_msc = st.get("time_close_last_quote_msc")
+        if last_quote_msc is not None and quote_time_msc <= int(last_quote_msc):
+            return True
+        st["time_close_last_quote_msc"] = quote_time_msc
+        bid = float(getattr(info, "bid"))
+        ask = float(getattr(info, "ask"))
+        point = float(self.params.get("point_size", 0.001))
+        spread_points = max(0.0, ask - bid) / point if point > 0 else math.inf
+        spread_cap = float(self.params.get("fixed_hold_close_max_spread_points", 300.0))
+        wide_seen = bool(st.get("time_close_wide_seen"))
+        defer_started = parse_ts(st.get("time_close_defer_started_utc"))
+        if not wide_seen and spread_points > spread_cap:
+            st["time_close_wide_seen"] = True
+            st["time_close_defer_started_utc"] = dt_text(quote_time)
+            st["time_close_stable_count"] = 0
+            self._trade_row(
+                "time_close_deferred", strat, reason="spread_wide",
+                signal_bar_time=str(due),
+                note=f"spread_points={spread_points:.3f};cap={spread_cap:.3f}",
+            )
+            self._save_state()
+            return True
+        if wide_seen:
+            if defer_started is None:
+                defer_started = quote_time
+                st["time_close_defer_started_utc"] = dt_text(quote_time)
+            force_after = defer_started + pd.Timedelta(
+                minutes=float(self.params.get("fixed_hold_close_force_after_minutes", 30.0))
+            )
+            if quote_time < force_after:
+                if spread_points <= spread_cap:
+                    st["time_close_stable_count"] = int(st.get("time_close_stable_count") or 0) + 1
+                else:
+                    st["time_close_stable_count"] = 0
+                stable_required = int(self.params.get("fixed_hold_close_stable_polls", 3))
+                self._save_state()
+                if int(st["time_close_stable_count"]) < stable_required:
+                    return True
+        pnl = self._basket_pnl(strat, bid, ask)
+        row = pd.Series({"Open": bid, "Close": bid, "AskOpen": ask}, name=quote_time)
+        result = self._close_basket(strat, close_reason, row, pnl)
+        if result == "market_closed":
+            st["time_close_retry_after_utc"] = dt_text(
+                quote_time + pd.Timedelta(seconds=float(self.params.get("fixed_hold_market_closed_retry_seconds", 60.0)))
+            )
+            st["time_close_defer_started_utc"] = None
+            st["time_close_stable_count"] = 0
+            st["time_close_wide_seen"] = False
+            self._save_state()
+        return True
+
+    def _monitor_morning_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        return self._monitor_fixed_hold_position(strat, info, poll_time, "morning_fixed_hold")
+
+    def _monitor_midday_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        return self._monitor_fixed_hold_position(strat, info, poll_time, "midday_fixed_hold")
+
+    def _process_morning_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        session_active = in_session(
+            poll_time,
+            EXPECTED_MORNING_SESSION_START_UTC,
+            EXPECTED_MORNING_SESSION_END_UTC,
+        )
+        for strat in self._morning_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                session_active
+                or st.get("basket")
+                or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason")
+                or st.get("sync_block_new_entries")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            readiness[lane_id] = not self._monitor_morning_position(strat, info, poll_time)
+        return readiness
+
+    def _process_morning_entries(
+        self,
+        bars: pd.DataFrame,
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+    ) -> None:
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return "requested"
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        if not in_session(release_time, EXPECTED_MORNING_SESSION_START_UTC, EXPECTED_MORNING_SESSION_END_UTC):
+            return
+        sides = self._morning_signal_sides(bars)
+        signal_bar_text = dt_text(signal_bar)
+        total_positions = sum(len(self._st(strat).get("basket") or []) for strat in self._morning_strategies())
+        for strat in self._morning_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            st = self._st(strat)
+            if st.get("last_evaluated_bar") == signal_bar_text:
+                continue
+            # Durable evaluation reservation prevents duplicate opens when a
+            # poll is retried after an uncertain bridge response.
+            st["last_evaluated_bar"] = signal_bar_text
+            self._save_state()
+            side = sides.get(str(strat["signal_id"]))
+            if side is None:
+                self._trade_row("morning_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
+                continue
+            opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|{strat['signal_id']}|{side}"
+            if not readiness.get(int(strat["lane_id"]), False):
+                self._trade_row("morning_decision", strat, opportunity_id=opportunity_id, side=side, reason="exit_or_sync_block", signal_bar_time=signal_bar_text)
+                continue
+            if st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1)):
+                self._trade_row("morning_decision", strat, opportunity_id=opportunity_id, side=side, reason="lane_capacity_full", signal_bar_time=signal_bar_text)
+                continue
+            if total_positions >= int(self.params.get("morning_session_max_positions", EXPECTED_MORNING_MAX_POSITIONS)):
+                self._trade_row("morning_decision", strat, opportunity_id=opportunity_id, side=side, reason="morning_capacity_full", signal_bar_time=signal_bar_text)
+                continue
+            point = float(self.params.get("point_size", 0.001))
+            spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+            if spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+                self._trade_row("morning_decision", strat, opportunity_id=opportunity_id, side=side, reason="spread_guard", signal_bar_time=signal_bar_text)
+                continue
+            stale = stale_signal_decision(
+                str(price_row.name),
+                timeframe_hours=1.0 / 60.0,
+                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                options=self.safety,
+            )
+            if stale.stale:
+                self._trade_row("morning_decision", strat, opportunity_id=opportunity_id, side=side, reason="stale_signal_skip", signal_bar_time=signal_bar_text)
+                continue
+            opportunity = {
+                "opportunity_id": opportunity_id,
+                "event_time": signal_bar_text,
+                "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time),
+                "decision_time": dt_text(poll_time),
+            }
+            opened = self._open_entry(
+                strat,
+                side,
+                price_row,
+                info,
+                note=f"morning_stable001_hold_{int(strat['hold_minutes'])}m",
+                execution_time=poll_time,
+                opportunity=opportunity,
+                apply_portfolio_rearm=False,
+                use_confirmed_fill_time=True,
+            )
+            if opened:
+                total_positions += 1
+
+    def _process_midday_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        session_active = in_session(poll_time, EXPECTED_MIDDAY_SESSION_START_UTC, EXPECTED_MIDDAY_SESSION_END_UTC)
+        for strat in self._midday_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                session_active or st.get("basket") or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason") or st.get("sync_block_new_entries")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            readiness[lane_id] = not self._monitor_midday_position(strat, info, poll_time)
+        return readiness
+
+    def _process_midday_entries(
+        self,
+        bars: pd.DataFrame,
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+    ) -> None:
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        if not in_session(release_time, EXPECTED_MIDDAY_SESSION_START_UTC, EXPECTED_MIDDAY_SESSION_END_UTC):
+            return
+        signal_bar_text = dt_text(signal_bar)
+        total_positions = sum(len(self._st(strat).get("basket") or []) for strat in self._midday_strategies())
+        for strat in self._midday_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            st = self._st(strat)
+            if st.get("last_evaluated_bar") == signal_bar_text:
+                continue
+            st["last_evaluated_bar"] = signal_bar_text
+            self._save_state()
+            side = self._midday_signal_side(bars, strat)
+            if side is None:
+                self._trade_row("midday_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
+                continue
+            opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|{strat['signal_id']}|{side}"
+            opportunity = {
+                "opportunity_id": opportunity_id, "source": "jst1113_round_sweep",
+                "side": side, "raw_side": side, "effective_side": side,
+                "event_time": signal_bar_text, "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time), "decision_time": dt_text(poll_time),
+                "executable_at": dt_text(poll_time),
+            }
+            shadow_context = self._shadow_context(price_row, info, readiness)
+            self._midday_observer_call(
+                "register_opportunity", opportunity=opportunity, at=poll_time,
+                bid=float(info.bid), ask=float(info.ask), context=shadow_context,
+            )
+            self._midday_state_tagger_call(
+                "tag_opportunity", opportunity=opportunity, at=poll_time, bars=bars,
+                bid=float(info.bid), ask=float(info.ask), context=shadow_context,
+            )
+            if not readiness.get(int(strat["lane_id"]), False):
+                self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="exit_or_sync_block", signal_bar_time=signal_bar_text)
+                self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="unconsumed", reason="exit_or_sync_block")
+                continue
+            if st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1)):
+                self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="lane_capacity_full", signal_bar_time=signal_bar_text)
+                self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="unconsumed", reason="lane_capacity_full")
+                continue
+            if total_positions >= int(self.params.get("midday_session_max_positions", EXPECTED_MIDDAY_MAX_POSITIONS)):
+                self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="midday_capacity_full", signal_bar_time=signal_bar_text)
+                self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="unconsumed", reason="midday_capacity_full")
+                continue
+            point = float(self.params.get("point_size", 0.001))
+            spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+            if spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+                self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="spread_guard", signal_bar_time=signal_bar_text)
+                self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="unconsumed", reason="spread_guard")
+                continue
+            stale = stale_signal_decision(
+                str(price_row.name), timeframe_hours=1.0 / 60.0,
+                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)), options=self.safety,
+            )
+            if stale.stale:
+                self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="stale_signal_skip", signal_bar_time=signal_bar_text)
+                self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="stale_rejected", reason="stale_signal_skip")
+                continue
+            opened = self._open_entry(
+                strat, side, price_row, info,
+                note="midday_round_s2p5_d0p05_r0p03_hold_60m",
+                execution_time=poll_time, opportunity=opportunity,
+                apply_portfolio_rearm=False, use_confirmed_fill_time=True,
+            )
+            if opened:
+                total_positions += 1
+            self._midday_observer_call(
+                "record_route", opportunity_id=opportunity_id, at=poll_time,
+                status="consumed" if opened else "unconsumed",
+                consumed_lane_id=int(strat["lane_id"]) if opened else None,
+                reason="entry_opened" if opened else "entry_not_opened",
+            )
+
     def _monitor_pending_entry(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         st = self._st(strat)
         side = str(st.get("pending_entry_side") or "")
@@ -1415,14 +2798,8 @@ class S23HorizontalInventoryRunner:
             opportunity=opportunity,
         )
 
-    def _prepare_lane(self, strat: dict[str, Any], price_row: pd.Series, info: Any, poll_time: pd.Timestamp) -> tuple[bool, str, bool]:
+    def _prepare_lane_admission(self, strat: dict[str, Any], price_row: pd.Series, info: Any, poll_time: pd.Timestamp) -> tuple[bool, str, bool]:
         st = self._st(strat)
-        if not self._sync_strategy(strat):
-            self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
-            self._save_state()
-            return False, str(st.get("sync_block_reason") or "sync_block"), False
-        if self._monitor_open_basket(strat, info, price_row, poll_time):
-            return False, "open_basket_exit_or_pending_close", False
         entry_block = self._entry_submission_block_reason(strat, poll_time)
         if entry_block:
             return False, entry_block, False
@@ -1447,6 +2824,16 @@ class S23HorizontalInventoryRunner:
             # raw signal on the same tick, and marks that tick consumed.
             return False, "pending_entry_fill", pending_touch
         return True, "ready", False
+
+    def _prepare_lane(self, strat: dict[str, Any], price_row: pd.Series, info: Any, poll_time: pd.Timestamp) -> tuple[bool, str, bool]:
+        st = self._st(strat)
+        if not self._sync_strategy(strat):
+            self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+            self._save_state()
+            return False, str(st.get("sync_block_reason") or "sync_block"), False
+        if self._monitor_open_basket(strat, info, price_row, poll_time):
+            return False, "open_basket_exit_or_pending_close", False
+        return self._prepare_lane_admission(strat, price_row, info, poll_time)
 
     @staticmethod
     def _opportunity_fields(opportunity: dict[str, Any]) -> dict[str, Any]:
@@ -1489,6 +2876,8 @@ class S23HorizontalInventoryRunner:
     ) -> tuple[bool, str]:
         st = self._st(strat)
         side = str(opportunity["side"])
+        source = str(opportunity.get("source") or "za")
+        is_inventory_range_fade = source == "inventory_range_false_break_fade"
         fields = self._opportunity_fields(opportunity)
         st["last_evaluated_bar"] = opportunity["event_time"]
         entry_block = self._entry_submission_block_reason(strat, poll_time)
@@ -1532,6 +2921,9 @@ class S23HorizontalInventoryRunner:
             )
             return attempted, "add_attempted" if attempted else "add_final_guard"
 
+        portfolio_block = self._portfolio_new_long_basket_block_reason(side, poll_time)
+        if portfolio_block:
+            return False, portfolio_block
         block_reason = self._new_basket_block_reason(strat, poll_time)
         if block_reason:
             return False, block_reason
@@ -1557,7 +2949,7 @@ class S23HorizontalInventoryRunner:
             previous_id = st.get("pending_entry_opportunity_id")
             self._clear_pending_entry(strat)
             self._trade_row("pending_cancelled", strat, opportunity_id=previous_id, reason="opposite_signal")
-        if low_vol:
+        if low_vol and not is_inventory_range_fade:
             if not math.isfinite(mid) or not math.isfinite(std) or std <= 0.0:
                 return False, "bollinger_state_unavailable"
             z = (float(price_row["Close"]) - mid) / std
@@ -1577,7 +2969,7 @@ class S23HorizontalInventoryRunner:
             side,
             price_row,
             info,
-            note="horizontal_lane_entry",
+            note="inventory_range_false_break_fade_entry" if is_inventory_range_fade else "horizontal_lane_entry",
             basket_atr30=atr30,
             execution_time=poll_time,
             opportunity=opportunity,
@@ -1602,7 +2994,7 @@ class S23HorizontalInventoryRunner:
         fields = self._opportunity_fields(opportunity)
         policy = dict(opportunity.get("entry_policy") or {})
         self._trade_row(
-            "raw_opportunity",
+            "synthetic_opportunity" if opportunity.get("source") == "inventory_range_false_break_fade" else "raw_opportunity",
             primary,
             side=opportunity["side"],
             reason=str(policy.get("reason") or "legacy_za_confirmed_m1_impulse"),
@@ -1634,7 +3026,7 @@ class S23HorizontalInventoryRunner:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         info = self.executor.get_symbol_info(symbol)
         if info is None:
-            for strat in self.params["strategies"]:
+            for strat in self._all_strategies():
                 if bool(strat.get("enabled", True)):
                     self._set_sync_block(strat, "symbol_info_failed", recoverable=True)
                     if self._st(strat).get("basket"):
@@ -1647,7 +3039,14 @@ class S23HorizontalInventoryRunner:
                         )
             self._save_state()
             return
-        self._observer_call("observe_quote", at=utc_now(), bid=float(info.bid), ask=float(info.ask))
+        quote_time = pd.Timestamp(utc_now())
+        self._observer_call("observe_quote", at=quote_time, bid=float(info.bid), ask=float(info.ask))
+        self._midday_observer_call("observe_quote", at=quote_time, bid=float(info.bid), ask=float(info.ask))
+        # Fixed-time overlay exits depend only on the executable quote and the
+        # persisted actual fill time, so they remain active even if HIST/M1 is
+        # temporarily unavailable.
+        morning_readiness = self._process_morning_exits(info, quote_time)
+        midday_readiness = self._process_midday_exits(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -1667,15 +3066,45 @@ class S23HorizontalInventoryRunner:
         signal_bar = parse_ts(price_row.name)
         poll_time = pd.Timestamp(utc_now())
         if signal_bar is None:
-            for strat in self.params["strategies"]:
+            for strat in self._all_strategies():
                 if bool(strat.get("enabled", True)):
                     self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(price_row.name)}, recoverable=True)
             self._save_state()
             return
+        self._process_morning_entries(bars, price_row, info, poll_time, morning_readiness)
+        self._process_midday_entries(bars, price_row, info, poll_time, midday_readiness)
+        # Match the ordered-tick replay: observe the frozen balanced-book
+        # range at the first processing of each completed M1, before this
+        # poll's basket exits can change the local inventory state.
+        self._advance_inventory_range_fade(price_row)
+        # Process every lane's sync and exits before allowing any lane to fill a
+        # pending entry or consume a new opportunity. A LONG target close in a
+        # later lane therefore arms the portfolio guard before an earlier lane
+        # can open a new LONG basket on the same poll.
+        exit_pass_ready: dict[int, bool] = {}
+        for strat in self.params["strategies"]:
+            if not bool(strat.get("enabled", True)):
+                continue
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+                self._save_state()
+                exit_pass_ready[lane_id] = False
+                continue
+            if self._monitor_open_basket(strat, info, price_row, poll_time):
+                exit_pass_ready[lane_id] = False
+                continue
+            exit_pass_ready[lane_id] = True
         lane_readiness: dict[int, tuple[bool, str, bool]] = {}
         for strat in self.params["strategies"]:
-            if bool(strat.get("enabled", True)):
-                lane_readiness[int(strat["lane_id"])] = self._prepare_lane(strat, price_row, info, poll_time)
+            if not bool(strat.get("enabled", True)):
+                continue
+            lane_id = int(strat["lane_id"])
+            if exit_pass_ready.get(lane_id):
+                lane_readiness[lane_id] = self._prepare_lane_admission(strat, price_row, info, poll_time)
+            else:
+                lane_readiness[lane_id] = (False, "open_basket_exit_or_sync_block", False)
         primary = self.params["strategies"][0]
         raw_side = self._signal(price_row, primary)
         signal_bar_text = dt_text(signal_bar)
@@ -1685,6 +3114,7 @@ class S23HorizontalInventoryRunner:
             release_time = signal_bar + pd.Timedelta(minutes=1)
             opportunity = {
                 "opportunity_id": f"{symbol}|{signal_bar_text}|{raw_side}|{side or 'BLOCKED'}|{entry_policy['policy_id']}",
+                "source": "za",
                 "side": side or raw_side,
                 "raw_side": raw_side,
                 "effective_side": side or "",
@@ -1695,13 +3125,23 @@ class S23HorizontalInventoryRunner:
                 "decision_time": dt_text(poll_time),
                 "executable_at": dt_text(poll_time),
             }
+            shadow_context = self._shadow_context(price_row, info, lane_readiness)
             self._observer_call(
                 "register_opportunity",
                 opportunity=opportunity,
                 at=poll_time,
                 bid=float(info.bid),
                 ask=float(info.ask),
-                context=self._shadow_context(price_row, info, lane_readiness),
+                context=shadow_context,
+            )
+            self._state_tagger_call(
+                "tag_opportunity",
+                opportunity=opportunity,
+                at=poll_time,
+                bars=bars,
+                bid=float(info.bid),
+                ask=float(info.ask),
+                context=shadow_context,
             )
             if side is None:
                 routing["last_routed_signal_bar"] = signal_bar_text
@@ -1766,9 +3206,75 @@ class S23HorizontalInventoryRunner:
                         consumed_lane_id=consumed_lane_id,
                         reason=route_reason,
                     )
+        if not raw_side:
+            opportunity = self._take_inventory_range_fade_opportunity(
+                raw_side=None,
+                signal_bar=signal_bar,
+                poll_time=poll_time,
+                symbol=symbol,
+            )
+            if opportunity is not None:
+                shadow_context = self._shadow_context(price_row, info, lane_readiness)
+                self._observer_call(
+                    "register_opportunity",
+                    opportunity=opportunity,
+                    at=poll_time,
+                    bid=float(info.bid),
+                    ask=float(info.ask),
+                    context=shadow_context,
+                )
+                self._state_tagger_call(
+                    "tag_opportunity",
+                    opportunity=opportunity,
+                    at=poll_time,
+                    bars=bars,
+                    bid=float(info.bid),
+                    ask=float(info.ask),
+                    context=shadow_context,
+                )
+                stale = stale_signal_decision(
+                    str(price_row.name),
+                    timeframe_hours=1.0 / 60.0,
+                    max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                    options=self.safety,
+                )
+                if stale.stale:
+                    routing["last_routed_signal_bar"] = signal_bar_text
+                    routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
+                    routing["last_consumed_lane_id"] = None
+                    routing["last_route_decision_utc"] = dt_text(poll_time)
+                    self._trade_row(
+                        "opportunity_rejected",
+                        primary,
+                        side=opportunity["side"],
+                        reason="stale_signal_skip",
+                        note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc};source=inventory_range_false_break_fade",
+                        **self._opportunity_fields(opportunity),
+                    )
+                    self._observer_call(
+                        "record_route",
+                        opportunity_id=opportunity["opportunity_id"],
+                        at=poll_time,
+                        status="stale_rejected",
+                        consumed_lane_id=None,
+                        reason="stale_signal_skip",
+                    )
+                    self._save_state()
+                else:
+                    consumed_lane_id, route_reason = self._route_opportunity(
+                        opportunity, price_row, info, poll_time, lane_readiness
+                    )
+                    self._observer_call(
+                        "record_route",
+                        opportunity_id=opportunity["opportunity_id"],
+                        at=poll_time,
+                        status="consumed" if consumed_lane_id is not None else "unconsumed",
+                        consumed_lane_id=consumed_lane_id,
+                        reason=route_reason,
+                    )
         now = time.time()
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 60)):
-            logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self.params["strategies"]})
+            logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self._all_strategies()})
             self._last_status_log = now
 
 
@@ -1848,6 +3354,9 @@ def self_test() -> None:
     params["live_trading_enabled"] = False
     params["shadow_forward_enabled"] = True
     params["shadow_opportunity_observer"]["enabled"] = False
+    params["shadow_state_tagger"]["enabled"] = False
+    params["midday_shadow_opportunity_observer"]["enabled"] = False
+    params["midday_shadow_state_tagger"]["enabled"] = False
     params["safety"]["stale_signal_guard"] = False
     strategy = params["strategies"][0]
     assert params["candidate_id"] == EXPECTED_CANDIDATE_ID
@@ -1857,9 +3366,25 @@ def self_test() -> None:
     assert int(params["late_short_lookback_completed_m1_bars"]) == EXPECTED_LATE_SHORT_LOOKBACK
     assert math.isclose(float(params["late_short_drop_threshold"]), EXPECTED_LATE_SHORT_DROP_THRESHOLD)
     assert params["late_short_action"] == EXPECTED_LATE_SHORT_ACTION
+    assert params["inventory_range_fade_policy_id"] == EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID
+    assert params["inventory_range_fade_params_hash"] == EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH
+    assert math.isclose(float(params["inventory_range_return_depth_fraction"]), EXPECTED_INVENTORY_RANGE_RETURN_DEPTH)
+    assert int(params["inventory_range_max_wait_minutes"]) == EXPECTED_INVENTORY_RANGE_MAX_WAIT_MINUTES
+    assert int(params["inventory_range_confirm_bars"]) == EXPECTED_INVENTORY_RANGE_CONFIRM_BARS
+    assert params["inventory_range_break_side_filter"] == EXPECTED_INVENTORY_RANGE_BREAK_SIDE_FILTER
     assert int(params["lane_count"]) == 4
     assert tuple(int(row["magic"]) for row in params["strategies"]) == EXPECTED_S23_MAGICS
     assert [int(row["lane_id"]) for row in params["strategies"]] == [1, 2, 3, 4]
+    assert params["morning_session_policy_id"] == EXPECTED_MORNING_POLICY_ID
+    assert params["morning_session_params_hash"] == EXPECTED_MORNING_POLICY_PARAMS_HASH
+    assert tuple(int(row["magic"]) for row in params["morning_session_strategies"]) == EXPECTED_MORNING_MAGICS
+    assert [int(row["lane_id"]) for row in params["morning_session_strategies"]] == [5, 6, 7]
+    assert [int(row["hold_minutes"]) for row in params["morning_session_strategies"]] == [15, 55, 45]
+    assert params["midday_session_policy_id"] == EXPECTED_MIDDAY_POLICY_ID
+    assert params["midday_session_params_hash"] == EXPECTED_MIDDAY_POLICY_PARAMS_HASH
+    assert tuple(int(row["magic"]) for row in params["midday_session_strategies"]) == EXPECTED_MIDDAY_MAGICS
+    assert [int(row["lane_id"]) for row in params["midday_session_strategies"]] == [8]
+    assert [int(row["hold_minutes"]) for row in params["midday_session_strategies"]] == [60]
     assert int(strategy["max_positions"]) == 2 and float(strategy["add_atr"]) == 0.65
     assert (float(strategy["entry_wait_z"]), float(strategy["entry_wait_sigma"]), int(strategy["entry_wait_minutes"])) == (2.0, 1.0, 10)
     assert (float(strategy["target_atr_mult"]), float(strategy["stop_atr_mult"]), float(strategy["failure_to_progress_peak_atr_mult"])) == (3.5, 6.5, 1.0)
@@ -1869,6 +3394,8 @@ def self_test() -> None:
     runner._save_state = lambda: None
     runner._trade_row = lambda *_args, **_kwargs: None
     assert runner._ownership_namespace_error() is None
+    range_state = runner.state["routing"]["inventory_range_fade"]
+    assert not range_state["active"] and range_state["pending_side"] is None
     policy_bars = pd.DataFrame(
         {"Close": [4640.0] + [4615.0] * 30},
         index=pd.date_range("2026-08-25 12:30:00", periods=31, freq="1min", tz="UTC"),

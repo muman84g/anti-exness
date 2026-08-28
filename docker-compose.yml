@@ -623,6 +623,8 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot23/live_config.py:/app/bot23/live_config.py:ro
       - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
+      - ./bot23/eu_entry_admission_clock.py:/app/bot23/eu_entry_admission_clock.py:ro
+      - ./bot23/position_lifecycle_clock.py:/app/bot23/position_lifecycle_clock.py:ro
       - ./bot23/shadow_opportunity_observer.py:/app/bot23/shadow_opportunity_observer.py:ro
       - ./bot23/shadow_state_tagger.py:/app/bot23/shadow_state_tagger.py:ro
       - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro

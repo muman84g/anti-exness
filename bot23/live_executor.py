@@ -28,6 +28,7 @@ class SymbolInfo:
     volume_step: float
     digits: int
     stops_level: int
+    quote_time_msc: int | None = None
 
 
 @dataclass
@@ -73,6 +74,9 @@ class CloseResult:
     open_price: float = 0.0
     close_price: float = 0.0
     profit: float = 0.0
+    deal_id: int = 0
+    retcode: int | None = None
+    raw_response: str = ""
 
     def __bool__(self) -> bool:
         return self.success
@@ -121,6 +125,7 @@ class MT5Executor:
                 ask=float(parts[1]), bid=float(parts[2]), point=float(parts[4]),
                 volume_min=float(parts[5]), volume_max=float(parts[6]), volume_step=float(parts[7]),
                 digits=int(float(parts[11])), stops_level=int(float(parts[12])),
+                quote_time_msc=int(parts[13]) if len(parts) >= 14 and parts[13] else None,
             )
         except (TypeError, ValueError):
             return None
@@ -230,9 +235,19 @@ class MT5Executor:
             try:
                 if len(parts) < 8:
                     raise ValueError(res)
-                return CloseResult(True, "CONFIRMED", float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]))
+                return CloseResult(
+                    True, "CONFIRMED", float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]),
+                    deal_id=int(parts[6]), retcode=int(parts[7]), raw_response=res,
+                )
             except (TypeError, ValueError, IndexError):
-                return CloseResult(False, "MALFORMED_OK")
+                return CloseResult(False, "MALFORMED_OK", raw_response=res or "")
         if res in {"ERR|POSITION_NOT_FOUND", "ERR|Position Not Found", "ERR|0", "ERR|10009"}:
-            return CloseResult(False, "MISSING_UNCONFIRMED")
-        return CloseResult(False, "FAILED")
+            return CloseResult(False, "MISSING_UNCONFIRMED", raw_response=res or "")
+        retcode = None
+        if res and res.startswith("ERR|"):
+            try:
+                retcode = int(res.split("|", 2)[1])
+            except (TypeError, ValueError, IndexError):
+                retcode = None
+        status = "MARKET_CLOSED" if retcode == 10018 else "FAILED"
+        return CloseResult(False, status, retcode=retcode, raw_response=res or "")

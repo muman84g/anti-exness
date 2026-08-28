@@ -1,0 +1,86 @@
+{
+  "schema_version": "evidence_work_state_v3",
+  "manifest_id": "bot23-jst1113-porting-20260828",
+  "manifest_version": 3,
+  "active": true,
+  "previous_manifest": {
+    "path": "bot/bot23/JST1113_PORTING_EVIDENCE_V2.json",
+    "sha256": "48695cd701fa0a073243a56c3d64b5da4e26d5c42d0785b1a690455817d86a06",
+    "manifest_version": 2
+  },
+  "correction_scope": [
+    "fixed-hold close spread/reopen handling",
+    "broker quote timestamp freshness",
+    "per-ticket close audit trail",
+    "independent JST11-13 passive observer and state tagger",
+    "JST09-13 combined portfolio risk audit",
+    "runtime migration gates"
+  ],
+  "candidate_manifest": {
+    "bot/bot23/live_s23_bot.py": "4c1a4dd1729d6db39e42cd846855a1ce5f971cd6e14fc30af44f5c732dd344dc",
+    "bot/bot23/s23_params.json": "0e81af33a72765e26d62b7fcb09c0fcb7b01dc7d1002ef7c508b3b17a8852c2",
+    "bot/bot23/live_executor.py": "310f556570a0e2acd65d74b6a6dd3eb5c42ac1f1aa952fab71e4ac20c1ef12c7",
+    "bot/bot23/BotBridge_s23.mq5": "07c85e92c6ab8f4e609339d8989dc7cd7ee576ab3b3f570b0ec54ac5f66ce834",
+    "bot/bot23/test_s23_regressions.py": "d33986e2f628e3088ebf3fbf7ea35e338f2e02acab6fac88bae7b6b12c72f7c3",
+    "bot/bot23/shadow_opportunity_observer.py": "f25a003df49e801dce8f9e3a73fa1f5722f001c75a68d714295510628b49eeaa",
+    "bot/bot23/shadow_state_tagger.py": "3e86dc8d6d1e5d5c26bedc849c252e4b88e9d9e7219300e05b0fc58d1013cecc",
+    "bot/bot23/README.md": "aaa61ad1d3d08e6a69ce36f8391ff6725e11ba4f78918e868e8333e4de69d2ad",
+    "bot/bot23/SOURCE_BACKTEST.md": "2f04fc6f77e0690e29839d556568ba6d55ac46abac92050f9da3b28be0225e57",
+    "bot/bot23/PORTING_AUDIT.md": "0ef89c754ec2d717614f2b41609d50fbfe9e3107baed5fc6224f011b133911a6",
+    "bot/BOT_BACKTEST_MAP_ja.md": "195244e65d0b768d2f1c87386057e13ce07ca14311aeb9a98e72a50c5c4fafcc",
+    "bot/docker-compose.yml": "b54963beaf6ce3892ede14203bb5181401d588829809535e981e9a5da107a942"
+  },
+  "validation": {
+    "python_unittest": {
+      "status": "passed",
+      "tests": 101,
+      "suites": [
+        "test_s23_regressions.py",
+        "test_shadow_opportunity_observer.py",
+        "test_shadow_state_tagger.py"
+      ]
+    },
+    "self_test": "passed",
+    "python_compile": "passed",
+    "docker_compose_config": "passed",
+    "orders_sent": false,
+    "deployment_performed": false
+  },
+  "combined_risk_audit": {
+    "status": "passed_as_diagnostic_not_promotion",
+    "holdout_used": false,
+    "tuning_or_ranking_performed": false,
+    "manifest": {
+      "path": "bot/bot23/evidence/jst0913_combined_v004/manifest.json",
+      "sha256": "5bd5b046d221b38b026671e6d046e4d5e8e8272b32220505bf4276760133cb58"
+    },
+    "results": {
+      "path": "bot/bot23/evidence/jst0913_combined_v004/results.csv",
+      "sha256": "19e08c2fc6f51c31dfc9061356850643b1e58b0269b4fed94317c03d434c7b94"
+    },
+    "dev_base": {"trades": 248, "pnl_usd": 577.96, "pf": 1.801261, "mtm_mdd_usd": 79.053, "max_positions": 4},
+    "dev_stress": {"trades": 248, "pnl_usd": 544.814, "pf": 1.741148, "mtm_mdd_usd": 80.473, "max_positions": 4},
+    "observed_leakcheck_base": {"trades": 95, "pnl_usd": 270.51, "pf": 2.172348, "mtm_mdd_usd": 43.839, "max_positions": 3},
+    "observed_leakcheck_stress": {"trades": 95, "pnl_usd": 258.534, "pf": 2.096087, "mtm_mdd_usd": 44.363, "max_positions": 3}
+  },
+  "release": {
+    "source_candidate_decision": "go",
+    "runtime_activation_decision": "blocked_pending_manual_migration",
+    "required_before_runtime_start": [
+      "archive the existing old-schema logs/s23_trades.csv under logs/old instead of overwriting it",
+      "compile and attach the updated BotBridge_s23.mq5 so INFO includes broker quote_time_msc",
+      "upload the corrected local candidate",
+      "restart and verify preflight plus the first trade and passive-observer rows"
+    ],
+    "automatic_guards": [
+      "old trades CSV header causes startup refusal",
+      "old bridge without quote_time_msc causes live preflight refusal"
+    ],
+    "residual_risks": [
+      "actual broker market-reopen behavior is not locally reproducible",
+      "combined observed leakcheck is reusable diagnostic evidence and not a new independent holdout",
+      "remote runtime was not changed or verified"
+    ]
+  },
+  "final_status": "local_source_corrected_and_validated_runtime_not_activated"
+}

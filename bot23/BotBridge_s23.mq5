@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-08-25-s23-account-identity-v2"
+#define BRIDGE_VERSION "2026-08-28-s23-quote-time-v3"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,CLOSEDEAL,MODIFY,CANCEL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -148,9 +148,9 @@ string HandleCommand(const string command)
       double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
       int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
-      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d",
-         tick.ask, tick.bid, AccountInfoDouble(ACCOUNT_MARGIN_FREE), point, min_vol, max_vol, vol_step,
-         tick_value, tick_size, contract, digits, stops_level);
+      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d|%I64d",
+          tick.ask, tick.bid, AccountInfoDouble(ACCOUNT_MARGIN_FREE), point, min_vol, max_vol, vol_step,
+          tick_value, tick_size, contract, digits, stops_level, tick.time_msc);
    }
 
    if(op == "HIST" && n >= 4)

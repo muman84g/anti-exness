@@ -1,0 +1,31 @@
+{
+  "schema_version": "bot23_jst1113_porting_baseline_v1",
+  "captured_at": "2026-08-28T04:56:00Z",
+  "candidate": "pre_jst1113_bot23_with_jst0911_overlay",
+  "files": {
+    "live_s23_bot.py": "d64caf79e0d3840029f3fabf5d71e2bfeae016bdb4db45c8c6d03676afaf3054",
+    "s23_params.json": "40d73232604b7f4b9ba389055c2ab9a3ebeb695a15102e58b3cdd023e0b15b93",
+    "test_s23_regressions.py": "384274f8858313682d29ff2def66c6873987320af248879171b6baea8ff49e73",
+    "README.md": "d276a4160ce421f2883aced5eb41cf26e7322cbdbdd0cfab155e6b8fb8b29151",
+    "SOURCE_BACKTEST.md": "7a77c2c350c72b0efbae11e7ab8c5374c76f44b0b3795b09c7df36a2dc164d61",
+    "PORTING_AUDIT.md": "d3eeb8c9767ae8d03a12183482ed1a987ac5f8046fe887d2cc4af4b90fd0b9be",
+    "../BOT_BACKTEST_MAP_ja.md": "ec081e17d71b8faf4c7901047fd1c8ca121d49065a45cfe6cb53909cb0d94f4a",
+    "../docker-compose.yml": "b54963beaf6ce3892ede14203bb5181401d588829809535e981e9a5da107a942"
+  },
+  "behavior": {
+    "za_lanes": [1, 2, 3, 4],
+    "za_magics": [230023, 230024, 230025, 230026],
+    "jst0911_lanes": [5, 6, 7],
+    "jst0911_magics": [230027, 230028, 230029],
+    "state_version": 3,
+    "live_trading_enabled": true,
+    "shadow_forward_enabled": false
+  },
+  "no_order_baseline": {
+    "self_test": "PASS",
+    "regressions": "76 PASS",
+    "shadow_observer": "6 PASS",
+    "shadow_state_tagger": "3 PASS",
+    "python": "3.14.3"
+  }
+}

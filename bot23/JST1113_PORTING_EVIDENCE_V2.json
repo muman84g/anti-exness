@@ -1,0 +1,923 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "manifest_id": "bot23-jst1113-porting-20260828",
+  "manifest_version": 2,
+  "active": true,
+  "previous_manifest": {
+    "path": "bot/bot23/JST1113_PORTING_EVIDENCE_V1.json",
+    "sha256": "88a9a1bc9c3f635caa2681fb2c6f5878f59f83a99c65434b1c1360f974bf5e48",
+    "manifest_version": 1
+  },
+  "work_definition": {
+    "objective_id": "BOT23_JST1113_PORT",
+    "user_request": "Add the fixed JST11-13 XAUUSD round-level sweep candidate to C:\\botter\\bot\\bot23 after the separate JST09-11 overlay.",
+    "normal_success_path": [
+      "A completed M1 signal in UTC02-04 is evaluated causally, admitted to one independent lane, opened at live Bid/Ask, and closed 60 minutes after confirmed broker fill while existing ZA and JST09-11 behavior remains intact."
+    ],
+    "normal_success_contract": {
+      "supported_entry": "completed M1 XAUUSD round-level sweep reversal",
+      "normal_input": "UTC-normalized completed M1 OHLC and current executable Bid/Ask",
+      "preconditions": [
+        "hedging account",
+        "clean bot-owned reconciliation",
+        "UTC02-04 release time",
+        "spread and stale guards pass"
+      ],
+      "main_processing": [
+        "ATR60 and 2.5 USD round-level sweep onset",
+        "0.05 ATR minimum depth",
+        "0.03 ATR reclaim",
+        "capacity-one ownership",
+        "confirmed-fill-based 60 minute hold"
+      ],
+      "required_effect": "one bot23-owned market position at most under the new namespace",
+      "minimum_result": "local no-order implementation with migration, ownership, signal, session, and fixed-hold regression evidence"
+    },
+    "minimum_required_outcome": "Source, params, docs, mapping, and no-order tests agree on the fixed candidate without deploy, restart, push, or live state reset.",
+    "design_constraints": [
+      "preserve ZA lanes 1-4",
+      "preserve JST09-11 lanes 5-7",
+      "new independent lane 8 only",
+      "no forward retuning",
+      "no sensitive config changes"
+    ],
+    "permitted_stop_conditions": [
+      "user_decision_required",
+      "technical_blocker",
+      "completion_no_go"
+    ],
+    "prohibited_substitutes": [
+      "stub",
+      "empty_or_status_only_success",
+      "old_artifact_as_new",
+      "parameter retuning",
+      "deployment as implementation evidence"
+    ],
+    "acceptance": [
+      {
+        "id": "A1_SIGNAL_PARITY",
+        "criterion": "Signal math and onset match the fixed backtest definition.",
+        "required_evidence": [
+          "deterministic unit tests"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "A2_OWNERSHIP",
+        "criterion": "The new lane has unique magic/comment ownership and capacity one.",
+        "required_evidence": [
+          "preflight contract and foreign-magic regression"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "A3_MIGRATION",
+        "criterion": "Existing ZA and JST09-11 state is preserved while the new lane is initialized empty.",
+        "required_evidence": [
+          "state migration regression"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "A4_EXIT",
+        "criterion": "The new lane closes 60 minutes after confirmed broker fill and remains idempotent.",
+        "required_evidence": [
+          "fixed-hold boundary regression"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "A5_PRESERVATION",
+        "criterion": "Existing bot23 no-order regressions remain passing.",
+        "required_evidence": [
+          "full local regression suite"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "A6_DOC_SYNC",
+        "criterion": "Params, README, SOURCE_BACKTEST, mapping, and audit notes identify the same fixed candidate.",
+        "required_evidence": [
+          "static final audit"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      }
+    ],
+    "authorized_scope": [
+      "C:\\botter\\bot\\bot23 source params tests and docs",
+      "C:\\botter\\bot\\BOT_BACKTEST_MAP_ja.md"
+    ],
+    "excluded_scope": [
+      "live_config.py",
+      "startup.ini",
+      "docker deployment",
+      "service restart",
+      "Git commit or push",
+      "live state repair or reset"
+    ],
+    "no_change_boundaries": [
+      "ZA strategy_id",
+      "ZA magics 230023-230026",
+      "JST09-11 magics 230027-230029",
+      "trade CSV schema",
+      "bridge IPC names",
+      "live flags"
+    ],
+    "authority": "User explicitly requested writing the fixed strategy into bot23; no deployment or external runtime action authorized.",
+    "required_confirmations": [],
+    "comparison_baseline_id": "BOT23_PRE_JST1113_BASELINE",
+    "evidence_manifest_id": "BOT23_JST1113_PORTING_EVIDENCE",
+    "evidence_manifest_completeness": "complete",
+    "audit_scope_ids": [
+      "SCOPE_REQUIREMENTS",
+      "SCOPE_RELEASE"
+    ],
+    "audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_STATE_OWNERSHIP",
+      "AUDIT_RELEASE"
+    ],
+    "history": [
+      {
+        "version": 1,
+        "changed_at": "2026-08-28T04:56:00Z",
+        "reason": "initial freeze"
+      },
+      {
+        "version": 2,
+        "changed_at": "2026-08-28T05:08:31Z",
+        "reason": "implementation complete and local no-order release candidate validated"
+      }
+    ]
+  },
+  "risk": {
+    "class": "high",
+    "rationale": "Strategy behavior in a live-enabled bot folder is changing, although deployment and restart are excluded.",
+    "dimensions": [
+      "financial",
+      "persistence",
+      "ownership",
+      "write_recoverability"
+    ],
+    "lowering_evidence": []
+  },
+  "execution_budget": {
+    "execution_mode": "direct_serial",
+    "rationale": "One tightly coupled bot source and state contract; no delegated or parallel edits.",
+    "max_delegated_jobs": 0,
+    "planned_audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_STATE_OWNERSHIP",
+      "AUDIT_RELEASE"
+    ],
+    "same_root_cause_local_batch_limit": 2,
+    "evidence_budget": "baseline plus syntax, self-test, full regression, observer/tagger regression, and final static identity audit",
+    "approximate_cost": "one implementation batch and one correction batch if needed",
+    "delegation_plan": [],
+    "replan_triggers": [
+      "two_nonprogress_correction_batches",
+      "material_scope_or_identity_change"
+    ]
+  },
+  "time_estimate": {
+    "range": "completed within initial 30-60 minute estimate",
+    "confidence": "high",
+    "critical_path": [
+      "state-safe lane addition",
+      "signal parity",
+      "full no-order regression"
+    ],
+    "high_cost_steps": [],
+    "external_waits": [],
+    "next_checkpoint": "none; local implementation complete",
+    "user_deadline": null,
+    "history": [
+      {
+        "version": 1,
+        "estimated_at": "2026-08-28T04:56:00Z",
+        "range": "30-60 minutes",
+        "confidence": "medium",
+        "critical_path": [
+          "state-safe lane addition",
+          "signal parity",
+          "full no-order regression"
+        ],
+        "reason": "initial estimate",
+        "next_checkpoint": "after implementation-complete snapshot"
+      },
+      {
+        "version": 2,
+        "estimated_at": "2026-08-28T05:08:31Z",
+        "range": "completed within initial 30-60 minute estimate",
+        "confidence": "high",
+        "critical_path": [
+          "state-safe lane addition",
+          "signal parity",
+          "full no-order regression"
+        ],
+        "reason": "actual completion update",
+        "next_checkpoint": "none; local implementation complete"
+      }
+    ]
+  },
+  "plan": {
+    "task_class": "planned_maintenance_or_migration",
+    "implementation_completeness_gate": "passed",
+    "packages": [
+      {
+        "id": "WP_IMPLEMENT",
+        "task_class": "planned_maintenance_or_migration",
+        "objective_ids": [
+          "BOT23_JST1113_PORT"
+        ],
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A6_DOC_SYNC"
+        ],
+        "purpose": "Add the independent fixed midday lane and synchronized identity/docs.",
+        "owner": "parent",
+        "inputs": [
+          "fixed backtest candidate",
+          "bot23 pre-change source"
+        ],
+        "outputs": [
+          "updated bot23 candidate-bearing files"
+        ],
+        "risk": "high",
+        "dependencies": [],
+        "completion_evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "state": "completed",
+        "blocker": null,
+        "next_check": "none"
+      },
+      {
+        "id": "WP_VALIDATE",
+        "task_class": "planned_maintenance_or_migration",
+        "objective_ids": [
+          "BOT23_JST1113_PORT"
+        ],
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION"
+        ],
+        "purpose": "Run exact-candidate no-order validation.",
+        "owner": "parent",
+        "inputs": [
+          "implementation snapshot"
+        ],
+        "outputs": [
+          "test evidence"
+        ],
+        "risk": "medium",
+        "dependencies": [
+          "WP_IMPLEMENT"
+        ],
+        "completion_evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "state": "completed",
+        "blocker": null,
+        "next_check": "none"
+      }
+    ]
+  },
+  "baseline": {
+    "id": "BOT23_PRE_JST1113_BASELINE",
+    "captured_at": "2026-08-28T04:56:00Z",
+    "fingerprint": "1614a0d2d9cfa4a12bcef87fac14b374e908242b6631c56d5123e1607edf2c5d",
+    "layers": {
+      "source": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "pre-change hashes captured"
+      },
+      "artifacts": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "pre-change hashes captured"
+      },
+      "configuration": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "sensitive config excluded"
+      },
+      "dependencies": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "no dependency changes planned"
+      },
+      "toolchain": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "local toolchain recorded"
+      },
+      "runtime": {
+        "status": "unproven",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "running container and broker runtime are outside edit-only authorization"
+      },
+      "persistence": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "local state behavior captured by tests"
+      },
+      "gui_or_external": {
+        "status": "not_applicable",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "no external action authorized"
+      },
+      "behavior": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "pre-change contract read from source and params"
+      },
+      "tests": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_BASELINE_20260828.json",
+            "sha256": "a4ea023a6b65d362cc3baf15b12c9d0e2213bdcceb7a3a26e30be87b689163d9"
+          }
+        ],
+        "reason": "no-order baseline executed before edit"
+      }
+    },
+    "supplements": []
+  },
+  "implementation": {
+    "snapshot_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+    "frozen_at": "2026-08-28T05:08:31Z",
+    "candidate_manifest": {
+      "bot/bot23/live_s23_bot.py": "85c4a56a925ec8f0dc081ab294b4a780d4ea73fadd1567961f070fd87dbc841b",
+      "bot/bot23/s23_params.json": "d2bc44bf53ac7ca4dbc5a064e8ff3579e1f7ac29e5c6d29cec8a9f768d6a9c33",
+      "bot/bot23/test_s23_regressions.py": "146cddd9f1ba45ae71e3ca56fba3db4eb6690892ae8587bd83144a5f0d6cf1f4",
+      "bot/bot23/README.md": "de6e7d388b3e53596e2ede1fb90cc4355f4b227042b676217b5ef745834ae210",
+      "bot/bot23/SOURCE_BACKTEST.md": "899fe2fe5f3bc99f68b9bfdbe068e30aa30d457d69afb57b9f7172d8822a79a3",
+      "bot/bot23/PORTING_AUDIT.md": "7034402182da4f89654fe893dc584478a90c98bc114d059ad1e90ac4f62a6f11",
+      "bot/BOT_BACKTEST_MAP_ja.md": "09893b81439cad0e0e2a4e87875d8036e67af9263aa5d24f5b3701d65c69fb8e",
+      "bot/docker-compose.yml": "b54963beaf6ce3892ede14203bb5181401d588829809535e981e9a5da107a942"
+    },
+    "known_omissions": [
+      "real broker quote timing and deployment untested",
+      "fresh-quote and market-reopen close parity unproven"
+    ],
+    "unproven_layers": [
+      "runtime",
+      "external broker"
+    ]
+  },
+  "audits": {
+    "early": {
+      "status": "passed",
+      "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+      "angle_ids": [
+        "AUDIT_STRUCTURAL",
+        "AUDIT_STATE_OWNERSHIP"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+          "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+        }
+      ],
+      "limitations": [
+        "remote runtime excluded"
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "allowed",
+      "scope_redetermination": null
+    },
+    "final": {
+      "status": "passed",
+      "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+      "angle_ids": [
+        "AUDIT_RELEASE"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+          "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+        }
+      ],
+      "limitations": [
+        "deployment and fresh broker quote timing unproven"
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "not_applicable",
+      "scope_redetermination": null
+    },
+    "low_risk_omission": null
+  },
+  "tests": {
+    "target_snapshot_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+    "identity_gate": "passed",
+    "partitions": [
+      {
+        "id": "TEST_STATIC",
+        "kind": "static",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_UNIT",
+        "kind": "unit",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_BOUNDARY",
+        "kind": "boundary",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_FAILURE_INJECTION",
+        "kind": "failure_injection",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_REGRESSION",
+        "kind": "regression",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_INTEGRATION",
+        "kind": "integration",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_PERSISTENCE",
+        "kind": "persistence",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_CONCURRENCY",
+        "kind": "concurrency",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_PACKAGE",
+        "kind": "package",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_PERFORMANCE",
+        "kind": "performance",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_GUI",
+        "kind": "gui",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_REAL_ENVIRONMENT",
+        "kind": "real_environment",
+        "requirement": "not_applicable",
+        "target_id": null,
+        "acceptance_ids": [],
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Outside authorized local no-deploy scope."
+        ],
+        "applicability_basis": "Outside authorized local no-deploy scope.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      },
+      {
+        "id": "TEST_RECOVERY",
+        "kind": "recovery",
+        "requirement": "required",
+        "target_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A2_OWNERSHIP",
+          "A3_MIGRATION",
+          "A4_EXIT",
+          "A5_PRESERVATION",
+          "A6_DOC_SYNC"
+        ],
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "limitations": [],
+        "applicability_basis": "Required for the local implementation and preservation contract.",
+        "cost": "low local no-order execution",
+        "evidence_owner": "parent",
+        "freshness": "current implementation snapshot",
+        "environment": "local Windows Python no-order harness"
+      }
+    ],
+    "evidence_bridges": []
+  },
+  "findings": [],
+  "correction_ledger": {
+    "batches": [
+      {
+        "id": "CB1",
+        "strategy_id": "jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001",
+        "snapshot_before": "baseline:1614a0d2d9cfa4a12bcef87fac14b374e908242b6631c56d5123e1607edf2c5d",
+        "snapshot_after": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+        "root_cause_or_failure_id": "atr60_warmup_nan_grid_math",
+        "responsibility_boundary_changed": false,
+        "acceptance_ids": [
+          "A1_SIGNAL_PARITY",
+          "A5_PRESERVATION"
+        ],
+        "change": "Preserved NaN through round-grid math until ATR60 became valid; fixed two regression errors without changing thresholds.",
+        "causal_evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "regression_evidence": [
+          {
+            "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+            "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+          }
+        ],
+        "cumulative_cost": "correction batch 1 of 2",
+        "objective_progress": true,
+        "root_cause_scope_reduced": true,
+        "decision_changing_evidence": false,
+        "next_expected_result": "full no-order suite pass",
+        "outcome": "corrected"
+      }
+    ],
+    "convergence_state": "converged"
+  },
+  "external_action": {
+    "applicable": false,
+    "target": null,
+    "authority": null,
+    "approval_evidence": [],
+    "action": null,
+    "expected_effects": [],
+    "side_effects": [],
+    "idempotency": null,
+    "pre_action_audit": "not_applicable",
+    "pre_action_evidence": [],
+    "fresh_state": null,
+    "guard_or_cas": null,
+    "planned_execution": null,
+    "maximum_attempts": 0,
+    "attempts": 0,
+    "original_action_result": "not_run",
+    "post_action_verification": null,
+    "recovery": null
+  },
+  "release": {
+    "candidate_id": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+    "candidate_manifest": {
+      "bot/bot23/live_s23_bot.py": "85c4a56a925ec8f0dc081ab294b4a780d4ea73fadd1567961f070fd87dbc841b",
+      "bot/bot23/s23_params.json": "d2bc44bf53ac7ca4dbc5a064e8ff3579e1f7ac29e5c6d29cec8a9f768d6a9c33",
+      "bot/bot23/test_s23_regressions.py": "146cddd9f1ba45ae71e3ca56fba3db4eb6690892ae8587bd83144a5f0d6cf1f4",
+      "bot/bot23/README.md": "de6e7d388b3e53596e2ede1fb90cc4355f4b227042b676217b5ef745834ae210",
+      "bot/bot23/SOURCE_BACKTEST.md": "899fe2fe5f3bc99f68b9bfdbe068e30aa30d457d69afb57b9f7172d8822a79a3",
+      "bot/bot23/PORTING_AUDIT.md": "7034402182da4f89654fe893dc584478a90c98bc114d059ad1e90ac4f62a6f11",
+      "bot/BOT_BACKTEST_MAP_ja.md": "09893b81439cad0e0e2a4e87875d8036e67af9263aa5d24f5b3701d65c69fb8e",
+      "bot/docker-compose.yml": "b54963beaf6ce3892ede14203bb5181401d588829809535e981e9a5da107a942"
+    },
+    "decision": "go",
+    "decision_target": "local bot23 source release candidate only; no deployment",
+    "reasons": [
+      "Fixed strategy implemented and all authorized local no-order acceptance checks passed."
+    ],
+    "residual_risks": [
+      "Fresh broker quote and market-reopen close parity is unproven.",
+      "Consumed forward has four trades and is not independent evidence.",
+      "Remote runtime was not changed or verified."
+    ]
+  },
+  "final_report": {
+    "status": "complete",
+    "objective_result": "Bot23 local source now includes the fixed JST11-13 round-level sweep capacity-one lane.",
+    "acceptance_disposition": {
+      "A1_SIGNAL_PARITY": "passed",
+      "A2_OWNERSHIP": "passed",
+      "A3_MIGRATION": "passed",
+      "A4_EXIT": "passed",
+      "A5_PRESERVATION": "passed",
+      "A6_DOC_SYNC": "passed"
+    },
+    "identity_summary": "sha256:a9f0838848fd7f89cf09c85d309f3da3fd7dd2a935bab89e9c522b721c954c89",
+    "budget_time_variance": "Completed within the original estimate.",
+    "implementation_summary": "Runner, params, regressions, README, source mapping, audit, and central bot map updated; sensitive and runtime state files unchanged.",
+    "validation_summary": "Compilation, self-test, 84 bot23 regressions, 6 observer tests, 3 tagger tests, JSON parse, and Compose validation passed.",
+    "correction_convergence": "One bounded correction fixed ATR60 warm-up NaN handling; subsequent full suite passed.",
+    "external_action_summary": "Not applicable; no deployment, restart, state edit, order, commit, or push.",
+    "final_audit_summary": "Structural, ownership, state migration, documentation, and local release audits passed.",
+    "residual_risk_disposition": "Keep forward-only/provisional interpretation and observe live behavior without retuning.",
+    "evidence_summary": [
+      "JST1113_PORTING_VALIDATION_20260828.json"
+    ],
+    "limitations": [
+      "Remote runtime and broker quote freshness were not verified."
+    ],
+    "removed_behavior": [],
+    "preservation_evidence": [
+      {
+        "path": "bot/bot23/JST1113_PORTING_VALIDATION_20260828.json",
+        "sha256": "61f6db6f9888a4b3e392366aee42c9fa741068c4f4f49ed55528199dc9d08d9e"
+      }
+    ]
+  }
+}

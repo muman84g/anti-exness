@@ -1,0 +1,95 @@
+{
+  "schema_version": "bot23_clock_separation_correction_audit_v3",
+  "status": "local_source_independently_reviewed_corrected_and_validated",
+  "scope": "bot23 source, params, tests, and documentation only",
+  "live_orders_sent": false,
+  "deployment_performed": false,
+  "restart_performed": false,
+  "findings": [
+    {
+      "id": "CLOCK_DST_001",
+      "severity": "material_before_future_routing",
+      "cause": "US admission boundaries were shifted with the London DST regime even when New York and London were in different regimes",
+      "correction": "Europe/London now governs the European boundary and America/New_York independently governs both US boundaries",
+      "current_reachability": "routing_disabled",
+      "regression": "2026 US transition instants and a March EU-US mismatch week"
+    },
+    {
+      "id": "LIFECYCLE_FILL_001",
+      "severity": "material_live_safety",
+      "cause": "a missing confirmed live position open_time silently fell back to the decision/poll time",
+      "correction": "the runner retains exact position ownership, blocks entry without inventing a deadline, and restores broker open_time on a later clean sync",
+      "current_reachability": "live fixed-hold OPEN response with missing open_time",
+      "regression": "missing fill time is not substituted and later exact sync recovers it"
+    },
+    {
+      "id": "CLOCK_CONFIG_002",
+      "severity": "preventive_before_future_routing",
+      "cause": "the configuration listed summer and standard block pairs without naming the reference market for each individual boundary",
+      "correction": "every block start and end now declares fixed_jst, Europe/London, or America/New_York independently; direct close monitoring also preserves a missing fill time as recoverable",
+      "current_reachability": "routing_disabled",
+      "regression": "spring and autumn EU-US mismatch weeks plus direct missing-fill lifecycle monitoring"
+    },
+    {
+      "id": "DEPLOY_MODULE_003",
+      "severity": "material_before_deployment",
+      "cause": "the bot23 Compose service mounted the runner but not its two newly separated clock modules",
+      "correction": "both clock modules are now explicit read-only bot23 volume mounts and covered by a regression",
+      "current_reachability": "container restart with an image predating the modules",
+      "regression": "bot23 Compose mount contract"
+    },
+    {
+      "id": "MIDDAY_CLOSE_CLOCK_004",
+      "severity": "material_live_timing",
+      "cause": "fixed-hold close monitoring first compared the deadline with the host poll clock even though the broker quote clock was documented as authoritative",
+      "correction": "JST09-11 and JST11-13 fixed-hold deadlines, retry timing, and close eligibility now use the broker quote timestamp; host time is fallback only outside live mode",
+      "current_reachability": "host clock lag relative to broker quote time",
+      "regression": "JST11-13 close at broker deadline while host clock is thirty seconds behind"
+    }
+  ],
+  "preserved_behavior": [
+    "ZA entry and exit rules",
+    "JST09-11 entry and fixed hold parameters",
+    "JST11-13 entry and 60 minute fixed hold parameter",
+    "all eight ownership lanes and magics",
+    "fresh quote, spread stabilization, timeout, and market-closed retry",
+    "entry-admission routing remains disabled"
+  ],
+  "candidate_manifest": {
+    "bot/bot23/live_s23_bot.py": "e68a8acd35ac18760a73a45518943e27ead2e46c87c75108242403d3abf60ecf",
+    "bot/bot23/s23_params.json": "3fe55a184f7bc7b037817df609778121d1852fa9f2cb54b29a48f9128a0fdf06",
+    "bot/bot23/eu_entry_admission_clock.py": "c45e52f49487df60fb3d7dfe0deaea09a1e9bf704df870e22732e4c7a0411abf",
+    "bot/bot23/position_lifecycle_clock.py": "91e2feea92d986154dfce88171dd154daf6b80f842b42206a1a6d9c79631ee57",
+    "bot/bot23/test_s23_regressions.py": "2d747007babce23b95596b69fcd847e58f3b3c5425d74f4bcbb1acc6f5d7d5a2",
+    "bot/bot23/test_eu_session_clock.py": "fe0079cfcfb2e3be1d46adac89b8e3ec50715bb247d2cfa31ee709e62bcc7b6c",
+    "bot/bot23/README.md": "d0563d6969db24a7b6571590784b7e93a6f2851d084964974f4042199fd3e186",
+    "bot/bot23/SOURCE_BACKTEST.md": "22d420529b03dff78b6134fadbb058333b4f089973fe51284b16c548d1471cdb",
+    "bot/bot23/PORTING_AUDIT.md": "6048f9894c699495e169ccb9f5c1a4b1b2e6b607d12023494b995445636d5163",
+    "bot/BOT_BACKTEST_MAP_ja.md": "8ab24e70d75dfebbfa98644f6a93fa9457046c123c1e761cd6244be173c66357"
+  },
+  "validation": {
+    "unittest_count": 115,
+    "unittest_status": "passed",
+    "self_test": "passed",
+    "python_compile": "passed",
+    "json_parse": "passed",
+    "docker_compose_config": "passed",
+    "bot23_compose_mount_contract": "passed",
+    "container_self_test": "not_run_docker_desktop_daemon_unavailable"
+  },
+  "evidence_note": {
+    "path": "bot/bot23/JST1113_PORTING_EVIDENCE_V3.json",
+    "sha256": "e032677c7589336d2b7481c849ed8779f53999c0fd065d4a905e6e3cbaf7a0f0",
+    "canonical_validator_status": "failed_schema",
+    "disposition": "retained unchanged as a historical noncanonical note; not used as a release manifest"
+  },
+  "runtime_activation": {
+    "status": "pending_manual_migration",
+    "requirements": [
+      "archive old-schema logs/s23_trades.csv",
+      "compile and attach the updated BotBridge_s23.mq5",
+      "upload corrected source and restart only when separately authorized",
+      "verify live preflight and first lifecycle audit rows"
+    ]
+  }
+}
