@@ -103,14 +103,15 @@ def stale_signal_decision(
         return StaleSignalDecision(True, None, None, None, now, "invalid_signal_time")
     entry_due = signal_time + pd.Timedelta(hours=float(timeframe_hours))
     latest_allowed = entry_due + pd.Timedelta(minutes=float(max_delay_minutes))
-    stale = now > latest_allowed
+    not_released = now < entry_due
+    stale = not_released or now > latest_allowed
     return StaleSignalDecision(
         stale,
         signal_time,
         entry_due,
         latest_allowed,
         now,
-        "stale" if stale else "fresh",
+        "not_released" if not_released else "stale" if stale else "fresh",
     )
 
 
@@ -149,11 +150,14 @@ def clean_sync_block_if_flat(
         return False
     if positions or orders:
         return False
-    if not state.get("sync_block_new_entries"):
+    if state.get("sync_block_new_entries") is not True:
         return False
 
     reason = str(state.get("sync_block_reason") or "")
-    can_clear = bool(state.get("sync_block_recoverable")) and opts.clear_recoverable_sync_block is True
+    can_clear = (
+        state.get("sync_block_recoverable") is True
+        and opts.clear_recoverable_sync_block is True
+    )
     if not can_clear and opts.broker_sl_residual_clear is True:
         can_clear = is_broker_sl_residual_block(state)
         if can_clear:
@@ -162,15 +166,33 @@ def clean_sync_block_if_flat(
     if not can_clear and not auto_clear:
         return False
     if auto_clear:
-        details = state.get("sync_block_details") or {}
-        related_ticket = int(details.get("ticket") or details.get("order_ticket") or 0)
+        details = state.get("sync_block_details")
+        raw_confirmation_count = state.get("flat_clear_confirmation_count")
+        raw_confirmation_reason = state.get("flat_clear_confirmation_reason")
+        if (
+            not isinstance(details, dict)
+            or isinstance(raw_confirmation_count, bool)
+            or not isinstance(raw_confirmation_count, int)
+            or raw_confirmation_count < 0
+            or not (
+                raw_confirmation_reason is None
+                or isinstance(raw_confirmation_reason, str)
+            )
+        ):
+            return False
+        try:
+            related_ticket = int(
+                details.get("ticket") or details.get("order_ticket") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
         if related_ticket > 0:
             if confirm_position_absent is None or confirm_position_absent(related_ticket) is not True:
                 state["flat_clear_confirmation_count"] = 0
                 state["flat_clear_confirmation_reason"] = None
                 save_state()
                 return False
-        previous_count = int(state.get("flat_clear_confirmation_count") or 0)
+        previous_count = raw_confirmation_count
         same_reason = state.get("flat_clear_confirmation_reason") == reason
         state["flat_clear_confirmation_count"] = previous_count + 1 if same_reason else 1
         state["flat_clear_confirmation_reason"] = reason
@@ -204,7 +226,10 @@ def clear_recoverable_sync_block_after_clean_sync(
     opts = options or LiveSafetyOptions()
     if opts.clear_recoverable_sync_block is not True:
         return False
-    if not state.get("sync_block_new_entries") or not state.get("sync_block_recoverable"):
+    if (
+        state.get("sync_block_new_entries") is not True
+        or state.get("sync_block_recoverable") is not True
+    ):
         return False
     reason = str(state.get("sync_block_reason") or "")
     state["sync_block_new_entries"] = False
@@ -292,7 +317,8 @@ def self_test() -> None:
 
     fresh = stale_signal_decision("2026-01-01 10:00:00+00:00", now_utc=pd.Timestamp("2026-01-01 11:05:00+00:00"), max_delay_minutes=10)
     stale = stale_signal_decision("2026-01-01 10:00:00+00:00", now_utc=pd.Timestamp("2026-01-01 11:11:00+00:00"), max_delay_minutes=10)
-    assert not fresh.stale and stale.stale
+    future = stale_signal_decision("2026-01-01 10:01:00+00:00", now_utc=pd.Timestamp("2026-01-01 11:00:30+00:00"), max_delay_minutes=10)
+    assert not fresh.stale and stale.stale and future.stale and future.reason == "not_released"
 
 
 if __name__ == "__main__":

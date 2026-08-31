@@ -1,14 +1,119 @@
 # Source Backtest
 
+## 2026-08-31 t0530 edge-break best integration
+
+- Signal: `t0530_edge_break_fade`
+- Frozen live policy: `ny0530_edge_break_fade_w15_h15_cap4_v001`
+- Params hash: `27d51f6243e74a56e2ad10428f1a1f46e58f2f89a31bd96db4fb7025301d6163`
+- Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
+- Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
+- Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
+- Runtime boundary: local files only; `t0530_edge_enabled=false`; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+
+## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate
+
+- Policy: `ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001`
+- Params SHA-256: `b47b8d7d26094681fe559f6daf9c7e2bb1f4cd610527b0a69c5426c20a7a2a65`
+- Runtime input: broker Bid OHLC and M1 TickVolume; confirmed M1 only
+- Clock: completed-M1 available time (UTC event time plus one minute) converted to
+  `America/New_York`; 05:30 inclusive, 08:30 exclusive
+- Signal: daily session VWAP extension / ATR60 (60-bar window, minimum 30 bars), absolute-Z Q90 over 20 calendar days,
+  new threshold-onset with side-change; fade positive Z SHORT and negative Z LONG
+- Lifecycle: five private 0.01-lot lanes, capacity five, confirmed-fill plus 15 minutes
+- Live no-fill recovery: exact trade-permission rejects `10026/10027` retain the same
+  signal for a bounded cooldown retry; ambiguous OPEN results are not resent. Exact
+  market-closed close retcode `10018` retains the owned position and retries after 60 seconds.
+- Restart identity: the original retry opportunity is lane-persisted. A crash-after-fill
+  position is adopted only from one exact owned symbol/magic/comment/side/lot match whose open time falls in the persisted submission window;
+  the persisted submission start must itself fall between the canonical signal release and expiry.
+  Persisted source, signal/event/release/available timestamps, direction, opportunity ID and canonical expiry must also be mutually consistent;
+  retry expiry and stale-signal admission use the later of host UTC and broker UTC quote time, so either clock can prove expiry;
+  submission/fill matching and trade-permission cooldown start use the broker UTC quote clock.
+  Signals available by the broker-confirmed same-direction close-deal time are not reused by another private lane.
+  Initial OPEN confirmation applies the same side/lot/price/submission-window identity checks.
+  CLOSEDEAL requires a valid deal id, execution price, finite account-currency result and a broker timestamp no earlier than entry;
+  later valid close evidence clears only close-related reconciliation blocks, not unrelated policy or ownership blocks.
+  POSITIONS and ORDERS use distinct bridge record schemas; malformed or non-finite INFO, OPEN, POSITION, ORDER and CLOSE
+  payloads are rejected at the IPC boundary rather than interpreted as broker confirmation. Fixed ACCOUNT, INFO, CAPS, position,
+  and order schemas require exact field counts; delimiter-bearing or extended records cannot be truncated into owned inventory evidence.
+  Before a live OPEN, lot min/max/step and configured digits/point must match broker INFO; this entry-only guard does not
+  suppress owned-position exits or shadow/DEV evaluation. A missing live broker quote timestamp is not replaced by host time,
+  and a broker quote whose UTC clock differs from host submission UTC by more than `max_signal_delay_minutes` is not used for OPEN.
+  Durable unsent or failed CLOSE intent is re-armed only after exact owned-position and empty-order reconciliation, while a
+  successfully submitted `close_requested` position waits for disappearance plus CLOSEDEAL and is not blindly resent.
+   Mixed multi-position CLOSE results preserve successful ticket requests and retry only failed/unsent tickets. CLOSEDEAL
+   position id and symbol plus persisted opening ownership must match; exit-deal magic is not ownership evidence because it
+   identifies the closing order/actor and may differ for manual closure. Active hedging ticket plus identifier must both match state.
+   Bridge v6 aggregates every OUT/OUT_BY deal for one position identifier and returns weighted exit price, total account-currency
+   result, and total exit volume. State is cleared only after a direct ticket query proves absence and aggregate exit volume matches
+   the original persisted lot. Cross-day multi-ticket results are applied in broker deal-time order. Preflight rejects older bridge versions.
+   Direct absence accepts only the pinned bridge's exact `ERR|POSITION_NOT_FOUND`; numeric trade retcodes and legacy spellings are
+   query failures, not absence evidence. Bridge v26 retains the exact terminal record count for POSITIONS/ORDERS and converts any
+   enumeration select failure into a query error, so a truncated or partial inventory response cannot prove flatness. It also enforces
+   the frozen bot23 symbol/lot/deviation/magic/comment allowlist, broker symbol mode, USD value contract, and margin headroom at OPEN execution and atomically rechecks
+   symbol/magic/comment/position identifier immediately before every CLOSE broker call. Position open time includes broker milliseconds so fixed-hold deadlines do not truncate fills to seconds. Mutating IPC is request-correlated, deadline-bound, atomically published, durably claimed, and restricted to the used OPEN/CLOSE surface under single-consumer and single-runner locks. Command draining deletes the command file rather than leaving a zero-length busy slot. Expiry is reported as definitely unpublished only after command disappearance is verified, so a failed deletion plus a backward clock adjustment cannot revive a request whose caller already cleared its receipt. A claim-write/readback failure is likewise definitive only after both command and claim disappearance are verified; otherwise the caller times out with its durable receipt retained for inventory reconciliation. The per-lane daily realized-loss accumulator advances monotonically by UTC date, so a late
+   prior-day deal or older evaluation clock cannot erase newer-day loss. Malformed daily-risk state blocks new baskets while allowing
+   exact owned-basket close reconciliation to complete.
+   Every live lane persists an exact pending-OPEN receipt before submission. Restart recovery adopts only one newly observed position
+   whose symbol, magic, comment, side, lot, broker-millisecond fill time, and receipt window all match; the same rule covers a new basket
+   and one additional ticket in an existing basket.
+   A durable daily date later than the evaluation UTC date cannot permit a basket: an already-reached loss limit remains active,
+   otherwise the future date is invalid state. Persisted position open epoch must be positive, and every live lane requires a valid
+   broker position open time before it can monitor and later reconcile that close lifecycle.
+   Malformed durable OPEN-retry or ZA cooldown timestamps fail closed for new exposure. A non-finite persisted ZA basket peak is
+   conservatively reset from current executable PnL so the fixed failure-to-progress exit cannot be disabled by damaged state.
+   State shape validation includes routing and all 17 lane dictionaries. Basket sequence is validated before OPEN; broker entry
+   price is restored during exact owned sync; malformed frozen ATR uses fixed exits. Invalid fixed-hold defer state is reset before
+   a due close, malformed virtual trend state is invalidated without entry, and malformed session close identity blocks signal reuse.
+  Every bot-managed 10018 close uses a fresh-broker-quote 60-second cooldown without a reconciliation block. ZA FTP/max-hold
+  and trend max-hold elapsed time use broker quote UTC rather than host poll UTC. Exact owned sync restores broker open time
+  for ZA and fixed-hold positions before elapsed lifecycle checks.
+- Deployment state: local implementation only, `session_vwap_enabled=false`
+- History admission: 20-calendar-day timestamp coverage plus latest completed M1,
+  contiguous ATR60 tail and contiguous current NY-session M1; malformed or incomplete
+  pages are not partially admitted and trigger retained-cache rebackfill.
+
+The pre-implementation HIST reproduction and combined bot23 DEV reconciliation are
+recorded in
+`backtest/output/backtest227/candidates/xau-ny0530-0830-structural-screen-v001/runs/20260829_bot23_current_plus_session_vwap_hist_dev_v3/PREIMPLEMENTATION_RECONCILIATION_ja.md`.
+The candidate added 177 DEV trades. Combined Stress was USD +1,980.059 through
++1,999.088 with PF 1.333-1.337 and full-period MDD unchanged at USD 246.086.
+This is DEV evidence, not permission to enable or deploy.
+
+## 2026-08-29 EU開始帯 dual rebuild（非採用・売買未配線）
+
+Cycle27のlive移植前監査でraw tick入力差が見つかったため、次の2 artifactを別identityで生成した。
+
+1. `raw_tick_shadow_collector.py` / `s23_raw_tick_shadow_v1`
+   - MT5 `CopyTicks`を使う読取専用・追記専用collector
+   - bot23売買runnerから独立し、初期設定disabled
+   - strict config、exact CSV cursor identity、finite tick values、page metadata/count/windowをfail-closed検証
+   - 実環境取得はまだなく、local fake bridgeのrestart/same-millisecond試験のみ
+2. `backtest/output/backtest226/candidates/xau-eu-nypre-ohlcv-rebuild-v001`
+   - raw imbalance、quote efficiency、spread shapeを使わない別candidate
+   - signal入力はBid OHLCとTickVolumeのみ
+   - entry/exit/MTMはordered Bid/Ask tick
+   - fixed v3: `ohlcv_absorb_a90_e20_plus_first_vwap_follow`、60分hold、capacity 8、0.01 lot
+
+固定v3結果（Base / Stress）は以下。
+
+| dataset | trades | PnL USD | PF | every-tick MDD USD |
+|---|---:|---:|---:|---:|
+| dev | 73 | +221.913 / +212.301 | 2.083 / 2.015 | 77.427 / 79.911 |
+| observed leakcheck | 22 | +38.006 / +35.254 | 1.699 / 1.637 | 33.465 / 33.961 |
+| observed forward | 3 | +19.497 / +19.104 | 2.479 / 2.435 | 34.162 / 34.162 |
+
+3期間とも黒字だがforwardは3件しかなく、forward MDD/PnLも1を超える。扱いは`forward_only observation candidate`で、bot23 entry/close/stateへは配線しない。時刻は北山朝也氏資料に合わせ、event/release/ingested/available/cutoffを分離した。既存Cycle27 recipe・resultは上書きしていない。
+
 ## Frozen mapping
 
 - Bot: `bot23` / S23 / XAUUSD
 - Base family / persisted state strategy ID: `bot23_za_horizontal_inventory_v001`
 - Parent idea: `bot23_late_short_30m_action_matrix_v001`
 - Adopted idea: `bot23_x_archive_inventory_range_false_break_fade_opt_v001`
-- Candidate: `bot23-x-archive-plus-jst0911-plus-jst1113-round-s2p5-d0p05-r0p03-v001`
+- Candidate: `bot23-x-archive-plus-jst0911-plus-jst1113-plus-jst1300-pre-eu30-plus-reverse-stop-trend-v001`
 - Parent candidate: `bot23-long-target-portfolio-rearm-v001`
-- Selected spec: `reverse_d60 + long_target_portfolio_rearm_8m + balanced_book_false_break_fade_w15_c2_both + jst0911_stable001_param_15_55_45_v001 + jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001`
+- Selected spec: `reverse_d60 + long_target_portfolio_rearm_8m + balanced_book_false_break_fade_w15_c2_both + jst0911_stable001_param_15_55_45_v001 + jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001 + jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001 + reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001`
 - Morning overlay params hash:
   `c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e`
 - Midday overlay params hash:
@@ -20,6 +125,8 @@
   `0f8f3fc3e32c74ce00344b01fbc335d9ac6cfbf4801357e768d87c851229afb4`
 - Inventory-range-fade params hash:
   `d02b82730f7f686d97317f96aab26762168c8396f40c21f4787ab8bd4296bab0`
+- Trend-recovery params hash:
+  `a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9`
 - Research status: `forward_candidate / observed_leakcheck_effect_survives`
 - Knowledge root:
   `C:/botter/backtest/検討中/chatgpt案/多重ポジ/利益確保案/bot23_多重ポジ化`
@@ -85,6 +192,40 @@ Synthetic range-fade opportunities skip only the low-volatility ZA extreme and
 pullback arm. They retain the executable spread/ATR gate, blocked hour, daily
 loss, cooldown, lane capacity, portfolio LONG rearm, durable reservation,
 ownership, and final broker-execution checks.
+
+For every ZA new basket, the blocked-UTC-hour and daily-realized-loss/state
+gate is evaluated again at the actual deferred pullback fill and at the final
+market `OPEN` boundary. A locally pending ZA entry is cleared without an order
+when either gate becomes active after signal creation. This ZA-specific guard
+does not change the independent admission contracts of the session overlays.
+
+A persisted ZA pullback may survive restart only when its positive target/ATR,
+opportunity ID, signal/event time, one-minute release time, and bounded expiry
+form one canonical identity. Incomplete, contradictory, or overlong pending
+state is cleared before it can create a basket. An exact market-closed `10018`
+OPEN reject with a complete zero-owned-position reconciliation is definitive
+no-fill, not an ambiguous action: the local reservation is cleared and entry
+uses a 60-second bounded retry clock. Session-VWAP starts that clock from the
+current admission attempt rather than a stale broker quote timestamp.
+
+After a `reverse_d60`-origin LONG basket is fully closed at `basket_stop`, one
+private recovery episode may start during the originating ZA 13:00-18:00 UTC
+session. The stopped basket's ATR30 is frozen. During the next 30 minutes, each
+newly completed bullish M1 opens one SHORT in lane 12, capped at two 0.01-lot
+tickets. Each ticket uses the native adaptive target (3.5 ATR below ATR30 2.0,
+otherwise USD 10) and half the native stop (3.25 ATR or USD 9). Any ticket stop
+closes all remaining recovery tickets; individual target and 70-minute maximum
+hold close only that ticket. Broker-confirmed close times and completed UTC M1
+bars are authoritative; the recovery lane uses magic 230034 and `s23_tr_l1`.
+
+Ordered-tick Dev Base added 9 trades and USD +15.277 (Stress: 10 trades,
+USD +7.509) with unchanged combined MDD for max-two, TP 1.0x / SL 0.5x. Frozen
+forward 2026-08-16 through 2026-08-28 added six trades and USD +41.934 Base
+(USD +41.834 Stress), again with unchanged combined MDD. The leakcheck period
+contained zero qualifying reverse-LONG stops, so it provides no independent
+confirmation for this deliberately local edge. Canonical run outputs are under
+`C:/Users/muuma/Downloads/codex-temp/bot23-stop-flip-multishort-v1/` in
+`20260829_dev_tick_v1` and `20260829_forward_20260816_28_frozen_v1`.
 
 Per lane: maximum two positions, 0.01 lot, add 0.65 ATR, add-profit guard 0.30,
 14 UTC new-basket block, confirmed realized daily limit -27 USD, cooldown eight
@@ -222,6 +363,12 @@ independent holdout proof. The candidate remains `forward_only`.
 - The midday lane uses bot23-private magic 230030 and comment `s23_md_l1`.
   It is initialized empty, owns capacity one, and cannot adopt a foreign magic
   or comment.
+- The pre-EU30 lanes use private magics 230031-230033 and comments
+  `s23_pe_l1`-`s23_pe_l3`. They are initialized empty and use fixed holds of
+  45/60/45 minutes from confirmed broker fills.
+- The trend-recovery lane uses private magic 230034 and comment `s23_tr_l1`.
+  It is initialized empty with an inactive episode and cannot infer a trigger
+  from pre-migration baskets or adopt a foreign position.
 - State version 3 persists the global routing reservation, portfolio LONG-rearm
   clock, range-fade state, and independent lane inventory. Missing range-fade
   fields migrate inactive in place without clearing positions or ZA pending
@@ -265,6 +412,34 @@ observer uses separate `s23_midday_shadow_*` files and records signals rejected
 by capacity, spread, stale, or sync gates. Neither observer changes the
 version-3 bot state or order decisions. Observer failures are
 contained and do not affect broker order processing.
+
+## JST13:00-pre-EU30 adopted fixed candidate
+
+Runtime clock notation is UTC. The existing partitions are unchanged:
+`jst1300_pre_eu30` is UTC 04:00-06:30 in London summer time and 04:00-07:30
+in London standard time; `eu_open_to_us_preopen` ends at UTC 11:30 in New York
+summer time or 12:30 in New York standard time; `us_to_eu_late` then ends at
+UTC 20:30 or 21:30 respectively. London and New York DST are resolved
+independently, including their mismatch weeks. This clock controls new-entry
+admission only; confirmed-fill lifecycle deadlines remain elapsed UTC.
+
+The adopted three-lane identity is
+`jst1330_c4_final10_010_squeeze_double_rsi`: Bollinger squeeze release direction
+control at 45 minutes, double-sweep resolution primary at 60 minutes, and RSI
+extreme reversal direction control at 45 minutes. Stress results were DEV 120
+trades / +142.1600 / PF 1.408080 / every-tick MTM DD 112.4240; observed
+leakcheck 47 / +65.3745 / PF 1.476835 / DD 41.1730; and untouched forward 8 /
++26.7110 / PF 5.415771 / DD 12.1720. DEV was 3/3 months and 3/3 lanes positive;
+leakcheck was 2/2 months, both time subblocks and both halves positive with 2/3
+lanes positive; forward was 3/3 lanes and each JST13/14/15 hour positive.
+
+Before adoption, 50 new DEV-only candidates were frozen into five batches of
+ten. All 50 were evaluated unchanged on observed leakcheck; none had positive
+Stress PnL, so no challenger qualified for forward. The least-negative result
+was -27.1235 with PF 0.956704 and DD 118.324. No failed candidate was repaired,
+re-ranked on forward, or forwarded. Live signal parity then compared all three
+implemented signals across 4,590 DEV signal/time cells: 158 expected events,
+zero mismatches.
 - The reverse_d60 source switch was explicitly requested on 2026-08-26. Deployment,
   restart, state reset, log reset, EA attachment, and actual order submission
   remain separate runtime actions.

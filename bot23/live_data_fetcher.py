@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from typing import Any
+import math
+import re
 
 import pandas as pd
 
@@ -32,33 +34,95 @@ class MT5DataManager:
         drop_latest: bool = False,
     ) -> pd.DataFrame | None:
         res = ea_bridge.send_command(f"HIST|{mt5_symbol}|{int(timeframe)}|{int(num_bars)}", timeout=10)
+        return self._parse_history_response(
+            res,
+            broker_timezone,
+            drop_latest=drop_latest,
+            expected_rows=int(num_bars),
+        )
+
+    def get_historical_page(
+        self,
+        mt5_symbol: str,
+        timeframe: int,
+        start_pos: int,
+        num_bars: int,
+        broker_timezone: str = "UTC",
+    ) -> pd.DataFrame | None:
+        """Fetch a bounded MT5 CopyRates page without changing legacy HIST."""
+        res = ea_bridge.send_command(
+            f"HISTPAGE|{mt5_symbol}|{int(timeframe)}|{int(start_pos)}|{int(num_bars)}",
+            timeout=10,
+        )
+        return self._parse_history_response(
+            res,
+            broker_timezone,
+            drop_latest=False,
+            strict_rows=True,
+            expected_rows=int(num_bars),
+        )
+
+    def _parse_history_response(
+        self,
+        res: str | None,
+        broker_timezone: str,
+        *,
+        drop_latest: bool,
+        strict_rows: bool = False,
+        expected_rows: int | None = None,
+    ) -> pd.DataFrame | None:
         if not res or not res.startswith("OK|"):
             return None
         rows: list[dict[str, Any]] = []
         for item in res[3:].split("|"):
-            parts = [part.strip() for part in item.split(",")]
-            if len(parts) < 6:
-                continue
+            parts = item.split(",")
+            if len(parts) != 6 or any(part != part.strip() for part in parts):
+                return None
             try:
+                volume_text = parts[5]
+                if not re.fullmatch(r"[0-9]+", volume_text):
+                    raise ValueError(f"invalid integer volume: {volume_text!r}")
+                open_price = float(parts[1])
+                high_price = float(parts[2])
+                low_price = float(parts[3])
+                close_price = float(parts[4])
+                volume = int(volume_text)
+                if (
+                    not all(
+                        math.isfinite(value)
+                        for value in (open_price, high_price, low_price, close_price)
+                    )
+                    or min(open_price, high_price, low_price, close_price) <= 0.0
+                    or high_price < max(open_price, low_price, close_price)
+                    or low_price > min(open_price, high_price, close_price)
+                    or volume < 0
+                ):
+                    raise ValueError("invalid OHLCV row")
                 rows.append(
                     {
                         "time": parts[0],
-                        "Open": float(parts[1]),
-                        "High": float(parts[2]),
-                        "Low": float(parts[3]),
-                        "Close": float(parts[4]),
-                        "Volume": int(float(parts[5])),
+                        "Open": open_price,
+                        "High": high_price,
+                        "Low": low_price,
+                        "Close": close_price,
+                        "Volume": volume,
                     }
                 )
             except ValueError:
-                continue
+                return None
         if not rows:
+            return None
+        if expected_rows is not None and (
+            expected_rows <= 0 or len(rows) != int(expected_rows)
+        ):
             return None
         df = pd.DataFrame(rows)
         try:
             idx = pd.DatetimeIndex(pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M"))
-        except ValueError:
-            idx = pd.DatetimeIndex(pd.to_datetime(df["time"]))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if idx.has_duplicates or not idx.is_monotonic_increasing:
+            return None
         df.index = idx
         bars = df[["Open", "High", "Low", "Close", "Volume"]]
         return normalize_hist_bars(

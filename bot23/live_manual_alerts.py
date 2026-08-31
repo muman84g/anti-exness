@@ -15,9 +15,9 @@ import time
 import urllib.error
 import urllib.request
 from argparse import ArgumentParser
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-JST = timezone(timedelta(hours=9), "JST")
+UTC = timezone.utc
 DEFAULT_MIN_INTERVAL_SECONDS = 300.0
 DEFAULT_BOT_ID = "bot23"
 _LAST_SENT_EPOCH_BY_KEY: dict[str, float] = {}
@@ -57,8 +57,8 @@ def _min_interval_seconds(key: str) -> float:
         return DEFAULT_MIN_INTERVAL_SECONDS
 
 
-def _jst_now() -> str:
-    return datetime.now(JST).isoformat(timespec="seconds")
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def notify_manual_action_required(
@@ -89,7 +89,7 @@ def notify_manual_action_required(
         f"[manual-action] {bot_id} {symbol}: {title}\n"
         f"reason: {reason}\n"
         f"action: {action}\n"
-        f"time_jst: {_jst_now()}"
+        f"time_utc: {_utc_now()}"
     )
     if len(content) > 1900:
         content = content[:1897] + "..."

@@ -6,7 +6,7 @@
   "bot_number": "23",
   "bot_suffix": "s23",
   "strategy_id": "bot23_za_horizontal_inventory_v001",
-  "candidate_id": "bot23-x-archive-plus-jst0911-plus-jst1113-round-s2p5-d0p05-r0p03-v001",
+  "candidate_id": "bot23-integrated-plus-session-vwap-disabled-plus-t0530-edge-disabled-v002",
   "routing_mode": "first_consuming_lane_preserve_primary_v1",
   "entry_policy_id": "reverse_d60",
   "entry_policy_params_hash": "40475d07b84eabc1b1290bee6787113903f374ca90cf2ca271c82b825b313572",
@@ -41,37 +41,87 @@
   "midday_session_end_utc": 4,
   "midday_session_max_positions": 1,
   "expected_midday_magics": [230030],
+  "pre_eu30_session_enabled": true,
+  "pre_eu30_session_policy_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+  "pre_eu30_session_params_hash": "71722f0f90a34f7c265007cc8522f12b6b8769c7c81a1f3bf9988497956c9f0c",
+  "pre_eu30_session_admission_block": "jst1300_pre_eu30",
+  "pre_eu30_session_max_positions": 3,
+  "expected_pre_eu30_magics": [230031, 230032, 230033],
+  "trend_recovery_enabled": true,
+  "trend_recovery_policy_id": "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001",
+  "trend_recovery_params_hash": "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9",
+  "trend_recovery_entry_window_minutes": 30,
+  "trend_recovery_max_total_entries": 2,
+  "expected_trend_recovery_magics": [230034],
+  "session_vwap_enabled": false,
+  "session_vwap_policy_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+  "session_vwap_params_hash": "b47b8d7d26094681fe559f6daf9c7e2bb1f4cd610527b0a69c5426c20a7a2a65",
+  "session_vwap_session_timezone": "America/New_York",
+  "session_vwap_session_start": "05:30",
+  "session_vwap_session_end": "08:30",
+  "session_vwap_quantile": 0.9,
+  "session_vwap_lookback_calendar_days": 20,
+  "session_vwap_atr_period": 60,
+  "session_vwap_hold_minutes": 15,
+  "session_vwap_max_positions": 5,
+  "expected_session_vwap_magics": [230035, 230036, 230037, 230038, 230039],
+  "session_vwap_history": {
+    "page_bars": 5000,
+    "refresh_bars": 10,
+    "retry_seconds": [5, 15, 30, 60]
+  },
+  "t0530_edge_enabled": false,
+  "t0530_edge_policy_id": "ny0530_edge_break_fade_w15_h15_cap4_v001",
+  "t0530_edge_params_hash": "27d51f6243e74a56e2ad10428f1a1f46e58f2f89a31bd96db4fb7025301d6163",
+  "t0530_edge_session_timezone": "America/New_York",
+  "t0530_edge_session_start": "05:30",
+  "t0530_edge_session_end": "06:00",
+  "t0530_edge_lookback_bars": 15,
+  "t0530_edge_hold_minutes": 15,
+  "t0530_edge_max_positions": 4,
+  "t0530_edge_max_signal_delay_minutes": 5,
+  "expected_t0530_edge_magics": [230040, 230041, 230042, 230043],
   "eu_entry_admission_clock": {
     "eu_timezone": "Europe/London",
     "us_timezone": "America/New_York",
-    "notation": "per_market_dst",
+    "notation": "resolved_utc_from_market_dst",
     "scope": "new_entry_admission_only",
     "position_lifecycle": "confirmed_fill_utc_independent",
-    "routing_enabled": false,
+    "routing_enabled": true,
     "blocks": [
       {
         "id": "jst1300_pre_eu30",
-        "start": {"reference_clock": "fixed_jst", "dst_jst": "13:00", "standard_jst": "13:00"},
-        "end": {"reference_clock": "Europe/London", "dst_jst": "15:30", "standard_jst": "16:30"}
+        "start": {"reference_clock": "fixed_utc", "dst_utc": "04:00", "standard_utc": "04:00"},
+        "end": {"reference_clock": "Europe/London", "dst_utc": "06:30", "standard_utc": "07:30"}
       },
       {
         "id": "eu_open_to_us_preopen",
-        "start": {"reference_clock": "Europe/London", "dst_jst": "15:30", "standard_jst": "16:30"},
-        "end": {"reference_clock": "America/New_York", "dst_jst": "20:30", "standard_jst": "21:30"}
+        "start": {"reference_clock": "Europe/London", "dst_utc": "06:30", "standard_utc": "07:30"},
+        "end": {"reference_clock": "America/New_York", "dst_utc": "11:30", "standard_utc": "12:30"}
       },
       {
         "id": "us_to_eu_late",
-        "start": {"reference_clock": "America/New_York", "dst_jst": "20:30", "standard_jst": "21:30"},
-        "end": {"reference_clock": "America/New_York", "dst_jst": "05:30", "standard_jst": "06:30"}
+        "start": {"reference_clock": "America/New_York", "dst_utc": "11:30", "standard_utc": "12:30"},
+        "end": {"reference_clock": "America/New_York", "dst_utc": "20:30", "standard_utc": "21:30"}
       }
     ]
   },
   "expected_bridge_name": "BotBridge_s23",
+  "expected_bridge_version": "2026-08-31-s23-edge-policy-v28",
   "symbol": "XAUUSD",
   "mt5_symbol": "XAUUSD",
   "default_lot": 0.01,
   "contract_size": 100.0,
   "poll_interval_seconds": 5,
+  "raw_tick_shadow_collector": {
+    "enabled": false,
+    "recipe_version": "s23_raw_tick_shadow_v1",
+    "page_rows": 1000,
+    "lookback_seconds_on_first_run": 300,
+    "max_catchup_seconds_per_run": 3600,
+    "csv": "s23_raw_ticks_append_only.csv",
+    "state_file": "s23_raw_tick_collector_state.json"
+  },
   "status_log_interval_seconds": 300,
   "diagnostic_repeat_summary_seconds": 300,
   "bot_log_max_bytes": 10485760,
@@ -80,7 +130,7 @@
   "trade_permission_alert_threshold": 3,
   "broker_timezone": "UTC",
   "m1_timeframe": 1,
-  "m1_bars": 240,
+  "m1_bars": 420,
   "drop_latest_m1_bar": true,
   "max_signal_delay_minutes": 2,
   "new_basket_blocked_hours_utc": [14],
@@ -116,6 +166,18 @@
   "midday_shadow_state_tagger": {
     "enabled": true,
     "csv": "s23_midday_shadow_state_tags.csv"
+  },
+  "pre_eu30_shadow_opportunity_observer": {
+    "enabled": true,
+    "horizons_minutes": [1, 5, 15, 30, 45, 60],
+    "completed_id_retention_days": 14,
+    "opportunity_csv": "s23_pre_eu30_shadow_opportunities.csv",
+    "markout_csv": "s23_pre_eu30_shadow_markouts.csv",
+    "state_file": "s23_pre_eu30_shadow_observer_state.json"
+  },
+  "pre_eu30_shadow_state_tagger": {
+    "enabled": true,
+    "csv": "s23_pre_eu30_shadow_state_tags.csv"
   },
   "safety": {
     "hist_timestamps_are_utc": true,
@@ -189,6 +251,193 @@
       "atr_period": 60,
       "min_sweep_depth_atr": 0.05,
       "reclaim_atr": 0.03
+    }
+  ],
+  "pre_eu30_session_strategies": [
+    {
+      "enabled": true,
+      "id": "jst1300_pre_eu30_lane_1",
+      "lane_id": 9,
+      "pre_eu30_lane_id": 1,
+      "spec_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+      "signal_id": "c4_bollinger_squeeze_release_direction_control",
+      "magic": 230031,
+      "comment_prefix": "s23_pe_l1",
+      "lot": 0.01,
+      "hold_minutes": 45,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "jst1300_pre_eu30_lane_2",
+      "lane_id": 10,
+      "pre_eu30_lane_id": 2,
+      "spec_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+      "signal_id": "c4_double_sweep_resolution_primary",
+      "magic": 230032,
+      "comment_prefix": "s23_pe_l2",
+      "lot": 0.01,
+      "hold_minutes": 60,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "jst1300_pre_eu30_lane_3",
+      "lane_id": 11,
+      "pre_eu30_lane_id": 3,
+      "spec_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+      "signal_id": "c4_rsi_extreme_reversal_direction_control",
+      "magic": 230033,
+      "comment_prefix": "s23_pe_l3",
+      "lot": 0.01,
+      "hold_minutes": 45,
+      "max_positions": 1,
+      "cooldown": 0
+    }
+  ],
+  "trend_recovery_strategies": [
+    {
+      "enabled": true,
+      "id": "reverse_long_stop_trend_lane_1",
+      "lane_id": 12,
+      "spec_id": "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001",
+      "signal_id": "completed_m1_bullish_after_reverse_long_stop",
+      "magic": 230034,
+      "comment_prefix": "s23_tr_l1",
+      "lot": 0.01,
+      "max_positions": 2,
+      "cooldown": 0,
+      "hold_minutes": 70,
+      "ticket_target_usd": 10.0,
+      "ticket_stop_usd": 18.0,
+      "target_atr_mult": 3.5,
+      "stop_atr_mult": 6.5,
+      "adaptive_fixed_exit_atr_threshold": 2.0,
+      "tp_multiplier": 1.0,
+      "sl_multiplier": 0.5
+    }
+  ],
+  "session_vwap_strategies": [
+    {
+      "enabled": true,
+      "id": "ny0530_session_vwap_lane_1",
+      "lane_id": 13,
+      "spec_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+      "signal_id": "session_vwap_extension_fade",
+      "magic": 230035,
+      "comment_prefix": "s23_sv_l1",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_session_vwap_lane_2",
+      "lane_id": 14,
+      "spec_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+      "signal_id": "session_vwap_extension_fade",
+      "magic": 230036,
+      "comment_prefix": "s23_sv_l2",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_session_vwap_lane_3",
+      "lane_id": 15,
+      "spec_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+      "signal_id": "session_vwap_extension_fade",
+      "magic": 230037,
+      "comment_prefix": "s23_sv_l3",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_session_vwap_lane_4",
+      "lane_id": 16,
+      "spec_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+      "signal_id": "session_vwap_extension_fade",
+      "magic": 230038,
+      "comment_prefix": "s23_sv_l4",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_session_vwap_lane_5",
+      "lane_id": 17,
+      "spec_id": "ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001",
+      "signal_id": "session_vwap_extension_fade",
+      "magic": 230039,
+      "comment_prefix": "s23_sv_l5",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    }
+  ],
+  "t0530_edge_strategies": [
+    {
+      "enabled": true,
+      "id": "ny0530_edge_lane_1",
+      "lane_id": 18,
+      "spec_id": "ny0530_edge_break_fade_w15_h15_cap4_v001",
+      "signal_id": "t0530_edge_break_fade",
+      "magic": 230040,
+      "comment_prefix": "s23_ed_l1",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_edge_lane_2",
+      "lane_id": 19,
+      "spec_id": "ny0530_edge_break_fade_w15_h15_cap4_v001",
+      "signal_id": "t0530_edge_break_fade",
+      "magic": 230041,
+      "comment_prefix": "s23_ed_l2",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_edge_lane_3",
+      "lane_id": 20,
+      "spec_id": "ny0530_edge_break_fade_w15_h15_cap4_v001",
+      "signal_id": "t0530_edge_break_fade",
+      "magic": 230042,
+      "comment_prefix": "s23_ed_l3",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
+    },
+    {
+      "enabled": true,
+      "id": "ny0530_edge_lane_4",
+      "lane_id": 21,
+      "spec_id": "ny0530_edge_break_fade_w15_h15_cap4_v001",
+      "signal_id": "t0530_edge_break_fade",
+      "magic": 230043,
+      "comment_prefix": "s23_ed_l4",
+      "lot": 0.01,
+      "hold_minutes": 15,
+      "max_positions": 1,
+      "cooldown": 0
     }
   ],
   "strategies": [

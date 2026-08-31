@@ -32,6 +32,7 @@ from live_executor import (
     MT5Executor,
     ORDER_TYPE_BUY,
     ORDER_TYPE_SELL,
+    SymbolInfo,
 )
 from live_safety import (
     LiveSafetyOptions,
@@ -43,6 +44,27 @@ from live_manual_alerts import notify_manual_action_required
 from live_config import MT5_LOGIN, MT5_SERVER
 from eu_entry_admission_clock import classify_entry_admission, is_eu_summer_time, is_us_summer_time
 from position_lifecycle_clock import fixed_hold_due_at
+from jst1300_pre_eu30_strategy import (
+    ADMISSION_BLOCK_ID as PRE_EU30_ADMISSION_BLOCK_ID,
+    POLICY_ID as PRE_EU30_POLICY_ID,
+    POLICY_PARAMS_HASH as PRE_EU30_POLICY_PARAMS_HASH,
+    SIGNAL_IDS as PRE_EU30_SIGNAL_IDS,
+    in_entry_session as in_pre_eu30_entry_session,
+    signal_sides as pre_eu30_signal_sides,
+)
+from session_vwap_overlay import (
+    POLICY_ID as SESSION_VWAP_POLICY_ID,
+    PagedM1History,
+    entry_history_issue as session_vwap_entry_history_issue,
+    in_entry_session as in_session_vwap_entry_session,
+    latest_signal as latest_session_vwap_signal,
+)
+from t0530_edge_overlay import (
+    POLICY_ID as T0530_EDGE_POLICY_ID,
+    POLICY_PARAMS_HASH as T0530_EDGE_POLICY_PARAMS_HASH,
+    in_release_session as in_t0530_edge_release_session,
+    latest_signal as latest_t0530_edge_signal,
+)
 try:
     from shadow_opportunity_observer import ShadowOpportunityObserver
 except ImportError:
@@ -57,10 +79,22 @@ UTC = timezone.utc
 EXPECTED_S23_MAGICS = (230023, 230024, 230025, 230026)
 EXPECTED_MORNING_MAGICS = (230027, 230028, 230029)
 EXPECTED_MIDDAY_MAGICS = (230030,)
+EXPECTED_PRE_EU30_MAGICS = (230031, 230032, 230033)
+EXPECTED_TREND_RECOVERY_MAGICS = (230034,)
+EXPECTED_SESSION_VWAP_MAGICS = (230035, 230036, 230037, 230038, 230039)
+EXPECTED_SESSION_VWAP_PARAMS_HASH = "b47b8d7d26094681fe559f6daf9c7e2bb1f4cd610527b0a69c5426c20a7a2a65"
+EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-x-archive-plus-jst0911-plus-jst1113-round-s2p5-d0p05-r0p03-v001"
+EXPECTED_CANDIDATE_ID = "bot23-integrated-plus-session-vwap-disabled-plus-t0530-edge-disabled-v002"
+EXPECTED_BRIDGE_NAME = "BotBridge_s23"
+EXPECTED_BRIDGE_VERSION = "2026-08-31-s23-edge-policy-v28"
+EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
+EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
+EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
+EXPECTED_TREND_RECOVERY_MAX_TOTAL_ENTRIES = 2
+EXPECTED_TREND_RECOVERY_MAX_HOLD_MINUTES = 70
 EXPECTED_MORNING_POLICY_ID = "jst0911_stable001_param_15_55_45_v001"
 EXPECTED_MORNING_POLICY_PARAMS_HASH = "c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e"
 EXPECTED_MORNING_SESSION_START_UTC = 0
@@ -71,15 +105,17 @@ EXPECTED_MIDDAY_POLICY_PARAMS_HASH = "526d90e6dc16981ba5e60d31750f1b4862fbe3d917
 EXPECTED_MIDDAY_SESSION_START_UTC = 2
 EXPECTED_MIDDAY_SESSION_END_UTC = 4
 EXPECTED_MIDDAY_MAX_POSITIONS = 1
+EXPECTED_PRE_EU30_MAX_POSITIONS = 3
+EXPECTED_PRE_EU30_M1_BARS = 420
 EXPECTED_ENTRY_ADMISSION_EU_TIMEZONE = "Europe/London"
 EXPECTED_ENTRY_ADMISSION_US_TIMEZONE = "America/New_York"
-EXPECTED_ENTRY_ADMISSION_NOTATION = "per_market_dst"
+EXPECTED_ENTRY_ADMISSION_NOTATION = "resolved_utc_from_market_dst"
 EXPECTED_ENTRY_ADMISSION_SCOPE = "new_entry_admission_only"
 EXPECTED_POSITION_LIFECYCLE = "confirmed_fill_utc_independent"
 EXPECTED_ENTRY_ADMISSION_BLOCKS = (
-    ("jst1300_pre_eu30", "fixed_jst", "13:00", "13:00", "Europe/London", "15:30", "16:30"),
-    ("eu_open_to_us_preopen", "Europe/London", "15:30", "16:30", "America/New_York", "20:30", "21:30"),
-    ("us_to_eu_late", "America/New_York", "20:30", "21:30", "America/New_York", "05:30", "06:30"),
+    ("jst1300_pre_eu30", "fixed_utc", "04:00", "04:00", "Europe/London", "06:30", "07:30"),
+    ("eu_open_to_us_preopen", "Europe/London", "06:30", "07:30", "America/New_York", "11:30", "12:30"),
+    ("us_to_eu_late", "America/New_York", "11:30", "12:30", "America/New_York", "20:30", "21:30"),
 )
 EXPECTED_ROUTING_MODE = "first_consuming_lane_preserve_primary_v1"
 EXPECTED_ENTRY_POLICY_ID = "reverse_d60"
@@ -130,6 +166,55 @@ FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "live_time_close_failed",
     "live_time_close_unconfirmed",
 }
+CONFIRMED_CLOSE_CLEAR_SYNC_REASONS = FLAT_AUTO_CLEAR_SYNC_REASONS | {
+    "close_submission_result_unresolved",
+    "close_deal_query_unavailable",
+    "close_deal_not_confirmed",
+    "close_deal_payload_invalid",
+    "close_deal_timestamp_invalid",
+}
+OWNED_CLOSE_RETRY_SYNC_REASONS = {
+    "position_query_unavailable_before_close",
+    "position_missing_before_close",
+    "close_trade_permission_rejected",
+    "live_time_close_failed",
+    "live_time_close_unconfirmed",
+    "live_trend_ticket_close_failed",
+}
+DEFINITIVE_CLOSE_NO_FILL_RETCODES = frozenset({
+    10004,  # requote
+    10006,  # rejected
+    10007,  # canceled
+    10011,  # request processing error
+    10013,  # invalid request
+    10014,  # invalid volume
+    10015,  # invalid price
+    10016,  # invalid stops
+    10017,  # trading disabled
+    10018,  # market closed
+    10019,  # insufficient funds
+    10020,  # price changed
+    10021,  # price unavailable
+    10022,  # invalid expiration
+    10024,  # too many requests
+    10026,  # server autotrading disabled
+    10027,  # client autotrading disabled
+    10029,  # order or position frozen
+    10030,  # invalid filling type
+    10032,  # live account required
+    10033,  # pending-order limit
+    10034,  # volume limit
+    10035,  # invalid order type
+    10038,  # invalid close volume
+    10040,  # position limit
+    10041,  # pending activation rejected/canceled
+    10042,  # long only
+    10043,  # short only
+    10044,  # close only
+    10045,  # FIFO close required
+    10046,  # hedge prohibited
+})
+CLOSE_TRADE_PERMISSION_RETCODES = frozenset({10026, 10027})
 REPEATABLE_DIAGNOSTIC_REASONS = {
     "symbol_info_failed",
     "positions_unavailable",
@@ -144,6 +229,30 @@ STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 LOG_FILE = os.path.join(LOG_DIR, "s23_bot.log")
 TRADE_LOG_FILE = os.path.join(LOG_DIR, "s23_trades.csv")
 STATE_FILE = os.path.join(STATE_DIR, "s23_bot_state.json")
+RUNNER_LOCK_FILE = os.path.join(STATE_DIR, "s23_runner.lock")
+
+
+def acquire_runner_singleton_lock() -> Any | None:
+    """Hold an OS-released process lock for the complete runner lifetime."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    handle = open(RUNNER_LOCK_FILE, "a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+        os.fsync(handle.fileno())
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        handle.close()
+        return None
+    return handle
 PARAMS_FILE = os.path.join(SCRIPT_DIR, "s23_params.json")
 
 TRADE_FIELDS = [
@@ -205,15 +314,408 @@ def parse_ts(value: Any) -> pd.Timestamp | None:
     return ts.tz_convert("UTC")
 
 
+_TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
+    "enabled",
+    "live_trading_enabled",
+    "shadow_forward_enabled",
+    "require_hedging_account",
+    "long_target_portfolio_rearm_enabled",
+    "inventory_range_fade_enabled",
+    "late_short_30m_action_enabled",
+    "morning_session_enabled",
+    "midday_session_enabled",
+    "pre_eu30_session_enabled",
+    "trend_recovery_enabled",
+    "session_vwap_enabled",
+    "t0530_edge_enabled",
+    "drop_latest_m1_bar",
+)
+
+_STRATEGY_CONFIG_COLLECTIONS = (
+    "strategies",
+    "morning_session_strategies",
+    "midday_session_strategies",
+    "pre_eu30_session_strategies",
+    "trend_recovery_strategies",
+    "session_vwap_strategies",
+    "t0530_edge_strategies",
+)
+
+_EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
+    "strategies": tuple(f"za_horizontal_lane_{index}" for index in range(1, 5)),
+    "morning_session_strategies": tuple(f"jst0911_morning_lane_{index}" for index in range(1, 4)),
+    "midday_session_strategies": ("jst1113_round_sweep_lane_1",),
+    "pre_eu30_session_strategies": tuple(f"jst1300_pre_eu30_lane_{index}" for index in range(1, 4)),
+    "trend_recovery_strategies": ("reverse_long_stop_trend_lane_1",),
+    "session_vwap_strategies": tuple(f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)),
+    "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
+}
+
+# A persisted policy id/hash pair is the generation marker for state introduced
+# with that policy.  Once both markers exist, silently defaulting a missing lane
+# or routing field could erase live lifecycle state under an apparently current
+# identity.  States predating both markers retain the explicit migration path.
+_STATE_GENERATION_CONTRACTS = (
+    ("entry_policy_id", "entry_policy_params_hash", "strategies", ()),
+    ("portfolio_rearm_policy_id", "portfolio_rearm_params_hash", None, (
+        "long_target_rearm_pending_confirmation", "long_target_rearm_request_utc",
+        "long_target_rearm_until_utc", "long_target_rearm_confirmed_utc",
+        "long_target_rearm_trigger_lane_id", "long_target_rearm_trigger_basket_id",
+        "long_target_rearm_expired_utc",
+    )),
+    ("inventory_range_fade_policy_id", "inventory_range_fade_params_hash", None, (
+        "inventory_range_fade",
+    )),
+    ("morning_policy_id", "morning_policy_params_hash", "morning_session_strategies", ()),
+    ("midday_policy_id", "midday_policy_params_hash", "midday_session_strategies", ()),
+    ("pre_eu30_policy_id", "pre_eu30_policy_params_hash", "pre_eu30_session_strategies", ()),
+    ("trend_recovery_policy_id", "trend_recovery_params_hash", "trend_recovery_strategies", (
+        "trend_recovery",
+    )),
+    ("session_vwap_policy_id", "session_vwap_params_hash", "session_vwap_strategies", (
+        "session_vwap_last_evaluated_bar", "session_vwap_last_unavailable_bar",
+    )),
+    ("t0530_edge_policy_id", "t0530_edge_params_hash", "t0530_edge_strategies", (
+        "t0530_edge_last_evaluated_bar",
+    )),
+)
+
+_CORE_LANE_STATE_KEYS = ("lane_id", "basket", "basket_sequence", "current_basket_id")
+
+_STRATEGY_KEYS_BY_COLLECTION = {
+    "strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "magic", "comment_prefix", "lot",
+        "session_start_utc", "session_end_utc", "mode", "impulse_bars", "impulse_atr",
+        "add_atr", "max_positions", "add_profit_guard_ratio", "basket_target_usd",
+        "basket_stop_usd", "max_hold_bars", "cooldown", "vol_min",
+        "failure_to_progress_bars", "failure_to_progress_peak_usd", "entry_wait_z",
+        "entry_wait_sigma", "entry_wait_minutes", "entry_require_extreme",
+        "target_atr_mult", "stop_atr_mult", "failure_to_progress_peak_atr_mult",
+        "entry_max_spread_atr_ratio", "adaptive_fixed_exit_atr_threshold", "reverse_on_fail",
+    }),
+    "morning_session_strategies": frozenset({
+        "enabled", "id", "lane_id", "morning_lane_id", "spec_id", "signal_id",
+        "magic", "comment_prefix", "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
+    "midday_session_strategies": frozenset({
+        "enabled", "id", "lane_id", "midday_lane_id", "spec_id", "signal_id",
+        "magic", "comment_prefix", "lot", "hold_minutes", "max_positions", "cooldown",
+        "level_step", "atr_period", "min_sweep_depth_atr", "reclaim_atr",
+    }),
+    "pre_eu30_session_strategies": frozenset({
+        "enabled", "id", "lane_id", "pre_eu30_lane_id", "spec_id", "signal_id",
+        "magic", "comment_prefix", "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
+    "trend_recovery_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "max_positions", "cooldown", "hold_minutes", "ticket_target_usd",
+        "ticket_stop_usd", "target_atr_mult", "stop_atr_mult",
+        "adaptive_fixed_exit_atr_threshold", "tp_multiplier", "sl_multiplier",
+    }),
+    "session_vwap_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
+    "t0530_edge_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
+}
+
+
+def validate_strategy_topology_config(params: dict[str, Any]) -> None:
+    """Freeze all 21 lane state namespaces and executable row schemas."""
+    observed_ids: list[str] = []
+    for collection in _STRATEGY_CONFIG_COLLECTIONS:
+        rows = params.get(collection)
+        expected_ids = _EXPECTED_STRATEGY_IDS_BY_COLLECTION[collection]
+        if not isinstance(rows, list) or len(rows) != len(expected_ids):
+            raise ValueError(f"invalid strategy topology count: {collection}")
+        ids = tuple(row.get("id") if isinstance(row, dict) else None for row in rows)
+        if ids != expected_ids:
+            raise ValueError(
+                f"invalid strategy topology ids: {collection}={ids!r} expected={expected_ids!r}"
+            )
+        expected_keys = _STRATEGY_KEYS_BY_COLLECTION[collection]
+        for index, row in enumerate(rows):
+            if frozenset(row) != expected_keys:
+                missing = sorted(expected_keys - frozenset(row))
+                unknown = sorted(frozenset(row) - expected_keys)
+                raise ValueError(
+                    f"invalid strategy row schema: {collection}[{index}] missing={missing} unknown={unknown}"
+                )
+        observed_ids.extend(str(value) for value in ids)
+    if len(observed_ids) != len(set(observed_ids)):
+        raise ValueError("duplicate strategy state namespace")
+    ordinal_contracts = (
+        ("morning_session_strategies", "morning_lane_id"),
+        ("midday_session_strategies", "midday_lane_id"),
+        ("pre_eu30_session_strategies", "pre_eu30_lane_id"),
+    )
+    for collection, key in ordinal_contracts:
+        observed = tuple(row[key] for row in params[collection])
+        expected = tuple(range(1, len(params[collection]) + 1))
+        if observed != expected:
+            raise ValueError(f"invalid strategy ordinal: {collection}.{key}={observed!r}")
+
+
+def validate_boolean_config(params: dict[str, Any]) -> None:
+    """Reject coercible configuration booleans before they alter execution."""
+    defaults = {
+        "enabled": True,
+        "live_trading_enabled": False,
+        "shadow_forward_enabled": True,
+        "require_hedging_account": True,
+        "drop_latest_m1_bar": True,
+    }
+    for key in _TOP_LEVEL_BOOLEAN_CONFIG_KEYS:
+        value = params.get(key, defaults.get(key, False))
+        if not isinstance(value, bool):
+            raise ValueError(f"invalid boolean config: {key}={value!r}")
+    safety = params.get("safety", {})
+    if not isinstance(safety, dict):
+        raise ValueError("invalid safety config container")
+    allowed_safety = set(LiveSafetyOptions.__dataclass_fields__)
+    for key, value in safety.items():
+        if key not in allowed_safety:
+            raise ValueError(f"unknown safety config: {key}")
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"invalid safety boolean config: {key}={value!r}")
+    for collection in _STRATEGY_CONFIG_COLLECTIONS:
+        rows = params.get(collection, [])
+        if not isinstance(rows, list):
+            raise ValueError(f"invalid strategy config container: {collection}")
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(f"invalid strategy config row: {collection}[{index}]")
+            if "enabled" in row and not isinstance(row["enabled"], bool):
+                raise ValueError(
+                    f"invalid strategy boolean config: {collection}[{index}].enabled={row['enabled']!r}"
+                )
+            for key in ("entry_require_extreme", "reverse_on_fail"):
+                if key in row and not isinstance(row[key], bool):
+                    raise ValueError(
+                        f"invalid strategy boolean config: {collection}[{index}].{key}={row[key]!r}"
+                    )
+    admission_clock = params.get("eu_entry_admission_clock")
+    if not isinstance(admission_clock, dict):
+        raise ValueError("invalid entry admission clock container")
+    if not isinstance(admission_clock.get("routing_enabled"), bool):
+        raise ValueError("invalid entry admission routing boolean")
+
+
+def validate_execution_numeric_config(params: dict[str, Any]) -> None:
+    """Reject coercible or unsafe execution/risk numerics before startup."""
+    positive_numbers = (
+        "default_lot",
+        "contract_size",
+        "poll_interval_seconds",
+        "status_log_interval_seconds",
+        "diagnostic_repeat_summary_seconds",
+        "max_signal_delay_minutes",
+        "daily_realized_loss_limit_usd",
+        "point_size",
+        "fixed_hold_close_force_after_minutes",
+        "fixed_hold_market_closed_retry_seconds",
+        "trade_permission_retry_seconds",
+    )
+    nonnegative_numbers = (
+        "max_entry_spread_points",
+        "fixed_hold_close_max_spread_points",
+    )
+    positive_integers = (
+        "m1_timeframe",
+        "m1_bars",
+        "fixed_hold_close_stable_polls",
+        "bot_log_max_bytes",
+        "trade_permission_alert_threshold",
+    )
+    nonnegative_integers = ("price_digits", "deviation_points", "bot_log_backup_count")
+
+    for key in positive_numbers + nonnegative_numbers:
+        value = params.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"invalid numeric config type: {key}={value!r}")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"invalid nonfinite numeric config: {key}={value!r}")
+        if key in positive_numbers and numeric <= 0.0:
+            raise ValueError(f"invalid nonpositive numeric config: {key}={value!r}")
+        if key in nonnegative_numbers and numeric < 0.0:
+            raise ValueError(f"invalid negative numeric config: {key}={value!r}")
+
+    for key in positive_integers + nonnegative_integers:
+        value = params.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"invalid integer config type: {key}={value!r}")
+        if key in positive_integers and value <= 0:
+            raise ValueError(f"invalid nonpositive integer config: {key}={value!r}")
+        if key in nonnegative_integers and value < 0:
+            raise ValueError(f"invalid negative integer config: {key}={value!r}")
+    if int(params["price_digits"]) > 12:
+        raise ValueError(f"invalid price_digits config: {params['price_digits']!r}")
+
+    blocked_hours = params.get("new_basket_blocked_hours_utc")
+    if not isinstance(blocked_hours, list) or any(
+        isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23
+        for hour in blocked_hours
+    ) or len(blocked_hours) != len(set(blocked_hours)):
+        raise ValueError(f"invalid blocked-hours config: {blocked_hours!r}")
+
+    history = params.get("session_vwap_history")
+    if not isinstance(history, dict):
+        raise ValueError("invalid session-VWAP history config container")
+    for key, minimum in (("page_bars", 1), ("refresh_bars", 2)):
+        value = history.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= 5000:
+            raise ValueError(f"invalid session-VWAP history integer: {key}={value!r}")
+    retry_seconds = history.get("retry_seconds")
+    if not isinstance(retry_seconds, list) or not retry_seconds:
+        raise ValueError("invalid session-VWAP retry schedule")
+    for value in retry_seconds:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ValueError(f"invalid session-VWAP retry delay: {value!r}")
+
+    exact_top_level_integers = (
+        "lane_count", "late_short_lookback_completed_m1_bars",
+        "long_target_portfolio_rearm_minutes", "inventory_range_max_wait_minutes",
+        "inventory_range_confirm_bars", "morning_session_start_utc",
+        "morning_session_end_utc", "morning_session_max_positions",
+        "midday_session_start_utc", "midday_session_end_utc",
+        "midday_session_max_positions", "pre_eu30_session_max_positions",
+        "trend_recovery_entry_window_minutes", "trend_recovery_max_total_entries",
+        "session_vwap_lookback_calendar_days", "session_vwap_atr_period",
+        "session_vwap_hold_minutes", "session_vwap_max_positions",
+        "t0530_edge_lookback_bars", "t0530_edge_hold_minutes",
+        "t0530_edge_max_positions", "t0530_edge_max_signal_delay_minutes",
+    )
+    for key in exact_top_level_integers:
+        value = params.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"invalid strategy integer config: {key}={value!r}")
+
+    exact_top_level_numbers = (
+        "late_short_drop_threshold", "inventory_range_return_depth_fraction",
+        "session_vwap_quantile",
+    )
+    for key in exact_top_level_numbers:
+        value = params.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError(f"invalid strategy numeric config: {key}={value!r}")
+
+    expected_magic_keys = (
+        "expected_magics", "expected_morning_magics", "expected_midday_magics",
+        "expected_pre_eu30_magics", "expected_trend_recovery_magics",
+        "expected_session_vwap_magics",
+        "expected_t0530_edge_magics",
+    )
+    for key in expected_magic_keys:
+        values = params.get(key)
+        if (
+            not isinstance(values, list)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in values)
+            or len(values) != len(set(values))
+        ):
+            raise ValueError(f"invalid expected magic config: {key}={values!r}")
+
+    strategy_integer_fields = {
+        "lane_id", "magic", "max_positions", "cooldown", "hold_minutes",
+        "morning_lane_id", "midday_lane_id", "pre_eu30_lane_id",
+        "session_start_utc", "session_end_utc", "impulse_bars", "max_hold_bars",
+        "failure_to_progress_bars", "entry_wait_minutes", "atr_period",
+    }
+    strategy_numeric_fields = {
+        "lot", "impulse_atr", "add_atr", "add_profit_guard_ratio",
+        "basket_target_usd", "basket_stop_usd", "vol_min",
+        "failure_to_progress_peak_usd", "entry_wait_z", "entry_wait_sigma",
+        "target_atr_mult", "stop_atr_mult", "failure_to_progress_peak_atr_mult",
+        "entry_max_spread_atr_ratio", "adaptive_fixed_exit_atr_threshold",
+        "level_step", "min_sweep_depth_atr", "reclaim_atr",
+        "ticket_target_usd", "ticket_stop_usd", "tp_multiplier", "sl_multiplier",
+    }
+    for collection in _STRATEGY_CONFIG_COLLECTIONS:
+        for index, row in enumerate(params.get(collection, [])):
+            for key in strategy_integer_fields & row.keys():
+                value = row[key]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(
+                        f"invalid lane integer config: {collection}[{index}].{key}={value!r}"
+                    )
+            for key in strategy_numeric_fields & row.keys():
+                value = row[key]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                ):
+                    raise ValueError(
+                        f"invalid lane numeric config: {collection}[{index}].{key}={value!r}"
+                    )
+
+
+def _strict_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"nonfinite JSON constant: {value}")
+
+
+def strict_json_load(handle: Any) -> Any:
+    return json.load(
+        handle,
+        object_pairs_hook=_strict_json_pairs,
+        parse_constant=_reject_json_constant,
+    )
+
+
+def _fsync_parent_directory(path: str) -> None:
+    """Make an atomic replace durable on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    directory_fd = os.open(parent, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(
+                payload, f, ensure_ascii=False, indent=2, sort_keys=True,
+                allow_nan=False,
+            )
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _fsync_parent_directory(path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def append_csv(path: str, row: dict[str, Any], fields: list[str]) -> None:
@@ -287,11 +789,26 @@ def completed_align(series: pd.Series, minutes: int, bars: pd.DataFrame) -> pd.S
 
 class S23HorizontalInventoryRunner:
     def __init__(self, params: dict[str, Any]):
+        validate_boolean_config(params)
+        validate_strategy_topology_config(params)
+        validate_execution_numeric_config(params)
         self.params = params
-        self.live_enabled = bool(params.get("live_trading_enabled", False))
-        self.shadow_enabled = bool(params.get("shadow_forward_enabled", True))
+        self.live_enabled = params.get("live_trading_enabled", False)
+        self.shadow_enabled = params.get("shadow_forward_enabled", True)
         self.safety = LiveSafetyOptions(**params.get("safety", {}))
         self.dm = MT5DataManager(self.safety)
+        history = dict(params.get("session_vwap_history") or {})
+        self.session_vwap_history = PagedM1History(
+            self.dm,
+            symbol=str(params.get("mt5_symbol", params["symbol"])),
+            timeframe=int(params.get("m1_timeframe", 1)),
+            broker_timezone=str(params.get("broker_timezone", "UTC")),
+            page_bars=int(history.get("page_bars", 5000)),
+            refresh_bars=int(history.get("refresh_bars", 10)),
+            coverage_days=int(params.get("session_vwap_lookback_calendar_days", 20)),
+            retry_seconds=tuple(history.get("retry_seconds", [5, 15, 30, 60])),
+        )
+        self._session_vwap_snapshot: Any = None
         self.executor = MT5Executor()
         self._suppress_manual_alerts = False
         self._entry_policy_state_migrated = False
@@ -299,6 +816,10 @@ class S23HorizontalInventoryRunner:
         self._inventory_range_fade_state_migrated = False
         self._morning_session_state_migrated = False
         self._midday_session_state_migrated = False
+        self._pre_eu30_session_state_migrated = False
+        self._trend_recovery_state_migrated = False
+        self._session_vwap_state_migrated = False
+        self._t0530_edge_state_migrated = False
         self.state = self._load_state()
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
@@ -311,6 +832,10 @@ class S23HorizontalInventoryRunner:
         self._midday_shadow_observer_error_signature: str | None = None
         self.midday_shadow_state_tagger: Any = None
         self._midday_shadow_state_tagger_error_signature: str | None = None
+        self.pre_eu30_shadow_observer: Any = None
+        self._pre_eu30_shadow_observer_error_signature: str | None = None
+        self.pre_eu30_shadow_state_tagger: Any = None
+        self._pre_eu30_shadow_state_tagger_error_signature: str | None = None
         try:
             if ShadowOpportunityObserver is None:
                 logging.error("S23 shadow observer module unavailable; trading continues without passive evidence")
@@ -361,6 +886,31 @@ class S23HorizontalInventoryRunner:
                 )
         except Exception as exc:
             logging.error("S23 midday shadow state tagger disabled after initialization failure: %s", exc)
+        try:
+            if ShadowOpportunityObserver is None:
+                logging.error("S23 pre-EU30 shadow observer module unavailable; trading continues without passive evidence")
+            else:
+                self.pre_eu30_shadow_observer = ShadowOpportunityObserver(
+                    params.get("pre_eu30_shadow_opportunity_observer", {}),
+                    log_dir=LOG_DIR,
+                    state_dir=STATE_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                    contract_size=float(params.get("contract_size", 100.0)),
+                    lot=float(params.get("default_lot", 0.01)),
+                )
+        except Exception as exc:
+            logging.error("S23 pre-EU30 shadow observer disabled after initialization failure: %s", exc)
+        try:
+            if ShadowStateTagger is None:
+                logging.error("S23 pre-EU30 shadow state tagger module unavailable; trading continues without passive state tags")
+            else:
+                self.pre_eu30_shadow_state_tagger = ShadowStateTagger(
+                    params.get("pre_eu30_shadow_state_tagger", {}),
+                    log_dir=LOG_DIR,
+                    symbol=str(params.get("mt5_symbol", params["symbol"])),
+                )
+        except Exception as exc:
+            logging.error("S23 pre-EU30 shadow state tagger disabled after initialization failure: %s", exc)
 
     def _morning_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("morning_session_strategies", []))
@@ -368,8 +918,35 @@ class S23HorizontalInventoryRunner:
     def _midday_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("midday_session_strategies", []))
 
+    def _pre_eu30_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("pre_eu30_session_strategies", []))
+
+    def _trend_recovery_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("trend_recovery_strategies", []))
+
+    def _session_vwap_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("session_vwap_strategies", []))
+
+    def _t0530_edge_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("t0530_edge_strategies", []))
+
+    def _legacy_signal_strategies(self) -> list[dict[str, Any]]:
+        return (
+            list(self.params.get("strategies", [])) + self._morning_strategies()
+            + self._midday_strategies() + self._pre_eu30_strategies()
+            + self._trend_recovery_strategies()
+        )
+
     def _all_strategies(self) -> list[dict[str, Any]]:
-        return list(self.params.get("strategies", [])) + self._morning_strategies() + self._midday_strategies()
+        return (
+            list(self.params.get("strategies", []))
+            + self._morning_strategies()
+            + self._midday_strategies()
+            + self._pre_eu30_strategies()
+            + self._trend_recovery_strategies()
+            + self._session_vwap_strategies()
+            + self._t0530_edge_strategies()
+        )
 
     def _entry_admission_block(self, at_utc: datetime):
         """Classify only new-entry admission; never manage an owned position."""
@@ -434,6 +1011,36 @@ class S23HorizontalInventoryRunner:
                 logging.error("S23 midday shadow state tagger failure ignored by trading path: %s", signature)
                 self._midday_shadow_state_tagger_error_signature = signature
             return None
+
+    def _pre_eu30_observer_call(self, method: str, **kwargs: Any) -> Any:
+        observer = self.pre_eu30_shadow_observer
+        if observer is None or not observer.enabled:
+            return None
+        try:
+            result = getattr(observer, method)(**kwargs)
+            self._pre_eu30_shadow_observer_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._pre_eu30_shadow_observer_error_signature:
+                logging.error("S23 pre-EU30 shadow observer failure ignored by trading path: %s", signature)
+                self._pre_eu30_shadow_observer_error_signature = signature
+            return None
+
+    def _pre_eu30_state_tagger_call(self, method: str, **kwargs: Any) -> Any:
+        tagger = self.pre_eu30_shadow_state_tagger
+        if tagger is None or not tagger.enabled:
+            return None
+        try:
+            result = getattr(tagger, method)(**kwargs)
+            self._pre_eu30_shadow_state_tagger_error_signature = None
+            return result
+        except Exception as exc:
+            signature = f"{method}:{type(exc).__name__}:{exc}"
+            if signature != self._pre_eu30_shadow_state_tagger_error_signature:
+                logging.error("S23 pre-EU30 shadow state tagger failure ignored by trading path: %s", signature)
+                self._pre_eu30_shadow_state_tagger_error_signature = signature
+            return None
     def _shadow_context(
         self,
         price_row: pd.Series,
@@ -445,9 +1052,12 @@ class S23HorizontalInventoryRunner:
         readiness: dict[str, dict[str, Any]] = {}
         long_positions = 0
         short_positions = 0
-        for strat in self._all_strategies():
+        # Preserve the existing ZA/legacy-overlay observer schema. The new
+        # session-VWAP lane family has its own decision audit rows.
+        context_strategies = self._legacy_signal_strategies()
+        for strat in context_strategies:
             lane_id = int(strat["lane_id"])
-            basket = list(self._st(strat).get("basket") or [])
+            basket = list(self._basket_rows(strat))
             lane_positions[str(lane_id)] = len(basket)
             lane_pending[str(lane_id)] = bool(self._st(strat).get("pending_entry_side"))
             readiness_value = lane_readiness.get(lane_id, (False, "lane_not_prepared", False))
@@ -498,6 +1108,30 @@ class S23HorizontalInventoryRunner:
                 "morning_policy_params_hash": str(self.params.get("morning_session_params_hash", EXPECTED_MORNING_POLICY_PARAMS_HASH)),
                 "midday_policy_id": str(self.params.get("midday_session_policy_id", EXPECTED_MIDDAY_POLICY_ID)),
                 "midday_policy_params_hash": str(self.params.get("midday_session_params_hash", EXPECTED_MIDDAY_POLICY_PARAMS_HASH)),
+                "pre_eu30_policy_id": str(self.params.get("pre_eu30_session_policy_id", PRE_EU30_POLICY_ID)),
+                "pre_eu30_policy_params_hash": str(self.params.get("pre_eu30_session_params_hash", PRE_EU30_POLICY_PARAMS_HASH)),
+                "trend_recovery_policy_id": str(self.params.get("trend_recovery_policy_id", EXPECTED_TREND_RECOVERY_POLICY_ID)),
+                "trend_recovery_params_hash": str(self.params.get("trend_recovery_params_hash", EXPECTED_TREND_RECOVERY_PARAMS_HASH)),
+                "session_vwap_policy_id": str(self.params.get("session_vwap_policy_id", SESSION_VWAP_POLICY_ID)),
+                "session_vwap_params_hash": str(self.params.get("session_vwap_params_hash", EXPECTED_SESSION_VWAP_PARAMS_HASH)),
+                "session_vwap_last_evaluated_bar": None,
+                "session_vwap_last_unavailable_bar": None,
+                "t0530_edge_policy_id": str(self.params.get("t0530_edge_policy_id", T0530_EDGE_POLICY_ID)),
+                "t0530_edge_params_hash": str(self.params.get("t0530_edge_params_hash", T0530_EDGE_POLICY_PARAMS_HASH)),
+                "t0530_edge_last_evaluated_bar": None,
+                "trend_recovery": {
+                    "active": False,
+                    "episode_id": None,
+                    "origin_lane_id": None,
+                    "origin_basket_id": None,
+                    "started_utc": None,
+                    "entry_until_utc": None,
+                    "frozen_atr30": None,
+                    "total_entries": 0,
+                    "last_processed_m1_bar": None,
+                    "ended_utc": None,
+                    "end_reason": None,
+                },
                 "inventory_range_fade": {
                     "active": False,
                     "low": None,
@@ -532,6 +1166,7 @@ class S23HorizontalInventoryRunner:
                     "last_closed_at_utc": None,
                     "last_closed_reason": None,
                     "last_closed_signal_bar": None,
+                    "last_closed_side": None,
                     "reverse_used": False,
                     "sync_block_new_entries": False,
                     "sync_block_reason": None,
@@ -562,9 +1197,23 @@ class S23HorizontalInventoryRunner:
                     "pending_entry_release_time": None,
                     "pending_open_opportunity_id": None,
                     "pending_open_started_utc": None,
+                    "pending_open_expires_utc": None,
+                    "pending_open_side": None,
+                    "pending_open_lot": None,
+                    "pending_open_symbol": None,
+                    "pending_open_magic": None,
+                    "pending_open_comment": None,
+                    "pending_open_signal_bar": None,
+                    "pending_open_basket_atr30": None,
+                    "pending_open_reverse_used": None,
+                    "pending_open_expected_positions": None,
+                    "session_vwap_retry_opportunity": None,
+                    "t0530_edge_retry_opportunity": None,
                     "open_retry_after_utc": None,
                     "autotrading_reject_streak": 0,
                     "autotrading_reject_notified": False,
+                    "close_trade_permission_reject_streak": 0,
+                    "close_trade_permission_reject_notified": False,
                     "manual_alert_last_signature": None,
                     "manual_alert_last_reason": None,
                     "manual_alert_last_at_utc": None,
@@ -576,22 +1225,164 @@ class S23HorizontalInventoryRunner:
     def _load_state(self) -> dict[str, Any]:
         default = self._default_state()
         if not os.path.exists(STATE_FILE):
+            for lane_state in default["strategies"].values():
+                lane_state["sync_block_reason"] = "state_file_missing"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "state_path": str(STATE_FILE),
+                    "daily_realized_pnl_preserved": False,
+                    "action": "reconstruct broker inventory and current UTC-day realized PnL before provisioning a new state",
+                }
+            logging.critical(
+                "S23 state file is missing; all new entries are blocked until explicit state reconstruction"
+            )
             return default
         load_error: str | None = None
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                state = json.load(f)
+                state = strict_json_load(f)
         except Exception as exc:
             logging.exception("Could not load state; refusing to start from an unverified default")
             state = None
             load_error = f"{type(exc).__name__}: {exc}"
         observed = state if isinstance(state, dict) else {}
-        try:
-            version_matches = int(observed.get("version", 0)) == int(default["version"])
-        except (TypeError, ValueError, OverflowError):
-            version_matches = False
+        observed_version = observed.get("version")
+        version_matches = bool(
+            isinstance(observed_version, int)
+            and not isinstance(observed_version, bool)
+            and observed_version == default["version"]
+        )
         strategies = observed.get("strategies")
-        shape_matches = isinstance(strategies, dict) and all(isinstance(strategies.get(s["id"]), dict) for s in self.params["strategies"])
+        expected_strategy_ids = {str(s["id"]) for s in self._all_strategies()}
+        expected_lane_ids = {str(s["id"]): int(s["lane_id"]) for s in self._all_strategies()}
+        unknown_strategy_ids = (
+            sorted(str(strategy_id) for strategy_id in strategies if strategy_id not in expected_strategy_ids)
+            if isinstance(strategies, dict)
+            else []
+        )
+        raw_routing = observed.get("routing")
+        state_generation_errors: list[dict[str, Any]] = []
+        if isinstance(raw_routing, dict) and isinstance(strategies, dict):
+            for policy_key, hash_key, collection, routing_keys in _STATE_GENERATION_CONTRACTS:
+                policy_value = raw_routing.get(policy_key)
+                hash_value = raw_routing.get(hash_key)
+                identity_absent = policy_value is None and hash_value is None
+                identity_complete = policy_value is not None and hash_value is not None
+                missing_strategy_ids = (
+                    [
+                        strategy_id
+                        for strategy_id in _EXPECTED_STRATEGY_IDS_BY_COLLECTION[collection]
+                        if strategy_id not in strategies
+                    ]
+                    if collection is not None
+                    else []
+                )
+                missing_routing_keys = [key for key in routing_keys if key not in raw_routing]
+                missing_lane_fields: dict[str, list[str]] = {}
+                invalid_lane_core: dict[str, list[str]] = {}
+                if collection is not None:
+                    for strategy_id in _EXPECTED_STRATEGY_IDS_BY_COLLECTION[collection]:
+                        lane_state = strategies.get(strategy_id)
+                        if isinstance(lane_state, dict):
+                            missing = [key for key in _CORE_LANE_STATE_KEYS if key not in lane_state]
+                            if missing:
+                                missing_lane_fields[strategy_id] = missing
+                            invalid: list[str] = []
+                            raw_lane_id = lane_state.get("lane_id")
+                            raw_basket = lane_state.get("basket")
+                            raw_sequence = lane_state.get("basket_sequence")
+                            raw_basket_id = lane_state.get("current_basket_id")
+                            if (
+                                isinstance(raw_lane_id, bool)
+                                or not isinstance(raw_lane_id, int)
+                                or raw_lane_id != expected_lane_ids[strategy_id]
+                            ):
+                                invalid.append("lane_id")
+                            if not isinstance(raw_basket, list):
+                                invalid.append("basket")
+                            if (
+                                isinstance(raw_sequence, bool)
+                                or not isinstance(raw_sequence, int)
+                                or raw_sequence < 0
+                            ):
+                                invalid.append("basket_sequence")
+                            if raw_basket_id is not None and (
+                                not isinstance(raw_basket_id, str) or not raw_basket_id.strip()
+                            ):
+                                invalid.append("current_basket_id")
+                            lane_id_valid = (
+                                isinstance(raw_lane_id, int)
+                                and not isinstance(raw_lane_id, bool)
+                                and raw_lane_id == expected_lane_ids[strategy_id]
+                            )
+                            sequence_valid = (
+                                isinstance(raw_sequence, int)
+                                and not isinstance(raw_sequence, bool)
+                                and raw_sequence >= 0
+                            )
+                            if isinstance(raw_basket, list) and lane_id_valid and sequence_valid:
+                                if raw_basket and raw_sequence == 0:
+                                    invalid.append("basket_sequence_nonzero_for_open_basket")
+                                expected_basket_id = (
+                                    f"L{raw_lane_id}-B{raw_sequence:06d}"
+                                    if raw_basket
+                                    else None
+                                )
+                                if raw_basket_id != expected_basket_id:
+                                    invalid.append("basket_current_id_consistency")
+                            if invalid:
+                                invalid_lane_core[strategy_id] = invalid
+                expected_family_size = (
+                    len(_EXPECTED_STRATEGY_IDS_BY_COLLECTION[collection])
+                    if collection is not None
+                    else 0
+                )
+                partial_legacy_family = bool(
+                    identity_absent
+                    and expected_family_size
+                    and 0 < len(missing_strategy_ids) < expected_family_size
+                )
+                if missing_lane_fields or invalid_lane_core or partial_legacy_family or (
+                    not identity_absent
+                    and (
+                        not identity_complete
+                        or missing_strategy_ids
+                        or missing_routing_keys
+                    )
+                ):
+                    state_generation_errors.append({
+                        "policy_key": policy_key,
+                        "identity_complete": identity_complete,
+                        "partial_legacy_family": partial_legacy_family,
+                        "missing_strategy_ids": missing_strategy_ids,
+                        "missing_routing_keys": missing_routing_keys,
+                        "missing_lane_fields": missing_lane_fields,
+                        "invalid_lane_core": invalid_lane_core,
+                    })
+        routing_shape_matches = (
+            isinstance(raw_routing, dict)
+            and all(
+                key not in raw_routing
+                or not isinstance(default_value, dict)
+                or isinstance(raw_routing.get(key), dict)
+                for key, default_value in default["routing"].items()
+            )
+        )
+        shape_matches = (
+            isinstance(strategies, dict)
+            and not unknown_strategy_ids
+            and not state_generation_errors
+            and routing_shape_matches
+            and all(
+                isinstance(strategies.get(s["id"]), dict)
+                for s in self.params["strategies"]
+            )
+            and all(
+                s["id"] not in strategies
+                or isinstance(strategies.get(s["id"]), dict)
+                for s in self._all_strategies()
+            )
+        )
         identity_matches = (
             observed.get("bot") == default["bot"]
             and observed.get("strategy_id") == default["strategy_id"]
@@ -604,6 +1395,8 @@ class S23HorizontalInventoryRunner:
                 "version": observed.get("version"),
                 "state_type": type(state).__name__,
                 "shape_valid": shape_matches,
+                "unknown_strategy_ids": unknown_strategy_ids,
+                "state_generation_errors": state_generation_errors,
                 "load_error": load_error,
             }
             logging.critical(
@@ -611,7 +1404,7 @@ class S23HorizontalInventoryRunner:
                 observed.get("bot"), observed.get("strategy_id"), observed.get("version"), type(state).__name__,
             )
             state = default
-            for strat in self.params["strategies"]:
+            for strat in self._all_strategies():
                 st = state["strategies"][strat["id"]]
                 st["sync_block_new_entries"] = True
                 st["sync_block_reason"] = "state_identity_mismatch"
@@ -628,6 +1421,14 @@ class S23HorizontalInventoryRunner:
         observed_morning_policy_hash = observed_routing.get("morning_policy_params_hash")
         observed_midday_policy_id = observed_routing.get("midday_policy_id")
         observed_midday_policy_hash = observed_routing.get("midday_policy_params_hash")
+        observed_pre_eu30_policy_id = observed_routing.get("pre_eu30_policy_id")
+        observed_pre_eu30_policy_hash = observed_routing.get("pre_eu30_policy_params_hash")
+        observed_trend_policy_id = observed_routing.get("trend_recovery_policy_id")
+        observed_trend_policy_hash = observed_routing.get("trend_recovery_params_hash")
+        observed_session_vwap_policy_id = observed_routing.get("session_vwap_policy_id")
+        observed_session_vwap_policy_hash = observed_routing.get("session_vwap_params_hash")
+        observed_t0530_edge_policy_id = observed_routing.get("t0530_edge_policy_id")
+        observed_t0530_edge_policy_hash = observed_routing.get("t0530_edge_params_hash")
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -637,23 +1438,38 @@ class S23HorizontalInventoryRunner:
             for key, value in st.items():
                 state["strategies"][sid].setdefault(key, value)
         routing = state["routing"]
+
+        def block_za_policy_mismatch(
+            reason: str,
+            observed_policy_id: Any,
+            observed_policy_hash: Any,
+            expected_policy_id: str,
+            expected_policy_hash: str,
+        ) -> None:
+            for strategy in self.params["strategies"]:
+                lane_state = state["strategies"][strategy["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = reason
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_policy_id,
+                    "observed_policy_hash": observed_policy_hash,
+                    "expected_policy_id": expected_policy_id,
+                    "expected_policy_hash": expected_policy_hash,
+                }
+
         expected_policy_id = str(self.params.get("entry_policy_id", EXPECTED_ENTRY_POLICY_ID))
         expected_policy_hash = str(self.params.get("entry_policy_params_hash", EXPECTED_ENTRY_POLICY_PARAMS_HASH))
-        if (
-            observed_entry_policy_id != expected_policy_id
-            or observed_entry_policy_hash != expected_policy_hash
-        ):
+        if observed_entry_policy_id is None and observed_entry_policy_hash is None:
             # Existing open baskets remain under the unchanged four-lane close
-            # contract.  Only unsubmitted local pending entries from the prior
-            # entry policy are discarded so they cannot fill after cutover.
+            # contract. Only unsubmitted local pending entries from the
+            # pre-identity generation are discarded at the explicit cutover.
             pending_fields = (
-                "pending_entry_side",
-                "pending_entry_target",
-                "pending_entry_expires_utc",
-                "pending_entry_atr30",
-                "pending_entry_signal_bar",
-                "pending_entry_opportunity_id",
-                "pending_entry_event_time",
+                "pending_entry_side", "pending_entry_target", "pending_entry_expires_utc",
+                "pending_entry_atr30", "pending_entry_signal_bar",
+                "pending_entry_opportunity_id", "pending_entry_event_time",
                 "pending_entry_release_time",
             )
             for strat in self.params["strategies"]:
@@ -667,9 +1483,18 @@ class S23HorizontalInventoryRunner:
                 "S23 entry policy state migrated to %s; prior unsubmitted pending entries were cleared",
                 expected_policy_id,
             )
+        elif (
+            observed_entry_policy_id != expected_policy_id
+            or observed_entry_policy_hash != expected_policy_hash
+        ):
+            block_za_policy_mismatch(
+                "entry_policy_identity_mismatch",
+                observed_entry_policy_id, observed_entry_policy_hash,
+                expected_policy_id, expected_policy_hash,
+            )
         expected_rearm_policy_id = str(self.params.get("portfolio_rearm_policy_id", EXPECTED_PORTFOLIO_REARM_POLICY_ID))
         expected_rearm_policy_hash = str(self.params.get("portfolio_rearm_params_hash", EXPECTED_PORTFOLIO_REARM_PARAMS_HASH))
-        if observed_rearm_policy_id != expected_rearm_policy_id or observed_rearm_policy_hash != expected_rearm_policy_hash:
+        if observed_rearm_policy_id is None and observed_rearm_policy_hash is None:
             routing["portfolio_rearm_policy_id"] = expected_rearm_policy_id
             routing["portfolio_rearm_params_hash"] = expected_rearm_policy_hash
             self._portfolio_rearm_state_migrated = True
@@ -677,15 +1502,17 @@ class S23HorizontalInventoryRunner:
                 "S23 portfolio rearm state initialized to %s; existing baskets and pending entries were preserved",
                 expected_rearm_policy_id,
             )
+        elif observed_rearm_policy_id != expected_rearm_policy_id or observed_rearm_policy_hash != expected_rearm_policy_hash:
+            block_za_policy_mismatch(
+                "portfolio_rearm_policy_identity_mismatch",
+                observed_rearm_policy_id, observed_rearm_policy_hash,
+                expected_rearm_policy_id, expected_rearm_policy_hash,
+            )
         expected_range_policy_id = str(self.params.get("inventory_range_fade_policy_id", EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID))
         expected_range_policy_hash = str(self.params.get("inventory_range_fade_params_hash", EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH))
         expected_range_state = default["routing"]["inventory_range_fade"]
         observed_range_state = routing.get("inventory_range_fade")
-        if (
-            observed_range_policy_id != expected_range_policy_id
-            or observed_range_policy_hash != expected_range_policy_hash
-            or not isinstance(observed_range_state, dict)
-        ):
+        if observed_range_policy_id is None and observed_range_policy_hash is None:
             routing["inventory_range_fade_policy_id"] = expected_range_policy_id
             routing["inventory_range_fade_params_hash"] = expected_range_policy_hash
             routing["inventory_range_fade"] = dict(expected_range_state)
@@ -693,6 +1520,12 @@ class S23HorizontalInventoryRunner:
             logging.warning(
                 "S23 inventory range-fade state initialized to %s; existing baskets and pending ZA entries were preserved",
                 expected_range_policy_id,
+            )
+        elif observed_range_policy_id != expected_range_policy_id or observed_range_policy_hash != expected_range_policy_hash:
+            block_za_policy_mismatch(
+                "inventory_range_fade_policy_identity_mismatch",
+                observed_range_policy_id, observed_range_policy_hash,
+                expected_range_policy_id, expected_range_policy_hash,
             )
         else:
             for key, value in expected_range_state.items():
@@ -710,6 +1543,8 @@ class S23HorizontalInventoryRunner:
         elif observed_morning_policy_id != expected_morning_policy_id or observed_morning_policy_hash != expected_morning_policy_hash:
             for strat in self._morning_strategies():
                 lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
                 lane_state["sync_block_new_entries"] = True
                 lane_state["sync_block_reason"] = "morning_policy_identity_mismatch"
                 lane_state["sync_block_recoverable"] = False
@@ -732,6 +1567,8 @@ class S23HorizontalInventoryRunner:
         elif observed_midday_policy_id != expected_midday_policy_id or observed_midday_policy_hash != expected_midday_policy_hash:
             for strat in self._midday_strategies():
                 lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
                 lane_state["sync_block_new_entries"] = True
                 lane_state["sync_block_reason"] = "midday_policy_identity_mismatch"
                 lane_state["sync_block_recoverable"] = False
@@ -740,6 +1577,112 @@ class S23HorizontalInventoryRunner:
                     "observed_policy_hash": observed_midday_policy_hash,
                     "expected_policy_id": expected_midday_policy_id,
                     "expected_policy_hash": expected_midday_policy_hash,
+                }
+        expected_pre_eu30_policy_id = str(self.params.get("pre_eu30_session_policy_id", PRE_EU30_POLICY_ID))
+        expected_pre_eu30_policy_hash = str(self.params.get("pre_eu30_session_params_hash", PRE_EU30_POLICY_PARAMS_HASH))
+        if observed_pre_eu30_policy_id is None and observed_pre_eu30_policy_hash is None:
+            routing["pre_eu30_policy_id"] = expected_pre_eu30_policy_id
+            routing["pre_eu30_policy_params_hash"] = expected_pre_eu30_policy_hash
+            self._pre_eu30_session_state_migrated = True
+            logging.warning(
+                "S23 pre-EU30 session state initialized to %s; existing strategy state was preserved",
+                expected_pre_eu30_policy_id,
+            )
+        elif (
+            observed_pre_eu30_policy_id != expected_pre_eu30_policy_id
+            or observed_pre_eu30_policy_hash != expected_pre_eu30_policy_hash
+        ):
+            for strat in self._pre_eu30_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "pre_eu30_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_pre_eu30_policy_id,
+                    "observed_policy_hash": observed_pre_eu30_policy_hash,
+                    "expected_policy_id": expected_pre_eu30_policy_id,
+                    "expected_policy_hash": expected_pre_eu30_policy_hash,
+                }
+        expected_trend_policy_id = str(self.params.get("trend_recovery_policy_id", EXPECTED_TREND_RECOVERY_POLICY_ID))
+        expected_trend_policy_hash = str(self.params.get("trend_recovery_params_hash", EXPECTED_TREND_RECOVERY_PARAMS_HASH))
+        if observed_trend_policy_id is None and observed_trend_policy_hash is None:
+            routing["trend_recovery_policy_id"] = expected_trend_policy_id
+            routing["trend_recovery_params_hash"] = expected_trend_policy_hash
+            routing["trend_recovery"] = default["routing"]["trend_recovery"]
+            self._trend_recovery_state_migrated = True
+            logging.warning(
+                "S23 trend-recovery state initialized to %s; existing strategy state was preserved",
+                expected_trend_policy_id,
+            )
+        elif observed_trend_policy_id != expected_trend_policy_id or observed_trend_policy_hash != expected_trend_policy_hash:
+            for strat in self._trend_recovery_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "trend_recovery_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_trend_policy_id,
+                    "observed_policy_hash": observed_trend_policy_hash,
+                    "expected_policy_id": expected_trend_policy_id,
+                    "expected_policy_hash": expected_trend_policy_hash,
+                }
+        expected_session_vwap_policy_id = str(self.params.get("session_vwap_policy_id", SESSION_VWAP_POLICY_ID))
+        expected_session_vwap_policy_hash = str(self.params.get("session_vwap_params_hash", EXPECTED_SESSION_VWAP_PARAMS_HASH))
+        if observed_session_vwap_policy_id is None and observed_session_vwap_policy_hash is None:
+            routing["session_vwap_policy_id"] = expected_session_vwap_policy_id
+            routing["session_vwap_params_hash"] = expected_session_vwap_policy_hash
+            self._session_vwap_state_migrated = True
+            logging.warning(
+                "S23 session-VWAP state initialized to %s; existing strategy state was preserved",
+                expected_session_vwap_policy_id,
+            )
+        elif (
+            observed_session_vwap_policy_id != expected_session_vwap_policy_id
+            or observed_session_vwap_policy_hash != expected_session_vwap_policy_hash
+        ):
+            for strat in self._session_vwap_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "session_vwap_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_session_vwap_policy_id,
+                    "observed_policy_hash": observed_session_vwap_policy_hash,
+                    "expected_policy_id": expected_session_vwap_policy_id,
+                    "expected_policy_hash": expected_session_vwap_policy_hash,
+                }
+        expected_t0530_edge_policy_id = str(self.params.get("t0530_edge_policy_id", T0530_EDGE_POLICY_ID))
+        expected_t0530_edge_policy_hash = str(self.params.get("t0530_edge_params_hash", T0530_EDGE_POLICY_PARAMS_HASH))
+        if observed_t0530_edge_policy_id is None and observed_t0530_edge_policy_hash is None:
+            routing["t0530_edge_policy_id"] = expected_t0530_edge_policy_id
+            routing["t0530_edge_params_hash"] = expected_t0530_edge_policy_hash
+            self._t0530_edge_state_migrated = True
+            logging.warning(
+                "S23 t0530-edge state initialized to %s; all existing strategy state was preserved",
+                expected_t0530_edge_policy_id,
+            )
+        elif (
+            observed_t0530_edge_policy_id != expected_t0530_edge_policy_id
+            or observed_t0530_edge_policy_hash != expected_t0530_edge_policy_hash
+        ):
+            for strat in self._t0530_edge_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "t0530_edge_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_t0530_edge_policy_id,
+                    "observed_policy_hash": observed_t0530_edge_policy_hash,
+                    "expected_policy_id": expected_t0530_edge_policy_id,
+                    "expected_policy_hash": expected_t0530_edge_policy_hash,
                 }
         return state
 
@@ -750,19 +1693,66 @@ class S23HorizontalInventoryRunner:
     def _st(self, strat: dict[str, Any]) -> dict[str, Any]:
         return self.state["strategies"][strat["id"]]
 
+    @staticmethod
+    def _basket_rows_from_state(st: dict[str, Any]) -> list[dict[str, Any]]:
+        basket = st.get("basket")
+        return basket if isinstance(basket, list) else []
+
+    def _basket_rows(self, strat: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._basket_rows_from_state(self._st(strat))
+
     def _roll_daily_realized(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> dict[str, Any]:
         st = self._st(strat)
         stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
         stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
         day = stamp.strftime("%Y-%m-%d")
-        if st.get("daily_realized_date_utc") != day:
+        stored_day = st.get("daily_realized_date_utc")
+        if stored_day is None:
+            st["daily_realized_date_utc"] = day
+            st["daily_realized_pnl_usd"] = 0.0
+            return st
+        try:
+            stored_date = datetime.strptime(
+                str(stored_day), "%Y-%m-%d"
+            ).date()
+        except (TypeError, ValueError):
+            # Preserve malformed durable evidence.  Callers will block new
+            # entries rather than silently replacing an unknown loss state.
+            return st
+        # Broker/event clocks may surface an older lifecycle after restart.
+        # Daily risk state advances only; an older observation cannot erase a
+        # newer day's accumulated loss.
+        if stored_date < stamp.date():
             st["daily_realized_date_utc"] = day
             st["daily_realized_pnl_usd"] = 0.0
         return st
 
     def _record_daily_realized(self, strat: dict[str, Any], pnl: float, at_utc: datetime | pd.Timestamp | None = None) -> None:
-        st = self._roll_daily_realized(strat, at_utc)
-        st["daily_realized_pnl_usd"] = float(st.get("daily_realized_pnl_usd", 0.0)) + float(pnl)
+        stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        st = self._st(strat)
+        stored_day = st.get("daily_realized_date_utc")
+        try:
+            stored_date = datetime.strptime(str(stored_day), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            stored_date = None
+        # CLOSEDEAL can confirm an older lifecycle after a restart.  Its PnL
+        # remains in the immutable close ledger, but it must not replace a
+        # newer UTC day's loss-limit accumulator.
+        if stored_date is not None and stored_date > stamp.date():
+            return
+        st = self._roll_daily_realized(strat, stamp)
+        raw_current_pnl = st.get("daily_realized_pnl_usd", 0.0)
+        if not isinstance(raw_current_pnl, (int, float)) or isinstance(raw_current_pnl, bool):
+            return
+        try:
+            current_pnl = float(raw_current_pnl)
+            realized_pnl = float(pnl)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(current_pnl) or not math.isfinite(realized_pnl):
+            return
+        st["daily_realized_pnl_usd"] = current_pnl + realized_pnl
 
     def _new_basket_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp) -> str | None:
         stamp = pd.Timestamp(at_utc)
@@ -770,28 +1760,47 @@ class S23HorizontalInventoryRunner:
         if int(stamp.hour) in {int(hour) for hour in self.params.get("new_basket_blocked_hours_utc", [])}:
             return "new_basket_blocked_hour"
         st = self._roll_daily_realized(strat, stamp)
+        raw_daily_realized = st.get("daily_realized_pnl_usd", 0.0)
+        if not isinstance(raw_daily_realized, (int, float)) or isinstance(raw_daily_realized, bool):
+            return "daily_realized_state_invalid"
+        try:
+            stored_date = datetime.strptime(
+                str(st.get("daily_realized_date_utc")), "%Y-%m-%d"
+            ).date()
+            daily_realized = float(raw_daily_realized)
+        except (TypeError, ValueError, OverflowError):
+            return "daily_realized_state_invalid"
+        if not math.isfinite(daily_realized):
+            return "daily_realized_state_invalid"
         limit = float(self.params.get("daily_realized_loss_limit_usd", 0.0))
-        return "daily_realized_loss_limit" if limit > 0.0 and float(st.get("daily_realized_pnl_usd", 0.0)) <= -limit else None
+        if stored_date > stamp.date():
+            return (
+                "daily_realized_loss_limit"
+                if limit > 0.0 and daily_realized <= -limit
+                else "daily_realized_state_invalid"
+            )
+        return "daily_realized_loss_limit" if limit > 0.0 and daily_realized <= -limit else None
 
     @staticmethod
     def _alert_signature(reason: str, details: dict[str, Any]) -> str:
         encoded = json.dumps({"reason": reason, "details": details}, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _notify_manual_action(self, strat: dict[str, Any], *, title: str, reason: str, action: str, key: str) -> None:
+    def _notify_manual_action(self, strat: dict[str, Any], *, title: str, reason: str, action: str, key: str) -> bool:
         if self._suppress_manual_alerts:
-            return
-        notify_manual_action_required(bot_id="bot23", symbol=str(self.params.get("mt5_symbol", self.params["symbol"])), title=title, reason=reason, action=action, key=key)
+            return True
+        return bool(notify_manual_action_required(bot_id="bot23", symbol=str(self.params.get("mt5_symbol", self.params["symbol"])), title=title, reason=reason, action=action, key=key))
 
     def _notify_reconciliation_required(self, strat: dict[str, Any], reason: str, details: dict[str, Any]) -> None:
         st = self._st(strat)
         signature = self._alert_signature(reason, details)
         if st.get("manual_alert_last_signature") == signature:
             return
-        st["manual_alert_last_signature"] = signature
-        st["manual_alert_last_reason"] = reason
-        st["manual_alert_last_at_utc"] = dt_text(utc_now())
-        self._notify_manual_action(strat, title="reconciliation_required", reason=f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True, default=str)}", action="Inspect bot23-owned MT5 inventory and state before clearing the block.", key=f"bot23:reconciliation:{strat['id']}:{reason}")
+        delivered = self._notify_manual_action(strat, title="reconciliation_required", reason=f"{reason}; details={json.dumps(details, ensure_ascii=True, sort_keys=True, default=str)}", action="Inspect bot23-owned MT5 inventory and state before clearing the block.", key=f"bot23:reconciliation:{strat['id']}:{reason}")
+        if delivered:
+            st["manual_alert_last_signature"] = signature
+            st["manual_alert_last_reason"] = reason
+            st["manual_alert_last_at_utc"] = dt_text(utc_now())
 
     def _trade_row(self, event: str, strat: dict[str, Any], **kwargs: Any) -> None:
         now = utc_now()
@@ -878,9 +1887,39 @@ class S23HorizontalInventoryRunner:
         recoverable: bool = False,
     ) -> None:
         st = self._st(strat)
+        invalid_existing_contract = not self._sync_block_contract_valid(st)
+        if invalid_existing_contract:
+            invalid_details = {
+                "previous_block": repr(st.get("sync_block_new_entries")),
+                "previous_reason": repr(st.get("sync_block_reason")),
+                "previous_recoverable": repr(st.get("sync_block_recoverable")),
+                "previous_details_type": type(st.get("sync_block_details")).__name__,
+            }
+            st["sync_block_new_entries"] = True
+            st["sync_block_reason"] = "sync_block_state_invalid"
+            st["sync_block_recoverable"] = False
+            st["sync_block_details"] = invalid_details
+            st["flat_clear_confirmation_count"] = 0
+            st["flat_clear_confirmation_reason"] = None
+            self._trade_row(
+                "position_lifecycle_recovered",
+                strat,
+                reason="sync_block_state_invalid",
+                note=json.dumps(invalid_details, ensure_ascii=True, sort_keys=True),
+            )
+            if reason is None or recoverable:
+                self._notify_reconciliation_required(
+                    strat, "sync_block_state_invalid", invalid_details,
+                )
+                return
         previous = st.get("sync_block_reason")
         if reason:
             if recoverable and st.get("sync_block_new_entries") and not st.get("sync_block_recoverable"):
+                # A failed broker query breaks a consecutive flat-evidence
+                # streak even when the stronger non-recoverable reason is
+                # retained as the visible block.
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
                 lane_id = int(strat["lane_id"])
                 signature = (str(previous or ""), str(reason))
                 if self._last_retained_block_warning.get(lane_id) != signature:
@@ -917,8 +1956,39 @@ class S23HorizontalInventoryRunner:
         st["manual_alert_last_reason"] = None
 
     @staticmethod
+    def _sync_block_contract_valid(st: dict[str, Any]) -> bool:
+        blocked = st.get("sync_block_new_entries")
+        reason = st.get("sync_block_reason")
+        recoverable = st.get("sync_block_recoverable")
+        details = st.get("sync_block_details")
+        return bool(
+            isinstance(blocked, bool)
+            and isinstance(recoverable, bool)
+            and isinstance(details, dict)
+            and (
+                (blocked and isinstance(reason, str) and bool(reason.strip()))
+                or (not blocked and reason is None and not recoverable)
+            )
+        )
+
+    @staticmethod
     def _side_from_record(record: Any) -> str:
         return "LONG" if int(getattr(record, "type", -1)) == ORDER_TYPE_BUY else "SHORT"
+
+    @staticmethod
+    def _live_position_identity(record: Any) -> tuple[int, int] | None:
+        ticket = getattr(record, "ticket", None)
+        position_id = getattr(record, "identifier", None)
+        if (
+            isinstance(ticket, bool)
+            or not isinstance(ticket, int)
+            or ticket <= 0
+            or isinstance(position_id, bool)
+            or not isinstance(position_id, int)
+            or position_id <= 0
+        ):
+            return None
+        return ticket, position_id
 
     def _owned_position(self, strat: dict[str, Any], record: Any) -> bool:
         return (
@@ -928,45 +1998,321 @@ class S23HorizontalInventoryRunner:
         )
 
     def _state_matches_live(self, strat: dict[str, Any], state_pos: dict[str, Any], live_pos: Any) -> bool:
-        position_id = int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0)
-        live_position_id = int(getattr(live_pos, "identifier", 0) or getattr(live_pos, "ticket", 0))
+        try:
+            raw_state_ticket = state_pos.get("ticket")
+            raw_position_id = state_pos.get("position_identifier")
+            if (
+                isinstance(raw_state_ticket, bool)
+                or not isinstance(raw_state_ticket, int)
+                or isinstance(raw_position_id, bool)
+                or not isinstance(raw_position_id, int)
+            ):
+                return False
+            state_ticket = raw_state_ticket
+            live_identity = self._live_position_identity(live_pos)
+            if live_identity is None:
+                return False
+            live_ticket, live_position_id = live_identity
+            position_id = raw_position_id
+            raw_state_lot = state_pos.get("lot")
+            if (
+                isinstance(raw_state_lot, bool)
+                or not isinstance(raw_state_lot, (int, float))
+            ):
+                return False
+            state_lot = float(raw_state_lot)
+            live_lot = float(getattr(live_pos, "volume", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            return False
         return (
-            position_id > 0
+            state_ticket > 0
+            and state_ticket == live_ticket
+            and position_id > 0
             and position_id == live_position_id
             and str(state_pos.get("side")) == self._side_from_record(live_pos)
-            and math.isclose(float(state_pos.get("lot") or 0.0), float(getattr(live_pos, "volume", 0.0)), rel_tol=0.0, abs_tol=1e-9)
+            and math.isfinite(state_lot)
+            and math.isfinite(live_lot)
+            and math.isclose(state_lot, live_lot, rel_tol=0.0, abs_tol=1e-9)
+            and self._state_ownership_proven(strat, state_pos)
             and self._owned_position(strat, live_pos)
         )
 
-    def _state_ownership_proven(self, strat: dict[str, Any], state_pos: dict[str, Any]) -> bool:
+    @staticmethod
+    def _position_close_intent_valid(state_pos: dict[str, Any]) -> bool:
+        close_requested = state_pos.get("close_requested", False)
+        pending_reason = state_pos.get("pending_close_reason")
+        pending_signal_bar = state_pos.get("pending_close_signal_bar")
+        submission_started = state_pos.get("close_submission_started_utc")
         return (
-            int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0) > 0
-            and str(state_pos.get("owner_symbol") or "") == str(self.params.get("mt5_symbol", self.params["symbol"]))
-            and int(state_pos.get("owner_magic") or -1) == int(strat["magic"])
-            and str(state_pos.get("owner_comment") or "").startswith(str(strat["comment_prefix"]))
-            and str(state_pos.get("side") or "") in {"LONG", "SHORT"}
+            isinstance(close_requested, bool)
+            and (
+                pending_reason is None
+                or (
+                    isinstance(pending_reason, str)
+                    and bool(pending_reason.strip())
+                )
+            )
+            and (
+                pending_signal_bar is None
+                or (
+                    isinstance(pending_signal_bar, str)
+                    and parse_ts(pending_signal_bar) is not None
+                )
+            )
+            and ((pending_reason is None) == (pending_signal_bar is None))
+            and (
+                submission_started is None
+                or (
+                    isinstance(submission_started, str)
+                    and parse_ts(submission_started) is not None
+                )
+            )
         )
 
-    def _clear_basket_state(self, strat: dict[str, Any], reason: str, signal_bar: str | None = None) -> None:
+    @staticmethod
+    def _close_submission_unresolved(state_pos: dict[str, Any]) -> bool:
+        return bool(
+            state_pos.get("close_requested") is not True
+            and isinstance(state_pos.get("close_submission_started_utc"), str)
+            and parse_ts(state_pos.get("close_submission_started_utc")) is not None
+        )
+
+    @staticmethod
+    def _close_result_definitive_no_fill(result: Any) -> bool:
+        status = str(getattr(result, "status", "FAILED"))
+        retcode = getattr(result, "retcode", None)
+        return bool(
+            status in {
+                "ACCOUNT_IDENTITY_GUARD",
+                "ACCOUNT_MODE_GUARD",
+                "TRADE_PERMISSION_GUARD",
+                "POSITION_OWNERSHIP_GUARD",
+                "MARKET_CLOSED",
+                "INVALID_REQUEST",
+                "IPC_NOT_PUBLISHED",
+            }
+            or (
+                status == "FAILED"
+                and isinstance(retcode, int)
+                and not isinstance(retcode, bool)
+                and retcode in DEFINITIVE_CLOSE_NO_FILL_RETCODES
+            )
+        )
+
+    def _record_close_trade_permission_reject(
+        self,
+        strat: dict[str, Any],
+        result: Any,
+        quote_time: datetime | pd.Timestamp | str | None,
+    ) -> bool:
+        status = str(getattr(result, "status", "FAILED"))
+        retcode = getattr(result, "retcode", None)
+        if not (
+            status == "TRADE_PERMISSION_GUARD"
+            or (
+                isinstance(retcode, int)
+                and not isinstance(retcode, bool)
+                and retcode in CLOSE_TRADE_PERMISSION_RETCODES
+            )
+        ):
+            return False
         st = self._st(strat)
+        raw_streak = st.get("close_trade_permission_reject_streak")
+        raw_notified = st.get("close_trade_permission_reject_notified")
+        invalid_reset_note = None
+        if (
+            isinstance(raw_streak, bool)
+            or not isinstance(raw_streak, int)
+            or raw_streak < 0
+            or not isinstance(raw_notified, bool)
+        ):
+            invalid_reset_note = f"streak={raw_streak!r};notified={raw_notified!r}"
+            raw_streak = 0
+            raw_notified = False
+        st["close_trade_permission_reject_streak"] = int(raw_streak) + 1
+        st["close_trade_permission_reject_notified"] = bool(raw_notified)
+        stamp = parse_ts(quote_time)
+        if stamp is not None:
+            st["time_close_retry_after_utc"] = dt_text(
+                stamp
+                + pd.Timedelta(
+                    seconds=float(
+                        self.params.get("trade_permission_retry_seconds", 30.0)
+                    )
+                )
+            )
+        details = {
+            "status": status,
+            "retcode": retcode,
+            "streak": st["close_trade_permission_reject_streak"],
+        }
+        self._set_sync_block(
+            strat,
+            "close_trade_permission_rejected",
+            details,
+            recoverable=True,
+        )
+        self._save_state()
+        threshold = int(self.params.get("trade_permission_alert_threshold", 3))
+        if (
+            st["close_trade_permission_reject_streak"] >= threshold
+            and not st["close_trade_permission_reject_notified"]
+        ):
+            delivered = self._notify_manual_action(
+                strat,
+                title="close trade permission rejected repeatedly",
+                reason=f"status={status}; retcode={retcode}",
+                action="Check MT5 AutoTrading and account trade permissions; bot23 still owns an open position awaiting CLOSE.",
+                key=f"bot23:close-trade-permission:{strat['id']}",
+            )
+            if delivered:
+                st["close_trade_permission_reject_notified"] = True
+                self._save_state()
+        if invalid_reset_note is not None:
+            self._trade_row(
+                "position_lifecycle_recovered",
+                strat,
+                reason="close_trade_permission_state_invalid_reset",
+                note=invalid_reset_note,
+            )
+        self._trade_row(
+            "position_close_deferred",
+            strat,
+            reason="close_trade_permission_rejected",
+            note=(
+                f"status={status};retcode={retcode};"
+                f"streak={st['close_trade_permission_reject_streak']};"
+                f"retry_after={st.get('time_close_retry_after_utc')}"
+            ),
+        )
+        return True
+
+    def _clear_trade_permission_reject_state(self, strat: dict[str, Any]) -> None:
+        st = self._st(strat)
+        st["close_trade_permission_reject_streak"] = 0
+        st["close_trade_permission_reject_notified"] = False
+        st["time_close_retry_after_utc"] = None
+
+    @staticmethod
+    def _basket_close_intent_valid(state: dict[str, Any]) -> bool:
+        pending_reason = state.get("pending_close_reason")
+        pending_signal_bar = state.get("pending_close_signal_bar")
+        basket = state.get("basket")
+        has_unbound_requested_close = bool(
+            isinstance(basket, list)
+            and any(
+                isinstance(position, dict)
+                and position.get("close_requested") is True
+                and pending_reason is None
+                and position.get("pending_close_reason") is None
+                for position in basket
+            )
+        )
+        has_unbound_submission = bool(
+            isinstance(basket, list)
+            and any(
+                isinstance(position, dict)
+                and isinstance(position.get("close_submission_started_utc"), str)
+                and parse_ts(position.get("close_submission_started_utc")) is not None
+                and pending_reason is None
+                and position.get("pending_close_reason") is None
+                for position in basket
+            )
+        )
+        return (
+            (
+                pending_reason is None
+                or (
+                    isinstance(pending_reason, str)
+                    and bool(pending_reason.strip())
+                )
+            )
+            and (
+                pending_signal_bar is None
+                or (
+                    isinstance(pending_signal_bar, str)
+                    and parse_ts(pending_signal_bar) is not None
+                )
+            )
+            and ((pending_reason is None) == (pending_signal_bar is None))
+            and not has_unbound_requested_close
+            and not has_unbound_submission
+        )
+
+    def _state_ownership_proven(self, strat: dict[str, Any], state_pos: dict[str, Any]) -> bool:
+        raw_position_id = state_pos.get("position_identifier")
+        raw_lane_id = state_pos.get("lane_id")
+        raw_basket_id = state_pos.get("basket_id")
+        raw_owner_symbol = state_pos.get("owner_symbol")
+        raw_owner_magic = state_pos.get("owner_magic")
+        raw_owner_comment = state_pos.get("owner_comment")
+        raw_side = state_pos.get("side")
+        current_basket_id = self._st(strat).get("current_basket_id")
+        return bool(
+            isinstance(raw_position_id, int)
+            and not isinstance(raw_position_id, bool)
+            and raw_position_id > 0
+            and isinstance(raw_lane_id, int)
+            and not isinstance(raw_lane_id, bool)
+            and raw_lane_id == int(strat["lane_id"])
+            and isinstance(raw_basket_id, str)
+            and bool(raw_basket_id.strip())
+            and isinstance(current_basket_id, str)
+            and bool(current_basket_id.strip())
+            and raw_basket_id == current_basket_id
+            and isinstance(raw_owner_symbol, str)
+            and raw_owner_symbol
+            == str(self.params.get("mt5_symbol", self.params["symbol"]))
+            and isinstance(raw_owner_magic, int)
+            and not isinstance(raw_owner_magic, bool)
+            and raw_owner_magic == int(strat["magic"])
+            and isinstance(raw_owner_comment, str)
+            and raw_owner_comment.startswith(str(strat["comment_prefix"]))
+            and isinstance(raw_side, str)
+            and raw_side in {"LONG", "SHORT"}
+        )
+
+    def _clear_basket_state(
+        self,
+        strat: dict[str, Any],
+        reason: str,
+        signal_bar: str | None = None,
+        *,
+        closed_at_utc: datetime | pd.Timestamp | str | None = None,
+        closed_side: str | None = None,
+    ) -> None:
+        st = self._st(strat)
+        closed_sides = {
+            str(pos.get("side") or "").upper()
+            for pos in self._basket_rows(strat)
+            if str(pos.get("side") or "").upper() in {"LONG", "SHORT"}
+        }
+        explicit_closed_side = str(closed_side or "").upper()
+        if explicit_closed_side in {"LONG", "SHORT"}:
+            closed_sides.add(explicit_closed_side)
         st["basket"] = []
         st["last_add_price"] = None
         st["basket_peak_pnl_usd"] = None
         st["frozen_basket_atr30"] = None
+        st["reverse_used"] = False
         st["pending_close_reason"] = None
         st["pending_close_signal_bar"] = None
         st["time_close_defer_started_utc"] = None
         st["time_close_last_quote_msc"] = None
         st["time_close_stable_count"] = 0
         st["time_close_retry_after_utc"] = None
+        st["close_trade_permission_reject_streak"] = 0
+        st["close_trade_permission_reject_notified"] = False
         st["time_close_wide_seen"] = False
         st["current_basket_id"] = None
         st["cooldown_until_bar"] = -1
         closed_bar = parse_ts(signal_bar)
         st["cooldown_until_utc"] = dt_text(closed_bar + pd.Timedelta(minutes=int(strat.get("cooldown", 0)))) if closed_bar is not None else None
-        st["last_closed_at_utc"] = dt_text(utc_now())
+        confirmed_close = parse_ts(closed_at_utc)
+        st["last_closed_at_utc"] = dt_text(confirmed_close if confirmed_close is not None else utc_now())
         st["last_closed_reason"] = reason
         st["last_closed_signal_bar"] = signal_bar
+        st["last_closed_side"] = next(iter(closed_sides)) if len(closed_sides) == 1 else None
 
     def _clear_pending_entry(self, strat: dict[str, Any]) -> None:
         st = self._st(strat)
@@ -1004,17 +2350,100 @@ class S23HorizontalInventoryRunner:
         return cancelled
 
     def _basket_is_long(self, strat: dict[str, Any]) -> bool:
-        basket = list(self._st(strat).get("basket") or [])
+        basket = list(self._basket_rows(strat))
         return bool(basket) and all(str(pos.get("side") or "") == "LONG" for pos in basket)
+
+    def _validated_reverse_used(self, strat: dict[str, Any]) -> bool:
+        st = self._st(strat)
+        raw_reverse_used = st.get("reverse_used")
+        if isinstance(raw_reverse_used, bool):
+            return raw_reverse_used
+        st["reverse_used"] = False
+        self._trade_row(
+            "position_lifecycle_recovered",
+            strat,
+            reason="malformed_reverse_flag_disabled",
+            note=f"previous_reverse_used={raw_reverse_used!r}",
+        )
+        return False
+
+    def _pending_long_target_close_requests(
+        self,
+        *,
+        exclude_lane_id: int | None = None,
+        exclude_basket_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        requests: list[dict[str, Any]] = []
+        for candidate in self.params["strategies"]:
+            lane_id = int(candidate["lane_id"])
+            st = self._st(candidate)
+            basket_id = st.get("current_basket_id")
+            if lane_id == exclude_lane_id and basket_id == exclude_basket_id:
+                continue
+            if st.get("pending_close_reason") != "basket_target":
+                continue
+            basket = list(self._basket_rows(candidate))
+            basket_sides = {str(pos.get("side") or "") for pos in basket}
+            if basket and basket_sides == {"SHORT"}:
+                # Portfolio rearm is a LONG-target-only contract.  A normal
+                # SHORT target close must not become a malformed LONG rearm
+                # request while its broker confirmation is outstanding.
+                continue
+            signal_bar = st.get("pending_close_signal_bar")
+            request_time = parse_ts(signal_bar) if isinstance(signal_bar, str) else None
+            requests.append({
+                "lane_id": lane_id,
+                "basket_id": basket_id,
+                "request_time": request_time,
+                "valid": (
+                    isinstance(basket_id, str)
+                    and bool(basket_id.strip())
+                    and bool(basket)
+                    and all(str(pos.get("side") or "") == "LONG" for pos in basket)
+                    and request_time is not None
+                ),
+            })
+        return requests
+
+    def _refresh_long_target_rearm_pending_summary(
+        self,
+        *,
+        exclude_lane_id: int | None = None,
+        exclude_basket_id: str | None = None,
+    ) -> None:
+        routing = self.state["routing"]
+        requests = self._pending_long_target_close_requests(
+            exclude_lane_id=exclude_lane_id,
+            exclude_basket_id=exclude_basket_id,
+        )
+        routing["long_target_rearm_pending_confirmation"] = bool(requests)
+        valid_times = [row["request_time"] for row in requests if row["valid"]]
+        routing["long_target_rearm_request_utc"] = (
+            dt_text(min(valid_times)) if len(valid_times) == len(requests) and requests else None
+        )
+        if routing.get("long_target_rearm_until_utc") is not None:
+            return
+        if requests:
+            first = min(requests, key=lambda row: (row["lane_id"], str(row["basket_id"])))
+            routing["long_target_rearm_trigger_lane_id"] = first["lane_id"] if first["valid"] else None
+            routing["long_target_rearm_trigger_basket_id"] = first["basket_id"] if first["valid"] else None
+            return
+        routing["long_target_rearm_confirmed_utc"] = None
+        routing["long_target_rearm_trigger_lane_id"] = None
+        routing["long_target_rearm_trigger_basket_id"] = None
 
     def _arm_long_target_portfolio_rearm(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp) -> None:
         routing = self.state["routing"]
         stamp = pd.Timestamp(at_utc)
         stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
         routing["long_target_rearm_pending_confirmation"] = True
-        routing["long_target_rearm_request_utc"] = dt_text(stamp)
-        routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
-        routing["long_target_rearm_trigger_basket_id"] = self._st(strat).get("current_basket_id")
+        previous_request = parse_ts(routing.get("long_target_rearm_request_utc"))
+        routing["long_target_rearm_request_utc"] = dt_text(
+            min(stamp, previous_request) if previous_request is not None else stamp
+        )
+        if routing.get("long_target_rearm_until_utc") is None:
+            routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
+            routing["long_target_rearm_trigger_basket_id"] = self._st(strat).get("current_basket_id")
         routing["long_target_rearm_expired_utc"] = None
         cancelled = self._cancel_portfolio_pending_longs(strat, "long_target_rearm_armed")
         self._trade_row(
@@ -1038,11 +2467,42 @@ class S23HorizontalInventoryRunner:
         minutes = int(self.params.get("long_target_portfolio_rearm_minutes", EXPECTED_PORTFOLIO_REARM_MINUTES))
         until = stamp + pd.Timedelta(minutes=minutes)
         routing["long_target_rearm_pending_confirmation"] = False
-        routing["long_target_rearm_confirmed_utc"] = dt_text(stamp)
-        routing["long_target_rearm_until_utc"] = dt_text(until)
-        routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
-        routing["long_target_rearm_trigger_basket_id"] = basket_id
+        raw_existing_until = routing.get("long_target_rearm_until_utc")
+        existing_until = (
+            parse_ts(raw_existing_until) if isinstance(raw_existing_until, str) else None
+        )
+        raw_existing_confirmed = routing.get("long_target_rearm_confirmed_utc")
+        existing_confirmed = (
+            parse_ts(raw_existing_confirmed)
+            if isinstance(raw_existing_confirmed, str)
+            else None
+        )
+        existing_lane = routing.get("long_target_rearm_trigger_lane_id")
+        existing_basket = routing.get("long_target_rearm_trigger_basket_id")
+        existing_active_valid = (
+            raw_existing_until is not None
+            and existing_until is not None
+            and existing_confirmed is not None
+            and existing_until == existing_confirmed + pd.Timedelta(minutes=minutes)
+            and isinstance(existing_lane, int)
+            and not isinstance(existing_lane, bool)
+            and existing_lane in {int(row["lane_id"]) for row in self.params["strategies"]}
+            and isinstance(existing_basket, str)
+            and bool(existing_basket.strip())
+        )
+        replace_active = raw_existing_until is None or (
+            existing_active_valid and existing_until < until
+        )
+        if replace_active:
+            routing["long_target_rearm_confirmed_utc"] = dt_text(stamp)
+            routing["long_target_rearm_until_utc"] = dt_text(until)
+            routing["long_target_rearm_trigger_lane_id"] = int(strat["lane_id"])
+            routing["long_target_rearm_trigger_basket_id"] = basket_id
         routing["long_target_rearm_expired_utc"] = None
+        self._refresh_long_target_rearm_pending_summary(
+            exclude_lane_id=int(strat["lane_id"]),
+            exclude_basket_id=basket_id,
+        )
         cancelled = self._cancel_portfolio_pending_longs(strat, "long_target_rearm_started")
         self._trade_row(
             "portfolio_rearm_started",
@@ -1050,7 +2510,36 @@ class S23HorizontalInventoryRunner:
             side="LONG",
             reason="basket_target_confirmed",
             executable_at=dt_text(stamp),
-            note=f"until={dt_text(until)};pending_long_cancelled={cancelled}",
+            note=(
+                f"until={routing.get('long_target_rearm_until_utc')};"
+                f"active_replaced={replace_active};pending_long_cancelled={cancelled}"
+            ),
+        )
+
+    def _cancel_unconfirmed_long_target_rearm_after_other_close(
+        self,
+        strat: dict[str, Any],
+        basket_id: str | None,
+        close_reason: str,
+    ) -> None:
+        """Remove only the stale pending trigger owned by this closed basket."""
+        if close_reason == "basket_target":
+            return
+        routing = self.state["routing"]
+        if routing.get("long_target_rearm_pending_confirmation") is not True:
+            return
+        self._refresh_long_target_rearm_pending_summary(
+            exclude_lane_id=int(strat["lane_id"]),
+            exclude_basket_id=basket_id,
+        )
+        if routing.get("long_target_rearm_pending_confirmation") is True:
+            return
+        self._trade_row(
+            "portfolio_rearm_cancelled",
+            strat,
+            side="LONG",
+            reason="trigger_basket_closed_without_target_confirmation",
+            note=f"basket_id={basket_id};close_reason={close_reason}",
         )
 
     def _portfolio_new_long_basket_block_reason(
@@ -1061,16 +2550,53 @@ class S23HorizontalInventoryRunner:
         if side != "LONG" or not bool(self.params.get("long_target_portfolio_rearm_enabled", False)):
             return None
         routing = self.state["routing"]
-        if bool(routing.get("long_target_rearm_pending_confirmation")):
-            return "long_target_rearm_pending_close_confirmation"
-        raw_until = routing.get("long_target_rearm_until_utc")
-        if not raw_until:
-            return None
-        until = parse_ts(raw_until)
-        if until is None:
+        pending_confirmation = routing.get("long_target_rearm_pending_confirmation")
+        if not isinstance(pending_confirmation, bool):
             return "long_target_rearm_state_invalid"
         stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
         stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        pending_requests = self._pending_long_target_close_requests()
+        if pending_confirmation != bool(pending_requests):
+            return "long_target_rearm_state_invalid"
+        trigger_lane = routing.get("long_target_rearm_trigger_lane_id")
+        trigger_basket = routing.get("long_target_rearm_trigger_basket_id")
+        valid_trigger = (
+            isinstance(trigger_lane, int)
+            and not isinstance(trigger_lane, bool)
+            and trigger_lane in {int(row["lane_id"]) for row in self.params["strategies"]}
+            and isinstance(trigger_basket, str)
+            and bool(trigger_basket.strip())
+        )
+        if pending_confirmation:
+            raw_request = routing.get("long_target_rearm_request_utc")
+            request = parse_ts(raw_request) if isinstance(raw_request, str) else None
+            if (
+                request is None
+                or request > stamp
+                or not all(row["valid"] for row in pending_requests)
+            ):
+                return "long_target_rearm_state_invalid"
+            return "long_target_rearm_pending_close_confirmation"
+        raw_until = routing.get("long_target_rearm_until_utc")
+        if raw_until is None:
+            return None
+        until = parse_ts(raw_until) if isinstance(raw_until, str) else None
+        if until is None:
+            return "long_target_rearm_state_invalid"
+        raw_confirmed = routing.get("long_target_rearm_confirmed_utc")
+        confirmed = parse_ts(raw_confirmed) if isinstance(raw_confirmed, str) else None
+        try:
+            rearm_minutes = int(self.params.get("long_target_portfolio_rearm_minutes"))
+        except (TypeError, ValueError, OverflowError):
+            rearm_minutes = -1
+        if (
+            confirmed is None
+            or confirmed > stamp
+            or rearm_minutes < 0
+            or until != confirmed + pd.Timedelta(minutes=rearm_minutes)
+            or not valid_trigger
+        ):
+            return "long_target_rearm_state_invalid"
         if stamp < until:
             return "long_target_portfolio_rearm"
         routing["long_target_rearm_until_utc"] = None
@@ -1084,7 +2610,7 @@ class S23HorizontalInventoryRunner:
         short_positions = 0
         entry_prices: list[float] = []
         for strat in self.params["strategies"]:
-            for position in self._st(strat).get("basket") or []:
+            for position in self._basket_rows(strat):
                 side = str(position.get("side") or "").upper()
                 long_positions += int(side == "LONG")
                 short_positions += int(side == "SHORT")
@@ -1106,7 +2632,11 @@ class S23HorizontalInventoryRunner:
         range_state["break_time_utc"] = None
         range_state["return_confirm_count"] = 0
 
-    def _advance_inventory_range_fade(self, price_row: pd.Series) -> None:
+    def _advance_inventory_range_fade(
+        self,
+        price_row: pd.Series,
+        processing_time: datetime | pd.Timestamp | None = None,
+    ) -> None:
         """Advance the fixed completed-M1 range-fade state exactly once per bar."""
         if not bool(self.params.get("inventory_range_fade_enabled", False)):
             return
@@ -1117,30 +2647,104 @@ class S23HorizontalInventoryRunner:
             return
         if bar_time is None or not math.isfinite(completed_close):
             return
+        if processing_time is not None:
+            processed_at = pd.Timestamp(processing_time)
+            processed_at = processed_at.tz_localize("UTC") if processed_at.tzinfo is None else processed_at.tz_convert("UTC")
+            if processed_at < bar_time + pd.Timedelta(minutes=1):
+                return
         bar_text = dt_text(bar_time)
         routing = self.state["routing"]
         range_state = routing["inventory_range_fade"]
-        if range_state.get("last_state_bar") == bar_text:
+        raw_last_state_bar = range_state.get("last_state_bar")
+        if raw_last_state_bar is not None and (
+            not isinstance(raw_last_state_bar, str)
+            or parse_ts(raw_last_state_bar) is None
+        ):
+            reset_state = dict(self._default_state()["routing"]["inventory_range_fade"])
+            reset_state["last_state_bar"] = bar_text
+            routing["inventory_range_fade"] = reset_state
+            self._trade_row(
+                "inventory_range_invalidated",
+                self.params["strategies"][0],
+                reason="malformed_persisted_range_state",
+                signal_bar_time=bar_text,
+                note=f"previous_last_state_bar={raw_last_state_bar!r};current_bar_consumed",
+            )
+            self._save_state()
+            return
+        previous_state_bar = (
+            parse_ts(raw_last_state_bar)
+            if isinstance(raw_last_state_bar, str)
+            else None
+        )
+        if previous_state_bar is not None and previous_state_bar >= bar_time:
+            if previous_state_bar > bar_time:
+                self._trade_row(
+                    "inventory_range_invalidated",
+                    self.params["strategies"][0],
+                    reason="decision_receipt_nonmonotonic",
+                    signal_bar_time=bar_text,
+                    note=f"high_watermark={raw_last_state_bar!r};preserved",
+                )
             return
         range_state["last_state_bar"] = bar_text
         try:
-            phase = int(range_state.get("break_phase") or 0)
-            confirm_count = int(range_state.get("return_confirm_count") or 0)
+            raw_phase = range_state.get("break_phase")
+            raw_confirm_count = range_state.get("return_confirm_count")
+            raw_active = range_state.get("active")
+            raw_low = range_state.get("low")
+            raw_high = range_state.get("high")
+            phase = int(raw_phase)
+            confirm_count = int(raw_confirm_count)
             pending_side = range_state.get("pending_side")
-            frozen_low = float(range_state.get("low")) if range_state.get("low") is not None else math.nan
-            frozen_high = float(range_state.get("high")) if range_state.get("high") is not None else math.nan
-            frozen_valid = math.isfinite(frozen_low) and math.isfinite(frozen_high) and frozen_high > frozen_low
+            low_is_number = isinstance(raw_low, (int, float)) and not isinstance(raw_low, bool)
+            high_is_number = isinstance(raw_high, (int, float)) and not isinstance(raw_high, bool)
+            frozen_low = float(raw_low) if low_is_number else math.nan
+            frozen_high = float(raw_high) if high_is_number else math.nan
+            frozen_valid = (
+                low_is_number
+                and high_is_number
+                and math.isfinite(frozen_low)
+                and math.isfinite(frozen_high)
+                and frozen_high > frozen_low
+            )
+            pending_origin = range_state.get("pending_origin_bar")
+            pending_break_side = range_state.get("pending_break_side")
+            pending_origin_time = (
+                parse_ts(pending_origin)
+                if isinstance(pending_origin, str)
+                else None
+            )
+            pending_valid = (
+                pending_side is None
+                and pending_origin is None
+                and pending_break_side is None
+            ) or (
+                pending_side in {"LONG", "SHORT"}
+                and pending_origin_time is not None
+                and pending_origin_time <= bar_time
+                and pending_break_side in {"LONG", "SHORT"}
+                and pending_side != pending_break_side
+            )
             range_state_valid = (
-                phase in {0, 1}
+                not isinstance(raw_phase, bool)
+                and isinstance(raw_phase, int)
+                and phase in {0, 1}
+                and not isinstance(raw_confirm_count, bool)
+                and isinstance(raw_confirm_count, int)
                 and confirm_count >= 0
+                and isinstance(raw_active, bool)
                 and pending_side in {None, "LONG", "SHORT"}
-                and (not bool(range_state.get("active")) or frozen_valid)
+                and pending_valid
+                and (not raw_active or frozen_valid)
                 and (
                     phase == 0
                     or (
                         frozen_valid
                         and range_state.get("break_side") in {"LONG", "SHORT"}
+                        and isinstance(range_state.get("break_time_utc"), str)
                         and parse_ts(range_state.get("break_time_utc")) is not None
+                        and parse_ts(range_state.get("break_time_utc")) <= bar_time
                     )
                 )
             )
@@ -1308,16 +2912,87 @@ class S23HorizontalInventoryRunner:
         range_state = routing["inventory_range_fade"]
         side = str(range_state.get("pending_side") or "")
         signal_bar_text = dt_text(signal_bar)
-        if side not in {"LONG", "SHORT"} or range_state.get("last_dispatch_bar") == signal_bar_text:
+        if side not in {"LONG", "SHORT"}:
             return None
         origin_bar = range_state.get("pending_origin_bar")
         break_side = range_state.get("pending_break_side")
+        origin_time = parse_ts(origin_bar) if isinstance(origin_bar, str) else None
+        raw_last_state = range_state.get("last_state_bar")
+        last_state = (
+            parse_ts(raw_last_state)
+            if isinstance(raw_last_state, str)
+            else None
+        )
+        raw_last_dispatch = range_state.get("last_dispatch_bar")
+        last_dispatch = (
+            parse_ts(raw_last_dispatch)
+            if isinstance(raw_last_dispatch, str)
+            else None
+        )
+        provenance_valid = bool(
+            origin_time is not None
+            and origin_time <= signal_bar
+            and break_side in {"LONG", "SHORT"}
+            and break_side != side
+        )
+        state_receipt_valid = bool(
+            origin_time is not None
+            and last_state is not None
+            and origin_time <= last_state <= signal_bar
+        )
+        dispatch_receipt_valid = bool(
+            raw_last_dispatch is None
+            or (
+                isinstance(raw_last_dispatch, str)
+                and last_dispatch is not None
+            )
+        )
+        dispatch_identity_time = origin_time if origin_time is not None else signal_bar
+        dispatch_already_consumed = bool(
+            last_dispatch is not None and last_dispatch >= dispatch_identity_time
+        )
+        if (
+            not provenance_valid
+            or not state_receipt_valid
+            or not dispatch_receipt_valid
+            or dispatch_already_consumed
+        ):
+            range_state["pending_side"] = None
+            range_state["pending_origin_bar"] = None
+            range_state["pending_break_side"] = None
+            if not dispatch_already_consumed:
+                # Consume the invalid pending record without lowering a valid
+                # future dispatch high-water mark.
+                range_state["last_dispatch_bar"] = dt_text(dispatch_identity_time)
+            reason = (
+                "decision_receipt_nonmonotonic"
+                if (
+                    (dispatch_already_consumed and last_dispatch > dispatch_identity_time)
+                    or (last_state is not None and last_state > signal_bar)
+                )
+                else "pending_dispatch_state_invalid"
+            )
+            self._trade_row(
+                "inventory_range_invalidated",
+                self.params["strategies"][0],
+                side=side,
+                reason=reason,
+                signal_bar_time=signal_bar_text,
+                note=(
+                    f"origin={origin_bar!r};break_side={break_side!r};"
+                    f"last_state={raw_last_state!r};"
+                    f"last_dispatch={raw_last_dispatch!r};pending_consumed"
+                ),
+            )
+            self._save_state()
+            return None
         range_state["pending_side"] = None
         range_state["pending_origin_bar"] = None
         range_state["pending_break_side"] = None
-        range_state["last_dispatch_bar"] = signal_bar_text
+        origin_bar_text = dt_text(origin_time)
+        range_state["last_dispatch_bar"] = origin_bar_text
         self._save_state()  # durable take before any lane can submit an OPEN
-        release_time = signal_bar + pd.Timedelta(minutes=1)
+        release_time = origin_time + pd.Timedelta(minutes=1)
         policy = {
             "policy_id": str(self.params.get("inventory_range_fade_policy_id", EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID)),
             "reason": "balanced_inventory_false_break_return",
@@ -1326,13 +3001,13 @@ class S23HorizontalInventoryRunner:
             "break_side": break_side,
         }
         return {
-            "opportunity_id": f"{symbol}|{signal_bar_text}|INVENTORY_RANGE_FADE|{side}|{policy['policy_id']}",
+            "opportunity_id": f"{symbol}|{origin_bar_text}|INVENTORY_RANGE_FADE|{side}|{policy['policy_id']}",
             "source": "inventory_range_false_break_fade",
             "side": side,
             "raw_side": "",
             "effective_side": side,
             "entry_policy": policy,
-            "event_time": signal_bar_text,
+            "event_time": origin_bar_text,
             "release_time": dt_text(release_time),
             "available_time": dt_text(release_time),
             "decision_time": dt_text(poll_time),
@@ -1343,41 +3018,647 @@ class S23HorizontalInventoryRunner:
         st = self._st(strat)
         st["pending_open_opportunity_id"] = None
         st["pending_open_started_utc"] = None
+        st["pending_open_expires_utc"] = None
+        st["pending_open_side"] = None
+        st["pending_open_lot"] = None
+        st["pending_open_symbol"] = None
+        st["pending_open_magic"] = None
+        st["pending_open_comment"] = None
+        st["pending_open_signal_bar"] = None
+        st["pending_open_basket_atr30"] = None
+        st["pending_open_reverse_used"] = None
+        st["pending_open_expected_positions"] = None
+
+    def _reserve_lane_evaluation_bar(
+        self,
+        strat: dict[str, Any],
+        signal_bar_text: str,
+        decision_event: str,
+    ) -> bool:
+        """Reserve one completed bar or consume it when its durable receipt is malformed."""
+        st = self._st(strat)
+        previous = st.get("last_evaluated_bar")
+        current_bar = parse_ts(signal_bar_text)
+        if current_bar is None:
+            return False
+        if previous is not None and (
+            not isinstance(previous, str) or parse_ts(previous) is None
+        ):
+            st["last_evaluated_bar"] = signal_bar_text
+            self._trade_row(
+                decision_event,
+                strat,
+                reason="decision_receipt_state_invalid",
+                signal_bar_time=signal_bar_text,
+                note=f"previous_last_evaluated_bar={previous!r};current_bar_consumed",
+            )
+            self._save_state()
+            return False
+        previous_bar = parse_ts(previous) if isinstance(previous, str) else None
+        if previous_bar is not None and previous_bar >= current_bar:
+            # Preserve the durable high-water mark. Rewinding it would allow
+            # older completed bars to be evaluated again after data rollback.
+            return False
+        st["last_evaluated_bar"] = signal_bar_text
+        self._save_state()
+        return True
 
     @staticmethod
     def _low_vol_regime(strat: dict[str, Any], atr30: float | None) -> bool:
         threshold = float(strat.get("adaptive_fixed_exit_atr_threshold", 0.0))
-        return threshold <= 0.0 or (atr30 is not None and math.isfinite(float(atr30)) and float(atr30) < threshold)
+        try:
+            atr30_value = None if atr30 is None else float(atr30)
+        except (TypeError, ValueError, OverflowError):
+            atr30_value = None
+        return threshold <= 0.0 or (
+            atr30_value is not None
+            and math.isfinite(atr30_value)
+            and atr30_value < threshold
+        )
 
     def _exit_thresholds(self, strat: dict[str, Any]) -> tuple[float, float, float]:
         target = float(strat["basket_target_usd"])
         stop = float(strat["basket_stop_usd"])
         peak = float(strat.get("failure_to_progress_peak_usd", 0.0))
         atr30 = self._st(strat).get("frozen_basket_atr30")
-        if self._low_vol_regime(strat, atr30) and atr30 is not None and math.isfinite(float(atr30)) and float(atr30) > 0.0:
-            target = float(strat.get("target_atr_mult", 0.0)) * float(atr30) or target
-            stop = float(strat.get("stop_atr_mult", 0.0)) * float(atr30) or stop
-            peak = float(strat.get("failure_to_progress_peak_atr_mult", 0.0)) * float(atr30) or peak
+        try:
+            atr30_value = None if atr30 is None else float(atr30)
+        except (TypeError, ValueError, OverflowError):
+            atr30_value = None
+        if (
+            self._low_vol_regime(strat, atr30_value)
+            and atr30_value is not None
+            and math.isfinite(atr30_value)
+            and atr30_value > 0.0
+        ):
+            target = float(strat.get("target_atr_mult", 0.0)) * atr30_value or target
+            stop = float(strat.get("stop_atr_mult", 0.0)) * atr30_value or stop
+            peak = float(strat.get("failure_to_progress_peak_atr_mult", 0.0)) * atr30_value or peak
         return target, stop, peak
+
+    def _trend_recovery_state(self) -> dict[str, Any]:
+        return self.state["routing"]["trend_recovery"]
+
+    def _trend_recovery_episode_valid(self, episode: dict[str, Any]) -> bool:
+        raw_active = episode.get("active")
+        if not isinstance(raw_active, bool):
+            return False
+        if not raw_active:
+            return True
+        raw_total_entries = episode.get("total_entries")
+        raw_origin_lane = episode.get("origin_lane_id")
+        raw_origin_basket = episode.get("origin_basket_id")
+        raw_episode_id = episode.get("episode_id")
+        raw_started = episode.get("started_utc")
+        raw_entry_until = episode.get("entry_until_utc")
+        raw_frozen_atr30 = episode.get("frozen_atr30")
+        started = parse_ts(raw_started) if isinstance(raw_started, str) else None
+        entry_until = parse_ts(raw_entry_until) if isinstance(raw_entry_until, str) else None
+        last_processed = episode.get("last_processed_m1_bar")
+        try:
+            total_entries = int(raw_total_entries)
+            origin_lane = int(raw_origin_lane)
+            frozen_atr30 = float(raw_frozen_atr30)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        origin_basket_valid = bool(
+            raw_origin_basket is None
+            or (
+                isinstance(raw_origin_basket, str)
+                and bool(raw_origin_basket.strip())
+            )
+        )
+        expected_episode_id = (
+            f"TR-{origin_lane}-{raw_origin_basket or dt_text(started)}"
+            if started is not None and origin_basket_valid
+            else ""
+        )
+        expected_entry_until = (
+            started
+            + pd.Timedelta(
+                minutes=int(self.params["trend_recovery_entry_window_minutes"])
+            )
+            if started is not None
+            else None
+        )
+        return (
+            not isinstance(raw_total_entries, bool)
+            and isinstance(raw_total_entries, int)
+            and total_entries >= 0
+            and not isinstance(raw_origin_lane, bool)
+            and isinstance(raw_origin_lane, int)
+            and origin_lane in {1, 2, 3, 4}
+            and origin_basket_valid
+            and isinstance(raw_episode_id, str)
+            and raw_episode_id == expected_episode_id
+            and started is not None
+            and entry_until is not None
+            and entry_until == expected_entry_until
+            and total_entries <= int(self.params["trend_recovery_max_total_entries"])
+            and isinstance(raw_frozen_atr30, (int, float))
+            and not isinstance(raw_frozen_atr30, bool)
+            and math.isfinite(frozen_atr30)
+            and frozen_atr30 > 0.0
+            and (
+                last_processed is None
+                or (
+                    isinstance(last_processed, str)
+                    and parse_ts(last_processed) is not None
+                )
+            )
+        )
+
+    def _end_trend_recovery_episode(self, reason: str, at_utc: datetime | pd.Timestamp) -> None:
+        episode = self._trend_recovery_state()
+        episode["active"] = False
+        episode["ended_utc"] = dt_text(at_utc)
+        episode["end_reason"] = reason
+
+    def _arm_trend_recovery_episode(
+        self,
+        origin_strat: dict[str, Any],
+        closed_at: datetime | pd.Timestamp,
+        origin_basket_id: str | None,
+        frozen_atr30: Any,
+    ) -> bool:
+        if not bool(self.params.get("trend_recovery_enabled", False)):
+            return False
+        if origin_strat not in self.params.get("strategies", []):
+            return False
+        stamp = pd.Timestamp(closed_at)
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        if not in_session(stamp, int(origin_strat["session_start_utc"]), int(origin_strat["session_end_utc"])):
+            return False
+        if not isinstance(frozen_atr30, (int, float)) or isinstance(frozen_atr30, bool):
+            return False
+        try:
+            atr30 = float(frozen_atr30)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(atr30) or atr30 <= 0.0:
+            return False
+        if origin_basket_id is not None and (
+            not isinstance(origin_basket_id, str)
+            or not origin_basket_id.strip()
+        ):
+            return False
+        recovery = self._trend_recovery_strategies()[0]
+        recovery_st = self._st(recovery)
+        episode = self._trend_recovery_state()
+        if bool(episode.get("active")) or recovery_st.get("basket"):
+            self._trade_row(
+                "trend_recovery_not_armed", recovery, reason="recovery_lane_busy",
+                note=f"origin_lane={origin_strat['lane_id']};origin_basket={origin_basket_id or ''}",
+            )
+            return False
+        episode.update({
+            "active": True,
+            "episode_id": f"TR-{int(origin_strat['lane_id'])}-{origin_basket_id or dt_text(stamp)}",
+            "origin_lane_id": int(origin_strat["lane_id"]),
+            "origin_basket_id": origin_basket_id,
+            "started_utc": dt_text(stamp),
+            "entry_until_utc": dt_text(stamp + pd.Timedelta(minutes=int(self.params["trend_recovery_entry_window_minutes"]))),
+            "frozen_atr30": atr30,
+            "total_entries": 0,
+            "last_processed_m1_bar": None,
+            "ended_utc": None,
+            "end_reason": None,
+        })
+        self._trade_row(
+            "trend_recovery_armed", recovery, opportunity_id=str(episode["episode_id"]),
+            reason="reverse_long_basket_stop_confirmed", signal_bar_time=dt_text(stamp),
+            note=f"origin_lane={origin_strat['lane_id']};origin_basket={origin_basket_id or ''};frozen_atr30={atr30}",
+        )
+        self._save_state()
+        return True
+
+    def _trend_recovery_thresholds(self, strat: dict[str, Any]) -> tuple[float, float]:
+        atr30 = float(self._trend_recovery_state().get("frozen_atr30") or 0.0)
+        if atr30 < float(strat["adaptive_fixed_exit_atr_threshold"]):
+            target = float(strat["target_atr_mult"]) * atr30
+            stop = float(strat["stop_atr_mult"]) * atr30
+        else:
+            target = float(strat["ticket_target_usd"])
+            stop = float(strat["ticket_stop_usd"])
+        return target * float(strat["tp_multiplier"]), stop * float(strat["sl_multiplier"])
+
+    def _position_pnl(self, pos: dict[str, Any], bid: float, ask: float) -> float:
+        contract = float(self.params.get("contract_size", 100.0))
+        lot = float(pos["lot"])
+        if str(pos["side"]) == "LONG":
+            return (bid - float(pos["entry_price"])) * contract * lot
+        return (float(pos["entry_price"]) - ask) * contract * lot
+
+    def _close_trend_recovery_ticket(
+        self, strat: dict[str, Any], pos: dict[str, Any], reason: str, price_row: pd.Series, pnl: float
+    ) -> str:
+        st = self._st(strat)
+        if not self.live_enabled and pos.get("shadow") is False:
+            self._set_sync_block(
+                strat,
+                "live_origin_inventory_requires_live_close",
+                {"ticket": pos.get("ticket"), "position_identifier": pos.get("position_identifier")},
+                recoverable=False,
+            )
+            self._save_state()
+            return "failed"
+        if self.live_enabled:
+            if self._close_submission_unresolved(pos):
+                self._set_sync_block(
+                    strat,
+                    "close_submission_result_unresolved",
+                    {"tickets": [int(pos.get("ticket") or 0)]},
+                    recoverable=False,
+                )
+                self._save_state()
+                return "failed"
+            ticket = int(pos.get("ticket") or 0)
+            raw_position_id = pos.get("position_identifier")
+            if (
+                isinstance(raw_position_id, bool)
+                or not isinstance(raw_position_id, int)
+                or raw_position_id <= 0
+            ):
+                self._set_sync_block(
+                    strat,
+                    "state_position_identity_invalid",
+                    {"ticket": ticket, "position_identifier": repr(raw_position_id)},
+                    recoverable=False,
+                )
+                self._save_state()
+                return "failed"
+            position_id = raw_position_id
+            live_pos = self.executor.get_position(ticket)
+            if live_pos is None:
+                self._set_sync_block(
+                    strat, "position_query_unavailable_before_close",
+                    {"ticket": ticket}, recoverable=True,
+                )
+                self._save_state()
+                return "failed"
+            if live_pos is False:
+                self._set_sync_block(
+                    strat, "position_missing_before_close",
+                    {"ticket": ticket, "position_identifier": position_id},
+                    recoverable=True,
+                )
+                self._save_state()
+                return "failed"
+            if not self._state_matches_live(strat, pos, live_pos):
+                self._set_sync_block(strat, "state_position_ownership_mismatch", {"ticket": ticket, "position_identifier": position_id}, recoverable=False)
+                self._save_state()
+                return "failed"
+            pos["pending_close_reason"] = reason
+            pos["pending_close_signal_bar"] = str(price_row.name)
+            self._save_state()
+            # Persisting the close intent can take long enough for the broker
+            # position to change. Re-prove ownership after that durable write
+            # and immediately before the single-ticket CLOSE submission.
+            if not self._validate_live_position_before_close(strat, pos):
+                return "failed"
+            pos["close_submission_started_utc"] = dt_text(utc_now())
+            self._save_state()
+            result = self.executor.close_position(
+                ticket,
+                int(self.params.get("deviation_points", 50)),
+                expected_login=int(MT5_LOGIN),
+                expected_server=str(MT5_SERVER),
+                expected_symbol=str(pos["owner_symbol"]),
+                expected_magic=int(pos["owner_magic"]),
+                expected_comment=str(pos["owner_comment"]),
+                expected_identifier=position_id,
+            )
+            if not result:
+                close_status = str(getattr(result, "status", "FAILED"))
+                definitive_no_fill = self._close_result_definitive_no_fill(result)
+                if definitive_no_fill:
+                    pos["close_submission_started_utc"] = None
+                if close_status in {"ACCOUNT_IDENTITY_GUARD", "ACCOUNT_MODE_GUARD", "POSITION_OWNERSHIP_GUARD"}:
+                    block_reason = (
+                        "account_identity_mismatch"
+                        if close_status == "ACCOUNT_IDENTITY_GUARD"
+                        else (
+                            "account_margin_mode_mismatch"
+                            if close_status == "ACCOUNT_MODE_GUARD"
+                            else "position_ownership_guard_rejected"
+                        )
+                    )
+                    self._set_sync_block(
+                        strat,
+                        block_reason,
+                        {"ticket": ticket, "atomic_close_guard": close_status},
+                        recoverable=False,
+                    )
+                    self._save_state()
+                    return "failed"
+                if self._record_close_trade_permission_reject(
+                    strat, result, price_row.name,
+                ):
+                    return "trade_permission_rejected"
+                if close_status == "MARKET_CLOSED":
+                    pos["pending_close_reason"] = None
+                    pos["pending_close_signal_bar"] = None
+                    self._trade_row(
+                        "time_close_deferred", strat, ticket=ticket,
+                        position_identifier=position_id,
+                        reason="market_closed_10018",
+                        signal_bar_time=str(price_row.name),
+                        note=f"retcode={getattr(result, 'retcode', None)}",
+                    )
+                    self._save_state()
+                    return "market_closed"
+                if not definitive_no_fill:
+                    self._set_sync_block(
+                        strat,
+                        "close_submission_result_unresolved",
+                        {"tickets": [ticket], "status": close_status},
+                        recoverable=False,
+                    )
+                    self._save_state()
+                    return "failed"
+                self._set_sync_block(
+                    strat, "live_trend_ticket_close_failed",
+                    {"ticket": ticket, "status": str(getattr(result, "status", "FAILED")), "retcode": getattr(result, "retcode", None)},
+                    recoverable=True,
+                )
+                self._save_state()
+                return "failed"
+            self._clear_trade_permission_reject_state(strat)
+            pos["close_requested"] = True
+            self._trade_row("position_close_requested", strat, ticket=ticket, position_identifier=position_id, profit=round(pnl, 2), reason=reason, signal_bar_time=str(price_row.name))
+            self._save_state()
+            return "requested"
+        st["basket"] = [row for row in st["basket"] if row is not pos]
+        self._trade_row("position_close", strat, profit=round(pnl, 2), reason=reason, signal_bar_time=str(price_row.name))
+        self._record_daily_realized(strat, pnl, price_row.name)
+        if not st["basket"]:
+            self._clear_basket_state(
+                strat, reason, str(price_row.name), closed_at_utc=price_row.name,
+            )
+        self._save_state()
+        return "closed"
+
+    def _process_trend_recovery_exits(self, info: Any, poll_time: pd.Timestamp) -> bool:
+        strategies = self._trend_recovery_strategies()
+        if not strategies:
+            return False
+        strat = strategies[0]
+        entry_enabled = bool(strat.get("enabled", True))
+        if not self._sync_strategy(strat):
+            self._save_state()
+            return False
+        st = self._st(strat)
+        if not st.get("basket"):
+            return entry_enabled
+        quote_time = self._broker_quote_time(info, poll_time)
+        retry_after = self._validated_time_close_retry_after(strat, quote_time)
+        if retry_after is not None:
+            if quote_time is None or quote_time < retry_after:
+                return False
+            st["time_close_retry_after_utc"] = None
+            self._save_state()
+        price_row = pd.Series(
+            {"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)},
+            name=quote_time if quote_time is not None else poll_time,
+        )
+        if st.get("pending_close_reason") or any(
+            bool(pos.get("pending_close_reason")) or bool(pos.get("close_requested"))
+            for pos in st["basket"]
+        ):
+            return False
+        target, stop = self._trend_recovery_thresholds(strat)
+        pnls = [(pos, self._position_pnl(pos, float(info.bid), float(info.ask))) for pos in st["basket"]]
+        if any(pnl <= -stop for _pos, pnl in pnls):
+            self._end_trend_recovery_episode("any_ticket_stop", poll_time)
+            result = self._close_basket(
+                strat, "trend_any_ticket_stop", price_row,
+                sum(pnl for _pos, pnl in pnls),
+            )
+            if result == "market_closed" and quote_time is not None:
+                self._set_market_closed_close_retry(strat, quote_time)
+            return False
+        for pos, pnl in pnls:
+            if pnl >= target:
+                result = self._close_trend_recovery_ticket(
+                    strat, pos, "trend_ticket_target", price_row, pnl,
+                )
+                if result == "market_closed" and quote_time is not None:
+                    self._set_market_closed_close_retry(strat, quote_time)
+                return False
+            entry_time = parse_ts(pos.get("entry_time_utc"))
+            if entry_time is None:
+                self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
+                self._save_state()
+                return False
+            lifecycle_time = quote_time
+            if lifecycle_time is None and not self.live_enabled:
+                lifecycle_time = poll_time
+            if (
+                lifecycle_time is not None
+                and lifecycle_time
+                >= entry_time + pd.Timedelta(minutes=int(strat["hold_minutes"]))
+            ):
+                result = self._close_trend_recovery_ticket(
+                    strat, pos, "trend_ticket_max_hold", price_row, pnl,
+                )
+                if result == "market_closed" and quote_time is not None:
+                    self._set_market_closed_close_retry(strat, quote_time)
+                return False
+        return entry_enabled
+
+    def _process_trend_recovery_entry(self, price_row: pd.Series, info: Any, poll_time: pd.Timestamp, exit_ready: bool) -> None:
+        if not exit_ready or not bool(self.params.get("trend_recovery_enabled", False)):
+            return
+        strategies = [row for row in self._trend_recovery_strategies() if bool(row.get("enabled", True))]
+        if not strategies:
+            return
+        strat = strategies[0]
+        episode = self._trend_recovery_state()
+        if not bool(episode.get("active")):
+            return
+        if not self._trend_recovery_episode_valid(episode):
+            self._trade_row(
+                "trend_recovery_invalidated",
+                strat,
+                opportunity_id=str(episode.get("episode_id") or ""),
+                reason="episode_state_invalid",
+            )
+            self._end_trend_recovery_episode("episode_state_invalid", poll_time)
+            self._save_state()
+            return
+        bar_time = parse_ts(price_row.name)
+        if bar_time is None:
+            return
+        started = parse_ts(episode.get("started_utc"))
+        if started is None or poll_time < started or bar_time < started:
+            return
+        entry_until = parse_ts(episode.get("entry_until_utc"))
+        if entry_until is None or poll_time > entry_until:
+            self._end_trend_recovery_episode("entry_window_expired", poll_time)
+            self._save_state()
+            return
+        release_time = bar_time + pd.Timedelta(minutes=1)
+        if poll_time < release_time:
+            return
+        bar_text = dt_text(bar_time)
+        raw_last_processed = episode.get("last_processed_m1_bar")
+        last_processed = (
+            parse_ts(raw_last_processed)
+            if isinstance(raw_last_processed, str)
+            else None
+        )
+        if last_processed is not None and last_processed >= bar_time:
+            return
+        episode["last_processed_m1_bar"] = bar_text
+        max_entries = int(self.params["trend_recovery_max_total_entries"])
+        if int(episode.get("total_entries") or 0) >= max_entries:
+            self._end_trend_recovery_episode("max_entries_reached", poll_time)
+            self._save_state()
+            return
+        if poll_time > release_time + pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 2.0))):
+            self._trade_row("entry_skip", strat, reason="stale_signal_skip", signal_bar_time=bar_text)
+            self._save_state()
+            return
+        if not float(price_row["Close"]) > float(price_row["Open"]):
+            self._save_state()
+            return
+        spread_points = max(0.0, float(info.ask) - float(info.bid)) / float(self.params.get("point_size", 0.001))
+        if spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+            self._trade_row("entry_skip", strat, reason="spread_too_wide", signal_bar_time=bar_text)
+            self._save_state()
+            return
+        before = len(self._basket_rows(strat))
+        opportunity = {
+            "opportunity_id": str(episode.get("episode_id") or ""),
+            "source": "reverse_long_stop_trend_recovery",
+            "event_time": bar_text,
+            "release_time": dt_text(release_time),
+            "available_time": dt_text(release_time),
+            "decision_time": dt_text(poll_time),
+            "executable_at": dt_text(poll_time),
+        }
+        self._open_entry(
+            strat, "SHORT", price_row, info, note="trend_recovery_m1_bullish",
+            basket_atr30=float(episode["frozen_atr30"]), execution_time=poll_time,
+            opportunity=opportunity, apply_portfolio_rearm=False, use_confirmed_fill_time=True,
+        )
+        after = len(self._basket_rows(strat))
+        if after > before:
+            episode["total_entries"] = int(episode.get("total_entries") or 0) + 1
+            if int(episode["total_entries"]) >= max_entries:
+                self._end_trend_recovery_episode("max_entries_reached", poll_time)
+        self._save_state()
 
     def _entry_submission_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> str | None:
         st = self._st(strat)
+        if not self._sync_block_contract_valid(st):
+            return "sync_block_state_invalid"
         if st.get("sync_block_new_entries"):
             return str(st.get("sync_block_reason") or "sync_block_new_entries")
-        if st.get("pending_open_opportunity_id"):
+        if self.live_enabled:
+            raw_basket = st.get("basket")
+            if not isinstance(raw_basket, list):
+                return "state_position_identity_invalid"
+            state_tickets: list[int] = []
+            state_position_ids: list[int] = []
+            for pos in raw_basket:
+                if not isinstance(pos, dict):
+                    return "state_position_identity_invalid"
+                raw_ticket = pos.get("ticket")
+                raw_position_id = pos.get("position_identifier")
+                raw_lot = pos.get("lot")
+                if (
+                    isinstance(raw_ticket, bool)
+                    or not isinstance(raw_ticket, int)
+                    or raw_ticket <= 0
+                    or isinstance(raw_position_id, bool)
+                    or not isinstance(raw_position_id, int)
+                    or raw_position_id <= 0
+                    or isinstance(raw_lot, bool)
+                    or not isinstance(raw_lot, (int, float))
+                    or not math.isfinite(float(raw_lot))
+                    or float(raw_lot) <= 0.0
+                    or not self._state_ownership_proven(strat, pos)
+                ):
+                    return "state_position_identity_invalid"
+                state_tickets.append(raw_ticket)
+                state_position_ids.append(raw_position_id)
+            if (
+                len(state_tickets) != len(set(state_tickets))
+                or len(state_position_ids) != len(set(state_position_ids))
+            ):
+                return "state_position_identity_invalid"
+            if len(raw_basket) >= int(strat["max_positions"]):
+                return "lane_capacity_full"
+        pending_open_id = st.get("pending_open_opportunity_id")
+        if pending_open_id is not None and (
+            not isinstance(pending_open_id, str) or not pending_open_id.strip()
+        ):
+            return "pending_open_state_invalid"
+        if pending_open_id:
             return "unresolved_open_action"
-        retry_after = parse_ts(st.get("open_retry_after_utc"))
+        basket_sequence = st.get("basket_sequence")
+        if (
+            isinstance(basket_sequence, bool)
+            or not isinstance(basket_sequence, int)
+            or basket_sequence < 0
+            or (bool(st.get("basket")) and basket_sequence == 0)
+        ):
+            return "basket_sequence_state_invalid"
+        reject_streak = st.get("autotrading_reject_streak")
+        reject_notified = st.get("autotrading_reject_notified")
+        if (
+            isinstance(reject_streak, bool)
+            or not isinstance(reject_streak, int)
+            or reject_streak < 0
+            or not isinstance(reject_notified, bool)
+        ):
+            return "trade_permission_state_invalid"
+        raw_retry_after = st.get("open_retry_after_utc")
+        retry_after = parse_ts(raw_retry_after) if isinstance(raw_retry_after, str) else None
+        if raw_retry_after is not None and retry_after is None:
+            return "open_retry_state_invalid"
         if retry_after is None:
             return None
         stamp = pd.Timestamp(at_utc if at_utc is not None else utc_now())
         stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        retry_windows: list[float] = []
+        for key in ("fixed_hold_market_closed_retry_seconds", "trade_permission_retry_seconds"):
+            try:
+                seconds = float(self.params.get(key))
+            except (TypeError, ValueError, OverflowError):
+                seconds = math.nan
+            if math.isfinite(seconds) and seconds >= 0.0:
+                retry_windows.append(seconds)
+        if not retry_windows or retry_after > stamp + pd.Timedelta(seconds=max(retry_windows)):
+            return "open_retry_state_invalid"
         return "open_retry_cooldown" if stamp < retry_after else None
+
+    def _preflight_reject(self, reason: str) -> bool:
+        """Report when a safe startup refusal leaves owned exits unmonitored."""
+        changed = False
+        for strat in self._all_strategies():
+            st = self._st(strat)
+            if not (st.get("basket") or st.get("pending_close_reason")):
+                continue
+            self._notify_reconciliation_required(
+                strat,
+                "preflight_exit_monitoring_stopped",
+                {"preflight_reason": reason},
+            )
+            changed = True
+        if changed:
+            try:
+                self._save_state()
+            except Exception:
+                logging.exception("S23 preflight-stop alert state could not be persisted")
+        return False
 
     def connect_and_preflight(self) -> bool:
         namespace_error = self._ownership_namespace_error()
         if namespace_error:
             logging.critical("S23 ownership namespace invalid: %s", namespace_error)
-            return False
+            return self._preflight_reject(f"ownership_namespace_invalid:{namespace_error}")
         if any(self._st(strat).get("sync_block_reason") == "state_identity_mismatch" for strat in self._all_strategies()):
             logging.critical("S23 legacy/foreign state must be archived before this runner can start.")
             for strat in self._all_strategies():
@@ -1386,13 +3667,13 @@ class S23HorizontalInventoryRunner:
                     self._notify_reconciliation_required(strat, "state_identity_mismatch", dict(st.get("sync_block_details") or {}))
             # Preserve the old on-disk state as evidence.  The operator must
             # reconcile/flat the account and archive it before first start.
-            return False
+            return self._preflight_reject("state_identity_mismatch")
         clock_now = utc_now()
         current_block = self._entry_admission_block(clock_now)
         eu_summer_time = is_eu_summer_time(clock_now)
         us_summer_time = is_us_summer_time(clock_now)
         logging.info(
-            "S23 entry-admission clock loaded: eu_regime=%s us_regime=%s block=%s routing_enabled=false",
+            "S23 entry-admission clock loaded: eu_regime=%s us_regime=%s block=%s routing_enabled=true",
             "summer_time" if eu_summer_time else "standard_time",
             "summer_time" if us_summer_time else "standard_time",
             current_block.id if current_block else "off_block",
@@ -1401,53 +3682,88 @@ class S23HorizontalInventoryRunner:
             validate_csv_schema(TRADE_LOG_FILE, TRADE_FIELDS)
         except RuntimeError as exc:
             logging.critical("S23 trade audit schema preflight failed: %s", exc)
+            return self._preflight_reject("trade_audit_schema_invalid")
+        globally_enabled = bool(self.params.get("enabled", True))
+        has_owned_lifecycle = any(
+            self._st(strat).get("basket")
+            or self._st(strat).get("pending_close_reason")
+            or self._st(strat).get("pending_open_opportunity_id")
+            for strat in self._all_strategies()
+        )
+        if not globally_enabled and not has_owned_lifecycle:
+            logging.info("S23 disabled by params with no persisted owned lifecycle.")
             return False
-        if not bool(self.params.get("enabled", True)):
-            logging.info("S23 disabled by params.")
-            return False
+        if not globally_enabled:
+            logging.warning("S23 entries disabled by params; starting close-only inventory monitoring.")
         if not self.dm.connect():
             logging.error("S23 EA bridge connect failed.")
-            return False
+            return self._preflight_reject("bridge_connect_failed")
         caps = self.executor.get_bridge_capabilities()
         logging.info("S23 bridge caps: %s", caps)
         if not caps:
             logging.critical("S23 bridge capability query failed.")
-            return False
-        expected_bridge = str(self.params.get("expected_bridge_name") or "BotBridge_s23")
+            return self._preflight_reject("bridge_capability_query_failed")
+        expected_bridge = str(self.params.get("expected_bridge_name") or EXPECTED_BRIDGE_NAME)
         if str(caps.get("name") or "") != expected_bridge:
             logging.critical("S23 wrong bridge attached: got=%s expected=%s", caps.get("name"), expected_bridge)
-            return False
-        missing = REQUIRED_SHARED_ACCOUNT_COMMANDS - {str(x).upper() for x in caps.get("commands", set())}
-        if missing:
-            logging.critical("S23 bridge missing required commands: %s", sorted(missing))
-            return False
+            return self._preflight_reject("bridge_name_mismatch")
+        expected_bridge_version = str(
+            self.params.get("expected_bridge_version") or EXPECTED_BRIDGE_VERSION
+        )
+        if str(caps.get("version") or "") != expected_bridge_version:
+            logging.critical(
+                "S23 wrong bridge version: got=%s expected=%s",
+                caps.get("version"),
+                expected_bridge_version,
+            )
+            return self._preflight_reject("bridge_version_mismatch")
+        observed_commands = caps.get("commands")
+        if not isinstance(observed_commands, set):
+            logging.critical("S23 bridge command surface malformed: %r", observed_commands)
+            return self._preflight_reject("bridge_commands_malformed")
+        missing = REQUIRED_SHARED_ACCOUNT_COMMANDS - observed_commands
+        unexpected = observed_commands - REQUIRED_SHARED_ACCOUNT_COMMANDS
+        if missing or unexpected:
+            logging.critical(
+                "S23 bridge command surface mismatch: missing=%s unexpected=%s",
+                sorted(missing), sorted(unexpected),
+            )
+            return self._preflight_reject("bridge_commands_mismatch")
         legacy_error = self._legacy_inventory_error()
         if legacy_error is not None:
             logging.critical("S23 legacy ownership preflight failed: %s", legacy_error)
-            return False
+            return self._preflight_reject(f"legacy_inventory:{legacy_error}")
         if self.live_enabled:
             account = self.executor.get_account_info()
             if account is None:
                 logging.critical("S23 account execution metadata unavailable.")
-                return False
+                return self._preflight_reject("account_metadata_unavailable")
             account_identity_error = self._account_identity_error(account)
             if account_identity_error is not None:
                 logging.critical("S23 account identity mismatch: %s", account_identity_error)
-                return False
+                return self._preflight_reject(f"account_identity:{account_identity_error}")
             if bool(self.params.get("require_hedging_account", True)) and int(account.get("margin_mode", -1)) != HEDGING_MARGIN_MODE:
                 logging.critical("S23 live trading requires a hedging account: mode=%s", account.get("margin_mode_name"))
-                return False
+                return self._preflight_reject("account_margin_mode_mismatch")
             symbol_info = self.executor.get_symbol_info(str(self.params.get("mt5_symbol", self.params["symbol"])))
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
-                return False
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated:
-            self._save_state()
+                return self._preflight_reject("broker_quote_clock_unavailable")
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._session_vwap_state_migrated or self._t0530_edge_state_migrated:
+            try:
+                self._save_state()
+            except Exception:
+                logging.exception("S23 migrated state could not be persisted; refusing runtime start")
+                return self._preflight_reject("migrated_state_persist_failed")
             self._entry_policy_state_migrated = False
             self._portfolio_rearm_state_migrated = False
             self._inventory_range_fade_state_migrated = False
             self._morning_session_state_migrated = False
             self._midday_session_state_migrated = False
+            self._pre_eu30_session_state_migrated = False
+            self._trend_recovery_state_migrated = False
+            self._session_vwap_state_migrated = False
+            self._t0530_edge_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -1455,6 +3771,10 @@ class S23HorizontalInventoryRunner:
             return f"invalid_strategy_id={self.params.get('strategy_id')} expected={EXPECTED_STRATEGY_ID}"
         if str(self.params.get("candidate_id") or "") != EXPECTED_CANDIDATE_ID:
             return f"invalid_candidate_id={self.params.get('candidate_id')} expected={EXPECTED_CANDIDATE_ID}"
+        if str(self.params.get("expected_bridge_name") or "") != EXPECTED_BRIDGE_NAME:
+            return f"invalid_expected_bridge_name={self.params.get('expected_bridge_name')}"
+        if str(self.params.get("expected_bridge_version") or "") != EXPECTED_BRIDGE_VERSION:
+            return f"invalid_expected_bridge_version={self.params.get('expected_bridge_version')}"
         if str(self.params.get("routing_mode") or "") != EXPECTED_ROUTING_MODE:
             return f"invalid_routing_mode={self.params.get('routing_mode')} expected={EXPECTED_ROUTING_MODE}"
         if str(self.params.get("entry_policy_id") or "") != EXPECTED_ENTRY_POLICY_ID:
@@ -1587,8 +3907,134 @@ class S23HorizontalInventoryRunner:
             drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected_midday.items() if row.get(key) != value}
             if str(row.get("spec_id") or "") != EXPECTED_MIDDAY_POLICY_ID or drift:
                 return f"invalid_midday_lane_contract:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
-        all_magics = magics + morning_magics + midday_magics
-        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday]
+        if not bool(self.params.get("pre_eu30_session_enabled", False)):
+            return "pre_eu30_session_disabled"
+        if str(self.params.get("pre_eu30_session_policy_id") or "") != PRE_EU30_POLICY_ID:
+            return f"invalid_pre_eu30_policy_id={self.params.get('pre_eu30_session_policy_id')}"
+        if str(self.params.get("pre_eu30_session_params_hash") or "") != PRE_EU30_POLICY_PARAMS_HASH:
+            return "invalid_pre_eu30_policy_params_hash"
+        if str(self.params.get("pre_eu30_session_admission_block") or "") != PRE_EU30_ADMISSION_BLOCK_ID:
+            return "invalid_pre_eu30_admission_block"
+        if int(self.params.get("pre_eu30_session_max_positions", 0)) != EXPECTED_PRE_EU30_MAX_POSITIONS:
+            return f"invalid_pre_eu30_max_positions={self.params.get('pre_eu30_session_max_positions')}"
+        if int(self.params.get("m1_bars", 0)) != EXPECTED_PRE_EU30_M1_BARS:
+            return f"invalid_pre_eu30_m1_bars={self.params.get('m1_bars')} expected={EXPECTED_PRE_EU30_M1_BARS}"
+        pre_eu30 = [row for row in self._pre_eu30_strategies() if bool(row.get("enabled", True))]
+        pre_eu30_magics = [int(row.get("magic") or 0) for row in pre_eu30]
+        configured_pre_eu30_magics = tuple(int(value) for value in self.params.get("expected_pre_eu30_magics", []))
+        if tuple(pre_eu30_magics) != EXPECTED_PRE_EU30_MAGICS or configured_pre_eu30_magics != EXPECTED_PRE_EU30_MAGICS:
+            return f"invalid_pre_eu30_magics={pre_eu30_magics} configured={list(configured_pre_eu30_magics)}"
+        if [int(row.get("lane_id") or 0) for row in pre_eu30] != [9, 10, 11]:
+            return "invalid_pre_eu30_lane_ids"
+        expected_pre_eu30 = [
+            (PRE_EU30_SIGNAL_IDS[0], 45, "s23_pe_l1"),
+            (PRE_EU30_SIGNAL_IDS[1], 60, "s23_pe_l2"),
+            (PRE_EU30_SIGNAL_IDS[2], 45, "s23_pe_l3"),
+        ]
+        for row, (signal_id, hold_minutes, comment) in zip(pre_eu30, expected_pre_eu30):
+            if (
+                str(row.get("spec_id") or "") != PRE_EU30_POLICY_ID
+                or str(row.get("signal_id") or "") != signal_id
+                or int(row.get("hold_minutes") or 0) != hold_minutes
+                or str(row.get("comment_prefix") or "") != comment
+                or not math.isclose(float(row.get("lot") or 0.0), 0.01, rel_tol=0.0, abs_tol=1e-12)
+                or int(row.get("max_positions") or 0) != 1
+                or int(row.get("cooldown", -1)) != 0
+            ):
+                return f"invalid_pre_eu30_lane_contract:{row.get('id')}"
+        if not bool(self.params.get("trend_recovery_enabled", False)):
+            return "trend_recovery_disabled"
+        if str(self.params.get("trend_recovery_policy_id") or "") != EXPECTED_TREND_RECOVERY_POLICY_ID:
+            return f"invalid_trend_recovery_policy_id={self.params.get('trend_recovery_policy_id')}"
+        if str(self.params.get("trend_recovery_params_hash") or "") != EXPECTED_TREND_RECOVERY_PARAMS_HASH:
+            return "invalid_trend_recovery_params_hash"
+        if int(self.params.get("trend_recovery_entry_window_minutes", 0)) != EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES:
+            return "invalid_trend_recovery_entry_window"
+        if int(self.params.get("trend_recovery_max_total_entries", 0)) != EXPECTED_TREND_RECOVERY_MAX_TOTAL_ENTRIES:
+            return "invalid_trend_recovery_max_total_entries"
+        trend = [row for row in self._trend_recovery_strategies() if bool(row.get("enabled", True))]
+        trend_magics = [int(row.get("magic") or 0) for row in trend]
+        configured_trend_magics = tuple(int(value) for value in self.params.get("expected_trend_recovery_magics", []))
+        if tuple(trend_magics) != EXPECTED_TREND_RECOVERY_MAGICS or configured_trend_magics != EXPECTED_TREND_RECOVERY_MAGICS:
+            return f"invalid_trend_recovery_magics={trend_magics} configured={list(configured_trend_magics)}"
+        if len(trend) != 1 or int(trend[0].get("lane_id") or 0) != 12:
+            return "invalid_trend_recovery_lane_ids"
+        expected_trend = {
+            "spec_id": EXPECTED_TREND_RECOVERY_POLICY_ID,
+            "signal_id": "completed_m1_bullish_after_reverse_long_stop",
+            "comment_prefix": "s23_tr_l1", "lot": 0.01, "max_positions": 2,
+            "cooldown": 0, "hold_minutes": EXPECTED_TREND_RECOVERY_MAX_HOLD_MINUTES,
+            "ticket_target_usd": 10.0, "ticket_stop_usd": 18.0,
+            "target_atr_mult": 3.5, "stop_atr_mult": 6.5,
+            "adaptive_fixed_exit_atr_threshold": 2.0, "tp_multiplier": 1.0, "sl_multiplier": 0.5,
+        }
+        drift = {key: {"actual": trend[0].get(key), "expected": value} for key, value in expected_trend.items() if trend[0].get(key) != value}
+        if drift:
+            return f"invalid_trend_recovery_lane_contract:{json.dumps(drift, sort_keys=True)}"
+        if str(self.params.get("session_vwap_policy_id") or "") != SESSION_VWAP_POLICY_ID:
+            return "invalid_session_vwap_policy_id"
+        if str(self.params.get("session_vwap_params_hash") or "") != EXPECTED_SESSION_VWAP_PARAMS_HASH:
+            return "invalid_session_vwap_params_hash"
+        if str(self.params.get("session_vwap_session_timezone") or "") != "America/New_York":
+            return "invalid_session_vwap_timezone"
+        if str(self.params.get("session_vwap_session_start") or "") != "05:30" or str(self.params.get("session_vwap_session_end") or "") != "08:30":
+            return "invalid_session_vwap_window"
+        if int(self.params.get("session_vwap_lookback_calendar_days") or 0) != 20:
+            return "invalid_session_vwap_lookback"
+        if int(self.params.get("session_vwap_atr_period") or 0) != 60:
+            return "invalid_session_vwap_atr_period"
+        if not math.isclose(float(self.params.get("session_vwap_quantile") or 0.0), 0.90, rel_tol=0.0, abs_tol=1e-12):
+            return "invalid_session_vwap_quantile"
+        if int(self.params.get("session_vwap_hold_minutes") or 0) != 15 or int(self.params.get("session_vwap_max_positions") or 0) != 5:
+            return "invalid_session_vwap_lifecycle"
+        session_vwap = [row for row in self._session_vwap_strategies() if bool(row.get("enabled", True))]
+        session_vwap_magics = [int(row.get("magic") or 0) for row in session_vwap]
+        configured_session_vwap_magics = tuple(int(value) for value in self.params.get("expected_session_vwap_magics", []))
+        if tuple(session_vwap_magics) != EXPECTED_SESSION_VWAP_MAGICS or configured_session_vwap_magics != EXPECTED_SESSION_VWAP_MAGICS:
+            return "invalid_session_vwap_magics"
+        if [int(row.get("lane_id") or 0) for row in session_vwap] != [13, 14, 15, 16, 17]:
+            return "invalid_session_vwap_lane_ids"
+        for index, row in enumerate(session_vwap, start=1):
+            expected = {
+                "spec_id": SESSION_VWAP_POLICY_ID, "signal_id": "session_vwap_extension_fade",
+                "comment_prefix": f"s23_sv_l{index}", "lot": 0.01, "hold_minutes": 15,
+                "max_positions": 1, "cooldown": 0,
+            }
+            lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
+            if lane_drift:
+                return f"invalid_session_vwap_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
+        if str(self.params.get("t0530_edge_policy_id") or "") != T0530_EDGE_POLICY_ID:
+            return "invalid_t0530_edge_policy_id"
+        if str(self.params.get("t0530_edge_params_hash") or "") != T0530_EDGE_POLICY_PARAMS_HASH:
+            return "invalid_t0530_edge_params_hash"
+        if str(self.params.get("t0530_edge_session_timezone") or "") != "America/New_York":
+            return "invalid_t0530_edge_timezone"
+        if str(self.params.get("t0530_edge_session_start") or "") != "05:30" or str(self.params.get("t0530_edge_session_end") or "") != "06:00":
+            return "invalid_t0530_edge_window"
+        if int(self.params.get("t0530_edge_lookback_bars") or 0) != 15:
+            return "invalid_t0530_edge_lookback"
+        if int(self.params.get("t0530_edge_max_signal_delay_minutes") or 0) != 5:
+            return "invalid_t0530_edge_signal_delay"
+        if int(self.params.get("t0530_edge_hold_minutes") or 0) != 15 or int(self.params.get("t0530_edge_max_positions") or 0) != 4:
+            return "invalid_t0530_edge_lifecycle"
+        t0530_edge = [row for row in self._t0530_edge_strategies() if bool(row.get("enabled", True))]
+        t0530_edge_magics = [int(row.get("magic") or 0) for row in t0530_edge]
+        configured_t0530_edge_magics = tuple(int(value) for value in self.params.get("expected_t0530_edge_magics", []))
+        if tuple(t0530_edge_magics) != EXPECTED_T0530_EDGE_MAGICS or configured_t0530_edge_magics != EXPECTED_T0530_EDGE_MAGICS:
+            return "invalid_t0530_edge_magics"
+        if [int(row.get("lane_id") or 0) for row in t0530_edge] != [18, 19, 20, 21]:
+            return "invalid_t0530_edge_lane_ids"
+        for index, row in enumerate(t0530_edge, start=1):
+            expected = {
+                "spec_id": T0530_EDGE_POLICY_ID, "signal_id": "t0530_edge_break_fade",
+                "comment_prefix": f"s23_ed_l{index}", "lot": 0.01, "hold_minutes": 15,
+                "max_positions": 1, "cooldown": 0,
+            }
+            lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
+            if lane_drift:
+                return f"invalid_t0530_edge_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
+        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + session_vwap_magics + t0530_edge_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + session_vwap + t0530_edge]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
             return "duplicate_combined_ownership_namespace"
         admission_clock = self.params.get("eu_entry_admission_clock")
@@ -1604,17 +4050,17 @@ class S23HorizontalInventoryRunner:
             return f"invalid_entry_admission_scope={admission_clock.get('scope')}"
         if str(admission_clock.get("position_lifecycle") or "") != EXPECTED_POSITION_LIFECYCLE:
             return f"invalid_position_lifecycle={admission_clock.get('position_lifecycle')}"
-        if bool(admission_clock.get("routing_enabled", True)):
-            return "entry_admission_routing_must_remain_disabled_until_signal_adoption"
+        if not bool(admission_clock.get("routing_enabled", False)):
+            return "entry_admission_routing_must_be_enabled_for_pre_eu30_signal"
         observed_blocks = tuple(
             (
                 str(row.get("id") or ""),
                 str((row.get("start") or {}).get("reference_clock") or ""),
-                str((row.get("start") or {}).get("dst_jst") or ""),
-                str((row.get("start") or {}).get("standard_jst") or ""),
+                str((row.get("start") or {}).get("dst_utc") or ""),
+                str((row.get("start") or {}).get("standard_utc") or ""),
                 str((row.get("end") or {}).get("reference_clock") or ""),
-                str((row.get("end") or {}).get("dst_jst") or ""),
-                str((row.get("end") or {}).get("standard_jst") or ""),
+                str((row.get("end") or {}).get("dst_utc") or ""),
+                str((row.get("end") or {}).get("standard_utc") or ""),
             )
             for row in admission_clock.get("blocks", [])
         )
@@ -1871,6 +4317,402 @@ class S23HorizontalInventoryRunner:
             deal = self.executor.get_position_close_deal(position_id, 0)
         return deal
 
+    def _session_vwap_retry_identity(self, retry: Any) -> dict[str, Any]:
+        """Validate the complete persisted identity before retry or adoption."""
+        opportunity = retry.get("opportunity") if isinstance(retry, dict) else None
+        opportunity = opportunity if isinstance(opportunity, dict) else {}
+        raw_signal_bar = retry.get("signal_bar_time") if isinstance(retry, dict) else None
+        raw_event_time = opportunity.get("event_time")
+        raw_release_time = opportunity.get("release_time")
+        raw_available_time = opportunity.get("available_time")
+        raw_expires = retry.get("expires_utc") if isinstance(retry, dict) else None
+        signal_bar = parse_ts(raw_signal_bar) if isinstance(raw_signal_bar, str) else None
+        event_time = parse_ts(raw_event_time) if isinstance(raw_event_time, str) else None
+        release_time = parse_ts(raw_release_time) if isinstance(raw_release_time, str) else None
+        available_time = parse_ts(raw_available_time) if isinstance(raw_available_time, str) else None
+        expires = parse_ts(raw_expires) if isinstance(raw_expires, str) else None
+        side = str(opportunity.get("side") or "").upper()
+        raw_side = str(opportunity.get("raw_side") or "").upper()
+        effective_side = str(opportunity.get("effective_side") or "").upper()
+        opportunity_id = str(opportunity.get("opportunity_id") or "")
+        source = str(opportunity.get("source") or "")
+        expected_release = signal_bar + pd.Timedelta(minutes=1) if signal_bar is not None else None
+        expected_expiry = (
+            expected_release + pd.Timedelta(
+                minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
+            )
+            if expected_release is not None
+            else None
+        )
+        symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
+        expected_id = (
+            f"{symbol}|{dt_text(signal_bar)}|session_vwap_extension_fade|{side}"
+            if signal_bar is not None and side in {"LONG", "SHORT"}
+            else ""
+        )
+        valid = bool(
+            isinstance(retry, dict)
+            and isinstance(retry.get("opportunity"), dict)
+            and signal_bar is not None
+            and event_time == signal_bar
+            and expected_release is not None
+            and release_time == expected_release
+            and available_time == expected_release
+            and expires == expected_expiry
+            and side in {"LONG", "SHORT"}
+            and raw_side == side
+            and effective_side == side
+            and source == "session_vwap_extension_fade"
+            and opportunity_id == expected_id
+        )
+        return {
+            "valid": valid,
+            "opportunity": opportunity,
+            "signal_bar": signal_bar,
+            "release_time": release_time,
+            "expires": expires,
+            "side": side,
+            "opportunity_id": opportunity_id,
+        }
+
+    def _session_vwap_closed_cutoff(
+        self,
+        side: str,
+        at_utc: datetime | pd.Timestamp | None = None,
+    ) -> tuple[pd.Timestamp | None, bool]:
+        cutoffs: list[pd.Timestamp] = []
+        invalid = False
+        reference = None
+        if at_utc is not None:
+            reference = pd.Timestamp(at_utc)
+            reference = reference.tz_localize("UTC") if reference.tzinfo is None else reference.tz_convert("UTC")
+        for row in self._session_vwap_strategies():
+            state = self._st(row)
+            raw_closed_side = state.get("last_closed_side")
+            raw_closed_at = state.get("last_closed_at_utc")
+            closed_side = str(raw_closed_side or "")
+            if closed_side not in {"", "LONG", "SHORT"}:
+                invalid = True
+                continue
+            if not closed_side:
+                if raw_closed_at is not None:
+                    invalid = True
+                continue
+            if closed_side != side:
+                continue
+            closed_at = (
+                parse_ts(raw_closed_at)
+                if isinstance(raw_closed_at, str)
+                else None
+            )
+            if closed_at is None or (reference is not None and closed_at > reference):
+                invalid = True
+                continue
+            cutoffs.append(closed_at)
+        return (max(cutoffs) if cutoffs else None), invalid
+
+    def _recover_session_vwap_pending_open(
+        self,
+        strat: dict[str, Any],
+        positions: list[Any],
+        *,
+        orders_available: bool,
+    ) -> bool:
+        """Adopt one exactly identified fill after a crash-before-basket-save."""
+        st = self._st(strat)
+        basket_sequence = st.get("basket_sequence")
+        if (
+            isinstance(basket_sequence, bool)
+            or not isinstance(basket_sequence, int)
+            or basket_sequence < 0
+        ):
+            return False
+        retry = st.get("session_vwap_retry_opportunity")
+        identity = self._session_vwap_retry_identity(retry)
+        opportunity = identity["opportunity"]
+        pending_id = str(st.get("pending_open_opportunity_id") or "")
+        pending_symbol = st.get("pending_open_symbol")
+        pending_magic = st.get("pending_open_magic")
+        pending_comment = st.get("pending_open_comment")
+        pending_side = st.get("pending_open_side")
+        pending_lot = st.get("pending_open_lot")
+        pending_signal_bar = st.get("pending_open_signal_bar")
+        pending_reverse_used = st.get("pending_open_reverse_used")
+        pending_expires = parse_ts(st.get("pending_open_expires_utc"))
+        pending_expected_positions = st.get("pending_open_expected_positions")
+        opportunity_id = str(identity["opportunity_id"])
+        side = str(identity["side"])
+        release_time = identity["release_time"]
+        expires = identity["expires"]
+        raw_pending_started = st.get("pending_open_started_utc")
+        pending_started = (
+            parse_ts(raw_pending_started)
+            if isinstance(raw_pending_started, str)
+            else None
+        )
+        if (
+            len(positions) != 1
+            or not identity["valid"]
+            or not pending_id
+            or pending_id != opportunity_id
+            or pending_started is None
+            or release_time is None
+            or expires is None
+            or pending_started < release_time
+            or pending_started > expires
+            or strat not in self._session_vwap_strategies()
+            or pending_symbol != str(self.params.get("mt5_symbol", self.params["symbol"]))
+            or isinstance(pending_magic, bool) or pending_magic != int(strat["magic"])
+            or pending_comment != str(strat["comment_prefix"])
+            or pending_side != side
+            or pending_signal_bar != str((retry or {}).get("signal_bar_time") or "")
+            or pending_reverse_used is not False
+            or isinstance(pending_lot, bool)
+            or not isinstance(pending_lot, (int, float))
+            or not math.isclose(float(pending_lot), float(strat.get("lot", self.params.get("default_lot", 0.01))), rel_tol=0.0, abs_tol=1e-9)
+            or pending_expires is None or pending_expires != expires
+            or isinstance(pending_expected_positions, bool)
+            or pending_expected_positions != 0
+        ):
+            return False
+        position = positions[0]
+        live_identity = self._live_position_identity(position)
+        if live_identity is None:
+            return False
+        position_ticket, position_id = live_identity
+        expected_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
+        expected_lot = float(strat.get("lot", self.params.get("default_lot", 0.01)))
+        raw_open_time_epoch = getattr(position, "open_time", None)
+        if (
+            isinstance(raw_open_time_epoch, bool)
+            or not isinstance(raw_open_time_epoch, int)
+        ):
+            return False
+        open_time_epoch = raw_open_time_epoch
+        open_time_msc = int(getattr(position, "open_time_msc", open_time_epoch * 1000) or 0)
+        open_time = pd.Timestamp(open_time_msc, unit="ms", tz="UTC") if open_time_msc > 0 else None
+        try:
+            observed_lot = float(position.volume)
+            observed_price = float(position.open_price)
+            observed_type = int(position.type)
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return False
+        if (
+            position_id <= 0
+            or open_time is None
+            or open_time < pending_started.floor("s") - pd.Timedelta(seconds=2)
+            or open_time > pending_started + pd.Timedelta(
+                minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
+            )
+            or open_time > expires
+            or str(position.symbol) != pending_symbol
+            or int(position.magic) != pending_magic
+            or str(position.comment or "") != pending_comment
+            or observed_type != expected_type
+            or not math.isclose(observed_lot, expected_lot, rel_tol=0.0, abs_tol=1e-9)
+            or not math.isfinite(observed_price)
+            or observed_price <= 0.0
+        ):
+            return False
+        st["basket_sequence"] = basket_sequence + 1
+        st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
+        st["basket"] = [{
+            "ticket": position_ticket,
+            "position_identifier": position_id,
+            "side": side,
+            "lot": observed_lot,
+            "entry_price": observed_price,
+            "entry_time_utc": dt_text(open_time),
+            "open_time_epoch": open_time_epoch,
+            "owner_symbol": str(position.symbol),
+            "owner_magic": int(position.magic),
+            "owner_comment": str(position.comment or ""),
+            "lane_id": int(strat["lane_id"]),
+            "basket_id": st["current_basket_id"],
+            "opportunity_id": opportunity_id,
+            "shadow": False,
+        }]
+        st["last_add_price"] = observed_price
+        st["last_signal_bar"] = str(retry.get("signal_bar_time") or "")
+        st["basket_peak_pnl_usd"] = None
+        st["frozen_basket_atr30"] = None
+        st["reverse_used"] = False
+        self._clear_pending_open(strat)
+        st["session_vwap_retry_opportunity"] = None
+        recovery_clearable_reasons = {
+            None,
+            "positions_unavailable_after_open",
+            "orders_unavailable",
+            "open_success_position_not_confirmed",
+            "ambiguous_open_result",
+            "ambiguous_open_result_positions",
+            "unresolved_open_action",
+            "live_positions_without_state",
+        }
+        if orders_available and st.get("sync_block_reason") in recovery_clearable_reasons:
+            self._set_sync_block(strat, None)
+        self._save_state()
+        self._trade_row(
+            "position_lifecycle_recovered",
+            strat,
+            opportunity_id=opportunity_id,
+            ticket=position_ticket,
+            position_identifier=position_id,
+            side=side,
+            lot=observed_lot,
+            entry_price=observed_price,
+            reason="session_vwap_confirmed_fill_adopted_after_restart",
+            signal_bar_time=st["last_signal_bar"],
+            note="unique symbol/magic/comment/side/lot/pending-window match",
+        )
+        return True
+
+    def _recover_generic_pending_open(
+        self,
+        strat: dict[str, Any],
+        positions: list[Any],
+        *,
+        orders_available: bool,
+    ) -> bool:
+        """Adopt exactly one receipt-bound fill for any lane after a crash."""
+        st = self._st(strat)
+        if not orders_available:
+            return False
+        pending_id = st.get("pending_open_opportunity_id")
+        started = parse_ts(st.get("pending_open_started_utc"))
+        expires = parse_ts(st.get("pending_open_expires_utc"))
+        side = st.get("pending_open_side")
+        symbol = st.get("pending_open_symbol")
+        comment = st.get("pending_open_comment")
+        signal_bar = st.get("pending_open_signal_bar")
+        raw_lot = st.get("pending_open_lot")
+        raw_magic = st.get("pending_open_magic")
+        raw_reverse_used = st.get("pending_open_reverse_used")
+        raw_expected_positions = st.get("pending_open_expected_positions")
+        try:
+            lot = float(raw_lot)
+            magic = int(raw_magic)
+            expected_positions = int(raw_expected_positions)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not isinstance(pending_id, str) or not pending_id.strip()
+            or started is None or expires is None or expires < started
+            or side not in {"LONG", "SHORT"}
+            or symbol != str(self.params.get("mt5_symbol", self.params["symbol"]))
+            or magic != int(strat["magic"])
+            or comment != str(strat["comment_prefix"])
+            or not isinstance(signal_bar, str) or parse_ts(signal_bar) is None
+            or not math.isfinite(lot) or not math.isclose(
+                lot, float(strat.get("lot", self.params.get("default_lot", 0.01))),
+                rel_tol=0.0, abs_tol=1e-9,
+            )
+            or not isinstance(raw_reverse_used, bool)
+            or isinstance(raw_expected_positions, bool)
+            or expected_positions < 0 or expected_positions > 2
+        ):
+            return False
+        state_basket = list(st.get("basket") or [])
+        if expected_positions != len(state_basket):
+            return False
+        known_ids = {
+            int(row.get("position_identifier") or 0)
+            for row in state_basket if isinstance(row, dict)
+        }
+        new_positions = []
+        for position in positions:
+            identity = self._live_position_identity(position)
+            if identity is None:
+                return False
+            if identity[1] not in known_ids:
+                new_positions.append((position, identity))
+        if len(new_positions) != 1 or len(positions) != len(state_basket) + 1:
+            return False
+        position, (position_ticket, position_id) = new_positions[0]
+        open_epoch = getattr(position, "open_time", None)
+        if isinstance(open_epoch, bool) or not isinstance(open_epoch, int):
+            return False
+        open_msc = int(getattr(position, "open_time_msc", open_epoch * 1000) or 0)
+        open_time = pd.Timestamp(open_msc, unit="ms", tz="UTC") if open_msc > 0 else None
+        try:
+            observed_lot = float(position.volume)
+            observed_price = float(position.open_price)
+            observed_type = int(position.type)
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return False
+        expected_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
+        if (
+            position_id <= 0 or open_time is None
+            or open_time < started.floor("s") - pd.Timedelta(seconds=2)
+            or open_time > expires
+            or str(position.symbol) != symbol
+            or int(position.magic) != magic
+            or str(position.comment or "") != comment
+            or observed_type != expected_type
+            or not math.isclose(observed_lot, lot, rel_tol=0.0, abs_tol=1e-9)
+            or not math.isfinite(observed_price) or observed_price <= 0.0
+        ):
+            return False
+        if state_basket:
+            if {str(row.get("side") or "") for row in state_basket} != {side}:
+                return False
+            basket_id = st.get("current_basket_id")
+            if not isinstance(basket_id, str) or not basket_id:
+                return False
+        else:
+            sequence = st.get("basket_sequence")
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+                return False
+            st["basket_sequence"] = sequence + 1
+            st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
+            basket_id = st["current_basket_id"]
+            raw_atr = st.get("pending_open_basket_atr30")
+            st["frozen_basket_atr30"] = (
+                float(raw_atr)
+                if isinstance(raw_atr, (int, float)) and not isinstance(raw_atr, bool)
+                and math.isfinite(float(raw_atr)) and float(raw_atr) > 0.0
+                else None
+            )
+            st["basket_peak_pnl_usd"] = None
+            st["reverse_used"] = raw_reverse_used
+        st["basket"].append({
+            "ticket": position_ticket,
+            "position_identifier": position_id,
+            "side": side,
+            "lot": observed_lot,
+            "entry_price": observed_price,
+            "entry_time_utc": dt_text(open_time),
+            "open_time_epoch": open_epoch,
+            "owner_symbol": symbol,
+            "owner_magic": magic,
+            "owner_comment": comment,
+            "lane_id": int(strat["lane_id"]),
+            "basket_id": basket_id,
+            "opportunity_id": pending_id,
+            "shadow": False,
+        })
+        st["last_add_price"] = observed_price
+        st["last_signal_bar"] = signal_bar
+        self._clear_pending_open(strat)
+        if st.get("sync_block_reason") in {
+            None, "positions_unavailable_after_open", "orders_unavailable",
+            "open_success_position_not_confirmed", "ambiguous_open_result",
+            "ambiguous_open_result_positions", "unresolved_open_action",
+            "live_positions_without_state",
+        }:
+            self._set_sync_block(strat, None)
+        self._save_state()
+        self._trade_row(
+            "position_lifecycle_recovered", strat,
+            opportunity_id=pending_id, ticket=position_ticket,
+            position_identifier=position_id, side=side, lot=observed_lot,
+            entry_price=observed_price,
+            reason="generic_confirmed_fill_adopted_after_restart",
+            signal_bar_time=signal_bar,
+            note="exact receipt symbol/magic/comment/side/lot/open-window match",
+        )
+        return True
+
     def _sync_strategy(self, strat: dict[str, Any]) -> bool:
         """Reconcile ownership and report whether known inventory may be monitored.
 
@@ -1881,19 +4723,49 @@ class S23HorizontalInventoryRunner:
         """
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         st = self._st(strat)
+        if not self._sync_block_contract_valid(st):
+            self._set_sync_block(
+                strat,
+                "sync_block_state_invalid",
+                {
+                    "previous_block": repr(st.get("sync_block_new_entries")),
+                    "previous_reason": repr(st.get("sync_block_reason")),
+                    "previous_recoverable": repr(st.get("sync_block_recoverable")),
+                },
+                recoverable=False,
+            )
+            self._save_state()
+        if not isinstance(st.get("basket"), list):
+            self._set_sync_block(
+                strat,
+                "state_position_identity_invalid",
+                {"basket_type": type(st.get("basket")).__name__},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
         positions = self.executor.get_positions(symbol, int(strat["magic"]))
         if positions is None:
             self._set_sync_block(strat, "positions_unavailable", recoverable=True)
+            self._save_state()
             return False
         unexpected_positions = [record for record in positions if not self._owned_position(strat, record)]
         if unexpected_positions:
             self._set_sync_block(strat, "same_magic_unexpected_position_or_order", {"tickets": [int(record.ticket) for record in unexpected_positions], "comments": [str(record.comment or "") for record in unexpected_positions]}, recoverable=False)
+            return False
+        if positions and st.get("basket") and not self._basket_close_intent_valid(st):
+            self._set_sync_block(
+                strat,
+                "state_basket_close_intent_invalid",
+                recoverable=False,
+            )
             return False
         queried_orders = self.executor.get_orders(symbol, int(strat["magic"]))
         orders_available = queried_orders is not None
         orders = list(queried_orders or [])
         if not orders_available:
             self._set_sync_block(strat, "orders_unavailable", recoverable=True)
+            self._save_state()
         if orders:
             self._set_sync_block(
                 strat,
@@ -1923,6 +4795,22 @@ class S23HorizontalInventoryRunner:
             return not bool(st.get("sync_block_new_entries"))
         state_basket = list(st.get("basket") or [])
         unresolved_open = bool(st.get("pending_open_opportunity_id"))
+        recovered_pending_open = False
+        if (
+            positions
+            and unresolved_open
+            and (
+                self._recover_session_vwap_pending_open(
+                    strat, positions, orders_available=orders_available,
+                )
+                or self._recover_generic_pending_open(
+                    strat, positions, orders_available=orders_available,
+                )
+            )
+        ):
+            state_basket = list(st.get("basket") or [])
+            unresolved_open = False
+            recovered_pending_open = True
         if not state_basket and positions:
             self._set_sync_block(
                 strat,
@@ -1946,8 +4834,85 @@ class S23HorizontalInventoryRunner:
         if not state_basket:
             return not bool(st.get("sync_block_new_entries"))
         if state_basket:
-            live_by_id = {int(getattr(pos, "identifier", 0) or pos.ticket): pos for pos in positions}
-            state_ids = {int(pos.get("position_identifier") or pos.get("ticket") or 0) for pos in state_basket}
+            basket_sides = {
+                str(pos.get("side") or "")
+                for pos in state_basket
+                if isinstance(pos, dict)
+            }
+            if len(basket_sides) != 1 or not basket_sides <= {"LONG", "SHORT"}:
+                self._set_sync_block(
+                    strat,
+                    "state_basket_side_inconsistent",
+                    {"sides": sorted(basket_sides), "state_rows": len(state_basket)},
+                    recoverable=False,
+                )
+                return False
+            state_identity: list[tuple[int, int]] = []
+            for pos in state_basket:
+                if not isinstance(pos, dict):
+                    continue
+                raw_ticket = pos.get("ticket")
+                raw_position_id = pos.get("position_identifier")
+                if (
+                    isinstance(raw_ticket, bool)
+                    or not isinstance(raw_ticket, int)
+                    or isinstance(raw_position_id, bool)
+                    or not isinstance(raw_position_id, int)
+                ):
+                    continue
+                state_identity.append((raw_ticket, raw_position_id))
+            state_tickets = [ticket for ticket, _position_id in state_identity]
+            state_position_ids = [position_id for _ticket, position_id in state_identity]
+            if (
+                len(state_identity) != len(state_basket)
+                or any(ticket <= 0 or position_id <= 0 for ticket, position_id in state_identity)
+                or len(set(state_tickets)) != len(state_tickets)
+                or len(set(state_position_ids)) != len(state_position_ids)
+            ):
+                self._set_sync_block(
+                    strat,
+                    "state_position_identity_invalid",
+                    {
+                        "state_rows": len(state_basket),
+                        "valid_identity_rows": len(state_identity),
+                        "state_tickets": [str(ticket) for ticket in state_tickets],
+                        "state_position_ids": [str(position_id) for position_id in state_position_ids],
+                    },
+                    recoverable=False,
+                )
+                return False
+            live_identity: list[tuple[int, int]] = []
+            for pos in positions:
+                identity = self._live_position_identity(pos)
+                if identity is None:
+                    live_identity = []
+                    break
+                live_identity.append(identity)
+            live_tickets = [ticket for ticket, _position_id in live_identity]
+            live_position_ids = [position_id for _ticket, position_id in live_identity]
+            if (
+                len(live_identity) != len(positions)
+                or any(ticket <= 0 or position_id <= 0 for ticket, position_id in live_identity)
+                or len(set(live_tickets)) != len(live_tickets)
+                or len(set(live_position_ids)) != len(live_position_ids)
+            ):
+                self._set_sync_block(
+                    strat,
+                    "live_position_identity_invalid",
+                    {
+                        "live_rows": len(positions),
+                        "valid_identity_rows": len(live_identity),
+                        "live_tickets": [str(ticket) for ticket in live_tickets],
+                        "live_position_ids": [str(position_id) for position_id in live_position_ids],
+                    },
+                    recoverable=False,
+                )
+                return False
+            live_by_id = {
+                position_id: pos
+                for (_ticket, position_id), pos in zip(live_identity, positions)
+            }
+            state_ids = set(state_position_ids)
             unexpected_live_ids = set(live_by_id) - state_ids
             if unexpected_live_ids:
                 self._set_sync_block(
@@ -1960,26 +4925,99 @@ class S23HorizontalInventoryRunner:
             remaining_state: list[dict[str, Any]] = []
             confirmed_deals = []
             for state_pos in state_basket:
-                position_id = int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0)
+                position_id = int(state_pos.get("position_identifier"))
                 live_pos = live_by_id.get(position_id)
                 if live_pos is not None:
+                    if not self._position_close_intent_valid(state_pos):
+                        self._set_sync_block(
+                            strat,
+                            "state_position_close_intent_invalid",
+                            {"ticket": position_id},
+                            recoverable=False,
+                        )
+                        return False
                     if not self._state_matches_live(strat, state_pos, live_pos):
                         self._set_sync_block(strat, "state_position_ownership_mismatch", {"ticket": position_id}, recoverable=False)
                         return False
-                    if "hold_minutes" in strat:
-                        broker_open_epoch = int(getattr(live_pos, "open_time", 0) or 0)
-                        if broker_open_epoch <= 0:
-                            self._set_sync_block(
-                                strat,
-                                "confirmed_fill_time_unavailable",
-                                {"ticket": position_id},
-                                recoverable=True,
-                            )
-                            return False
+                    try:
+                        persisted_entry_price = float(state_pos.get("entry_price"))
+                    except (TypeError, ValueError, OverflowError):
+                        persisted_entry_price = math.nan
+                    raw_broker_entry_price = getattr(live_pos, "open_price", None)
+                    try:
+                        broker_entry_price = (
+                            None
+                            if raw_broker_entry_price is None
+                            else float(raw_broker_entry_price)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        broker_entry_price = math.nan
+                    if broker_entry_price is not None and (
+                        not math.isfinite(broker_entry_price)
+                        or broker_entry_price <= 0.0
+                    ):
+                        self._set_sync_block(
+                            strat,
+                            "live_position_entry_price_invalid",
+                            {"ticket": position_id, "open_price": str(raw_broker_entry_price)},
+                            recoverable=True,
+                        )
+                        return False
+                    if broker_entry_price is None and (
+                        not math.isfinite(persisted_entry_price)
+                        or persisted_entry_price <= 0.0
+                    ):
+                        self._set_sync_block(
+                            strat,
+                            "state_position_lifecycle_invalid",
+                            {"ticket": position_id, "entry_price": str(state_pos.get("entry_price"))},
+                            recoverable=False,
+                        )
+                        return False
+                    if broker_entry_price is not None and not math.isclose(
+                        persisted_entry_price,
+                        broker_entry_price,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    ):
+                        previous_entry_price = state_pos.get("entry_price")
+                        state_pos["entry_price"] = broker_entry_price
+                        self._trade_row(
+                            "position_lifecycle_recovered",
+                            strat,
+                            ticket=int(state_pos.get("ticket") or position_id),
+                            position_identifier=position_id,
+                            reason="confirmed_broker_entry_price_restored",
+                            note=(
+                                f"previous_entry_price={previous_entry_price};"
+                                f"broker_entry_price={broker_entry_price}"
+                            ),
+                        )
+                        self._save_state()
+                    broker_open_epoch = int(getattr(live_pos, "open_time", 0) or 0)
+                    if broker_open_epoch <= 0:
+                        self._set_sync_block(
+                            strat,
+                            "confirmed_fill_time_unavailable",
+                            {"ticket": position_id},
+                            recoverable=True,
+                        )
+                        return False
+                    else:
                         broker_entry_time = pd.Timestamp(broker_open_epoch, unit="s", tz="UTC")
                         persisted_entry_time = parse_ts(state_pos.get("entry_time_utc"))
-                        if persisted_entry_time != broker_entry_time:
+                        try:
+                            persisted_open_epoch = int(
+                                state_pos.get("open_time_epoch") or 0
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            persisted_open_epoch = 0
+                        if (
+                            persisted_entry_time != broker_entry_time
+                            or persisted_open_epoch != broker_open_epoch
+                        ):
                             previous_entry_time = state_pos.get("entry_time_utc")
+                            previous_open_epoch = state_pos.get("open_time_epoch")
                             state_pos["entry_time_utc"] = dt_text(broker_entry_time)
                             state_pos["open_time_epoch"] = broker_open_epoch
                             self._trade_row(
@@ -1988,12 +5026,67 @@ class S23HorizontalInventoryRunner:
                                 ticket=int(state_pos.get("ticket") or position_id),
                                 position_identifier=position_id,
                                 reason="confirmed_broker_fill_time_restored",
-                                note=f"previous_entry_time_utc={previous_entry_time};broker_entry_time_utc={dt_text(broker_entry_time)}",
+                                note=(
+                                    f"previous_entry_time_utc={previous_entry_time};"
+                                    f"previous_open_time_epoch={previous_open_epoch};"
+                                    f"broker_entry_time_utc={dt_text(broker_entry_time)};"
+                                    f"broker_open_time_epoch={broker_open_epoch}"
+                                ),
                             )
                             self._save_state()
                     remaining_state.append(state_pos)
                     continue
-                opened_at_epoch = max(0, int(state_pos.get("open_time_epoch") or 0) - 60)
+                raw_state_open_epoch = state_pos.get("open_time_epoch")
+                if (
+                    isinstance(raw_state_open_epoch, bool)
+                    or not isinstance(raw_state_open_epoch, int)
+                ):
+                    self._set_sync_block(
+                        strat,
+                        "state_position_lifecycle_invalid",
+                        {"ticket": position_id, "open_time_epoch": str(state_pos.get("open_time_epoch"))},
+                        recoverable=False,
+                    )
+                    return False
+                state_open_epoch = raw_state_open_epoch
+                if state_open_epoch <= 0:
+                    self._set_sync_block(
+                        strat,
+                        "state_position_lifecycle_invalid",
+                        {
+                            "ticket": position_id,
+                            "open_time_epoch": str(state_pos.get("open_time_epoch")),
+                        },
+                        recoverable=False,
+                    )
+                    return False
+                opened_at_epoch = state_open_epoch - 60
+                state_ticket = int(state_pos.get("ticket") or 0)
+                direct_position = self.executor.get_position(state_ticket)
+                if direct_position is None:
+                    self._set_sync_block(
+                        strat,
+                        "position_absence_unconfirmed",
+                        {"ticket": state_ticket, "position_identifier": position_id},
+                        recoverable=True,
+                    )
+                    return False
+                if direct_position is not False:
+                    if not self._state_matches_live(strat, state_pos, direct_position):
+                        self._set_sync_block(
+                            strat,
+                            "state_position_ownership_mismatch",
+                            {"ticket": state_ticket, "position_identifier": position_id},
+                            recoverable=False,
+                        )
+                    else:
+                        self._set_sync_block(
+                            strat,
+                            "position_inventory_inconsistent",
+                            {"ticket": state_ticket, "position_identifier": position_id},
+                            recoverable=True,
+                        )
+                    return False
                 deal = self._get_confirmed_close_deal(position_id, opened_at_epoch)
                 if deal is None:
                     self._set_sync_block(strat, "close_deal_query_unavailable", {"ticket": position_id}, recoverable=False)
@@ -2001,7 +5094,11 @@ class S23HorizontalInventoryRunner:
                 if deal is False:
                     self._set_sync_block(strat, "close_deal_not_confirmed", {"ticket": position_id}, recoverable=False)
                     return False
-                if int(deal.position_id) != position_id or str(deal.symbol) != symbol or not self._state_ownership_proven(strat, state_pos):
+                if (
+                    int(deal.position_id) != position_id
+                    or str(deal.symbol) != symbol
+                    or not self._state_ownership_proven(strat, state_pos)
+                ):
                     self._set_sync_block(
                         strat,
                         "close_deal_ownership_mismatch",
@@ -2009,11 +5106,120 @@ class S23HorizontalInventoryRunner:
                         recoverable=False,
                     )
                     return False
+                try:
+                    deal_epoch = int(getattr(deal, "deal_time", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    deal_epoch = 0
+                if deal_epoch <= 0 or deal_epoch < state_open_epoch:
+                    self._set_sync_block(
+                        strat,
+                        "close_deal_timestamp_invalid",
+                        {
+                            "ticket": position_id,
+                            "deal_id": int(getattr(deal, "deal", 0) or 0),
+                            "deal_time": getattr(deal, "deal_time", None),
+                            "state_open_time": state_pos.get("open_time_epoch"),
+                        },
+                        recoverable=False,
+                    )
+                    return False
+                try:
+                    deal_id = int(getattr(deal, "deal", 0) or 0)
+                    deal_price = float(getattr(deal, "price", 0.0) or 0.0)
+                    deal_net_profit = float(deal.net_profit)
+                    deal_exit_volume = float(getattr(deal, "exit_volume"))
+                    state_lot = float(state_pos.get("lot"))
+                except (TypeError, ValueError, OverflowError, AttributeError):
+                    deal_id = 0
+                    deal_price = math.nan
+                    deal_net_profit = math.nan
+                    deal_exit_volume = math.nan
+                    state_lot = math.nan
+                if (
+                    deal_id <= 0
+                    or not math.isfinite(deal_price)
+                    or deal_price <= 0.0
+                    or not math.isfinite(deal_net_profit)
+                    or not math.isfinite(deal_exit_volume)
+                    or deal_exit_volume <= 0.0
+                    or not math.isfinite(state_lot)
+                    or state_lot <= 0.0
+                ):
+                    self._set_sync_block(
+                        strat,
+                        "close_deal_payload_invalid",
+                        {
+                            "ticket": position_id,
+                            "deal_id": deal_id,
+                            "deal_price": str(getattr(deal, "price", None)),
+                            "deal_net_profit": str(getattr(deal, "net_profit", None)),
+                            "deal_exit_volume": str(getattr(deal, "exit_volume", None)),
+                            "state_lot": str(state_pos.get("lot")),
+                        },
+                        recoverable=False,
+                    )
+                    return False
+                if not math.isclose(deal_exit_volume, state_lot, rel_tol=0.0, abs_tol=1e-9):
+                    self._set_sync_block(
+                        strat,
+                        "close_deal_volume_mismatch",
+                        {
+                            "ticket": position_id,
+                            "deal_exit_volume": deal_exit_volume,
+                            "state_lot": state_lot,
+                        },
+                        recoverable=False,
+                    )
+                    return False
                 confirmed_deals.append((state_pos, deal))
+            if remaining_state:
+                _, latest_state_pos = max(
+                    enumerate(remaining_state),
+                    key=lambda item: (
+                        int(item[1].get("open_time_epoch") or 0),
+                        item[0],
+                    ),
+                )
+                broker_confirmed_add_anchor = float(latest_state_pos["entry_price"])
+                try:
+                    persisted_add_anchor = float(st.get("last_add_price"))
+                except (TypeError, ValueError, OverflowError):
+                    persisted_add_anchor = math.nan
+                if not math.isclose(
+                    persisted_add_anchor,
+                    broker_confirmed_add_anchor,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    previous_add_anchor = st.get("last_add_price")
+                    st["last_add_price"] = broker_confirmed_add_anchor
+                    self._trade_row(
+                        "position_lifecycle_recovered",
+                        strat,
+                        ticket=int(latest_state_pos.get("ticket") or 0),
+                        position_identifier=int(
+                            latest_state_pos.get("position_identifier")
+                            or latest_state_pos.get("ticket")
+                            or 0
+                        ),
+                        reason="confirmed_broker_last_add_price_restored",
+                        note=(
+                            f"previous_last_add_price={previous_add_anchor};"
+                            f"broker_confirmed_last_add_price={broker_confirmed_add_anchor}"
+                        ),
+                    )
+                    self._save_state()
             if confirmed_deals:
+                # Daily realized state is a single UTC-day accumulator.  Apply
+                # broker-confirmed deals chronologically so a basket whose
+                # tickets disappear across midnight cannot roll the active day
+                # backwards merely because persisted basket order differs.
+                confirmed_deals.sort(key=lambda item: int(item[1].deal_time))
                 reason = str(st.get("pending_close_reason") or "broker_or_external_close_confirmed")
                 signal_bar = st.get("pending_close_signal_bar")
                 closed_basket_id = st.get("current_basket_id")
+                closed_basket_was_reverse = self._validated_reverse_used(strat)
+                closed_basket_atr30 = st.get("frozen_basket_atr30")
                 closed_basket_was_long = bool(state_basket) and all(
                     str(pos.get("side") or "") == "LONG" for pos in state_basket
                 )
@@ -2021,30 +5227,79 @@ class S23HorizontalInventoryRunner:
                 st["basket"] = remaining_state
                 confirmed_times: list[pd.Timestamp] = []
                 for state_pos, deal in confirmed_deals:
-                    deal_epoch = int(getattr(deal, "deal_time", 0) or 0)
-                    deal_time = pd.Timestamp(deal_epoch, unit="s", tz="UTC") if deal_epoch > 0 else utc_now()
+                    position_reason = str(state_pos.get("pending_close_reason") or reason)
+                    deal_epoch = int(deal.deal_time)
+                    deal_time = pd.Timestamp(deal_epoch, unit="s", tz="UTC")
                     confirmed_times.append(pd.Timestamp(deal_time))
                     self._record_daily_realized(strat, float(deal.net_profit), deal_time)
-                    position_id = int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0)
+                    position_id = int(state_pos.get("position_identifier"))
                     self._trade_row(
                         "position_close_confirmed", strat,
+                        opportunity_id=str(state_pos.get("opportunity_id") or ""),
                         ticket=int(state_pos.get("ticket") or position_id), position_identifier=position_id,
                         deal_id=int(getattr(deal, "deal", 0) or 0), side=str(state_pos.get("side") or ""),
                         lot=float(state_pos.get("lot") or 0.0), entry_price=float(state_pos.get("entry_price") or 0.0),
                         exit_price=float(getattr(deal, "price", 0.0) or 0.0), price=float(getattr(deal, "price", 0.0) or 0.0),
-                        profit=float(deal.net_profit), reason=reason, signal_bar_time=signal_bar,
+                        profit=float(deal.net_profit), reason=position_reason, signal_bar_time=signal_bar,
                         note=f"deal_time_utc={dt_text(deal_time)}",
                     )
                 if not remaining_state:
+                    fully_closed_sides = {
+                        str(pos.get("side") or "").upper()
+                        for pos in state_basket
+                        if str(pos.get("side") or "").upper() in {"LONG", "SHORT"}
+                    }
+                    fully_closed_side = (
+                        next(iter(fully_closed_sides)) if len(fully_closed_sides) == 1 else None
+                    )
                     if reason == "basket_target" and closed_basket_was_long:
                         self._confirm_long_target_portfolio_rearm(
                             strat,
                             max(confirmed_times),
                             closed_basket_id,
                         )
-                    self._clear_basket_state(strat, reason, signal_bar)
-                    if orders_available:
+                    else:
+                        self._cancel_unconfirmed_long_target_rearm_after_other_close(
+                            strat, closed_basket_id, reason,
+                        )
+                    if reason == "basket_stop" and closed_basket_was_long and closed_basket_was_reverse:
+                        self._arm_trend_recovery_episode(
+                            strat,
+                            max(confirmed_times),
+                            closed_basket_id,
+                            closed_basket_atr30,
+                        )
+                    self._clear_basket_state(
+                        strat,
+                        reason,
+                        signal_bar,
+                        closed_at_utc=max(confirmed_times),
+                        closed_side=fully_closed_side,
+                    )
+                    clearable_after_confirmed_close = bool(
+                        st.get("sync_block_new_entries") is False
+                        or st.get("sync_block_recoverable") is True
+                        or st.get("sync_block_reason") in CONFIRMED_CLOSE_CLEAR_SYNC_REASONS
+                    )
+                    if clearable_after_confirmed_close:
                         self._set_sync_block(strat, None)
+                        if not orders_available:
+                            self._set_sync_block(
+                                strat,
+                                "orders_unavailable",
+                                {"after_confirmed_close": True},
+                                recoverable=True,
+                            )
+                elif self._recover_close_retry_after_owned_sync(
+                    strat,
+                    remaining_state,
+                    orders_available=orders_available,
+                    resolved_unresolved_submission=any(
+                        self._close_submission_unresolved(state_pos)
+                        for state_pos, _deal in confirmed_deals
+                    ),
+                ):
+                    self._save_state()
                 self._save_state()
                 if unresolved_open:
                     self._set_sync_block(
@@ -2080,13 +5335,23 @@ class S23HorizontalInventoryRunner:
                 # proven positions to reach target/stop/FTP/max-hold exits.
                 return bool(remaining_state) and len(remaining_state) == len(state_basket)
             if remaining_state and len(remaining_state) == len(state_basket) and orders_available and not orders:
-                clear_recoverable_sync_block_after_clean_sync(
-                    symbol_key=strat["id"],
-                    state=st,
-                    save_state=self._save_state,
-                    options=self.safety,
-                    audit=lambda symbol_key, event, reason: self._trade_row(event, strat, reason=reason, note=symbol_key),
+                close_retry_recovered = self._recover_close_retry_after_owned_sync(
+                    strat, remaining_state, orders_available=True,
                 )
+                if not close_retry_recovered:
+                    clear_recoverable_sync_block_after_clean_sync(
+                        symbol_key=strat["id"],
+                        state=st,
+                        save_state=self._save_state,
+                        options=self.safety,
+                        audit=lambda symbol_key, event, reason: self._trade_row(
+                            event, strat, reason=reason, note=symbol_key,
+                        ),
+                    )
+            if recovered_pending_open and remaining_state and len(remaining_state) == len(state_basket):
+                # A separately retained non-recoverable entry block must not
+                # prevent exit monitoring of the uniquely recovered position.
+                return True
             if (
                 remaining_state
                 and len(remaining_state) == len(state_basket)
@@ -2100,61 +5365,481 @@ class S23HorizontalInventoryRunner:
                 return True
         return not bool(st.get("sync_block_new_entries"))
 
+    def _recover_close_retry_after_owned_sync(
+        self,
+        strat: dict[str, Any],
+        positions: list[dict[str, Any]],
+        *,
+        orders_available: bool,
+        resolved_unresolved_submission: bool = False,
+    ) -> bool:
+        """Resume a close only after every remaining owned position re-syncs."""
+        st = self._st(strat)
+        reason = str(st.get("sync_block_reason") or "")
+        has_unsubmitted_position = any(
+            not bool(position.get("close_requested")) for position in positions
+        )
+        pending_close = bool(st.get("pending_close_reason")) and has_unsubmitted_position
+        pending_close = pending_close or any(
+            bool(position.get("pending_close_reason"))
+            and not bool(position.get("close_requested"))
+            for position in positions
+        )
+        unresolved_submissions = [
+            int(position.get("ticket") or 0)
+            for position in positions
+            if self._close_submission_unresolved(position)
+        ]
+        if unresolved_submissions:
+            self._set_sync_block(
+                strat,
+                "close_submission_result_unresolved",
+                {"tickets": sorted(unresolved_submissions)},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
+        reason_allows_rearm = bool(
+            reason in OWNED_CLOSE_RETRY_SYNC_REASONS
+            or (
+                reason == "close_submission_result_unresolved"
+                and resolved_unresolved_submission
+            )
+        )
+        if (
+            not positions
+            or not orders_available
+            or (reason and not reason_allows_rearm)
+            or (not reason and not pending_close)
+        ):
+            return False
+        if reason:
+            # Older local states persisted these same close-attempt reasons as
+            # non-recoverable.  Exact position/order/state reconciliation is
+            # the missing evidence that safely upgrades only this reason set.
+            st["sync_block_recoverable"] = True
+            if not clear_recoverable_sync_block_after_clean_sync(
+                symbol_key=strat["id"],
+                state=st,
+                save_state=self._save_state,
+                options=self.safety,
+                audit=lambda symbol_key, event, cleared_reason: self._trade_row(
+                    event, strat, reason=cleared_reason, note=symbol_key,
+                ),
+            ):
+                return False
+        has_submitted_position = any(
+            bool(position.get("close_requested")) for position in positions
+        )
+        if not has_submitted_position:
+            cleared_unconfirmed_long_target = (
+                st.get("pending_close_reason") == "basket_target"
+                and bool(positions)
+                and all(str(position.get("side") or "") == "LONG" for position in positions)
+            )
+            cleared_basket_id = st.get("current_basket_id")
+            st["pending_close_reason"] = None
+            st["pending_close_signal_bar"] = None
+            if cleared_unconfirmed_long_target:
+                routing = self.state["routing"]
+                had_pending_rearm = (
+                    routing.get("long_target_rearm_pending_confirmation") is True
+                )
+                self._refresh_long_target_rearm_pending_summary()
+                if (
+                    had_pending_rearm
+                    and routing.get("long_target_rearm_pending_confirmation") is False
+                ):
+                    self._trade_row(
+                        "portfolio_rearm_cancelled",
+                        strat,
+                        side="LONG",
+                        reason="partial_target_close_remaining_retry_rearmed",
+                        note=f"basket_id={cleared_basket_id}",
+                    )
+        for position in positions:
+            if bool(position.get("close_requested")):
+                continue
+            position["close_requested"] = False
+            position["pending_close_reason"] = None
+            position["pending_close_signal_bar"] = None
+        self._trade_row(
+            "close_retry_rearmed", strat,
+            reason=reason or "durable_pending_close_reconciled",
+        )
+        self._save_state()
+        return True
+
+    def _validate_live_position_before_close(
+        self, strat: dict[str, Any], pos: dict[str, Any],
+    ) -> bool:
+        ticket = int(pos.get("ticket") or 0)
+        if not self._position_close_intent_valid(pos):
+            self._set_sync_block(
+                strat,
+                "state_position_close_intent_invalid",
+                {"ticket": ticket},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
+        raw_position_id = pos.get("position_identifier")
+        if (
+            isinstance(raw_position_id, bool)
+            or not isinstance(raw_position_id, int)
+            or raw_position_id <= 0
+        ):
+            self._set_sync_block(
+                strat,
+                "state_position_identity_invalid",
+                {"ticket": ticket, "position_identifier": repr(raw_position_id)},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
+        position_id = raw_position_id
+        live_pos = self.executor.get_position(ticket)
+        if live_pos is None:
+            self._set_sync_block(
+                strat, "position_query_unavailable_before_close", {"ticket": ticket},
+                recoverable=True,
+            )
+            self._save_state()
+            return False
+        if live_pos is False:
+            self._set_sync_block(
+                strat, "position_missing_before_close",
+                {"ticket": ticket, "position_identifier": position_id},
+                recoverable=True,
+            )
+            self._save_state()
+            return False
+        if not self._state_matches_live(strat, pos, live_pos):
+            self._set_sync_block(
+                strat, "state_position_ownership_mismatch",
+                {"ticket": ticket, "position_identifier": position_id},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
+        return True
+
+    def _pre_open_live_inventory_block(
+        self, strat: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], bool] | None:
+        symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
+        positions = self.executor.get_positions(symbol, int(strat["magic"]))
+        if positions is None:
+            return ("positions_unavailable", {}, True)
+        unexpected_positions = [
+            record for record in positions if not self._owned_position(strat, record)
+        ]
+        if unexpected_positions:
+            return (
+                "same_magic_unexpected_position_or_order",
+                {
+                    "tickets": [repr(getattr(record, "ticket", None)) for record in unexpected_positions],
+                    "comments": [str(getattr(record, "comment", "") or "") for record in unexpected_positions],
+                },
+                False,
+            )
+        orders = self.executor.get_orders(symbol, int(strat["magic"]))
+        if orders is None:
+            return ("orders_unavailable", {}, True)
+        if orders:
+            return (
+                "same_magic_unexpected_order",
+                {
+                    "tickets": [repr(getattr(record, "ticket", None)) for record in orders],
+                    "comments": [str(getattr(record, "comment", "") or "") for record in orders],
+                },
+                False,
+            )
+        raw_basket = self._st(strat).get("basket")
+        if not isinstance(raw_basket, list):
+            return (
+                "state_position_identity_invalid",
+                {"basket_type": type(raw_basket).__name__},
+                False,
+            )
+        state_by_id: dict[int, dict[str, Any]] = {}
+        for state_pos in raw_basket:
+            if not isinstance(state_pos, dict):
+                return ("state_position_identity_invalid", {}, False)
+            raw_ticket = state_pos.get("ticket")
+            raw_position_id = state_pos.get("position_identifier")
+            if (
+                isinstance(raw_ticket, bool)
+                or not isinstance(raw_ticket, int)
+                or raw_ticket <= 0
+                or isinstance(raw_position_id, bool)
+                or not isinstance(raw_position_id, int)
+                or raw_position_id <= 0
+                or raw_position_id in state_by_id
+            ):
+                return ("state_position_identity_invalid", {}, False)
+            state_by_id[raw_position_id] = state_pos
+        live_by_id: dict[int, Any] = {}
+        for live_pos in positions:
+            identity = self._live_position_identity(live_pos)
+            if identity is None or identity[1] in live_by_id:
+                return ("live_position_identity_invalid", {}, False)
+            live_by_id[identity[1]] = live_pos
+        if not state_by_id and live_by_id:
+            return (
+                "live_positions_without_state",
+                {"live_ids": sorted(live_by_id)},
+                False,
+            )
+        if set(state_by_id) != set(live_by_id):
+            return (
+                "position_inventory_inconsistent",
+                {
+                    "state_ids": sorted(state_by_id),
+                    "live_ids": sorted(live_by_id),
+                },
+                False,
+            )
+        for position_id, state_pos in state_by_id.items():
+            if not self._state_matches_live(strat, state_pos, live_by_id[position_id]):
+                return (
+                    "state_position_ownership_mismatch",
+                    {"position_identifier": position_id},
+                    False,
+                )
+        return None
+
+    def _pre_open_account_block(
+        self,
+    ) -> tuple[str, dict[str, Any], bool] | None:
+        account = self.executor.get_account_info()
+        if account is None:
+            return ("account_execution_metadata_unavailable", {}, True)
+        if not isinstance(account, dict):
+            return (
+                "account_execution_metadata_invalid",
+                {"account_type": type(account).__name__},
+                False,
+            )
+        identity_error = self._account_identity_error(account)
+        if identity_error is not None:
+            return (
+                "account_identity_mismatch",
+                {"identity_check": identity_error},
+                False,
+            )
+        raw_margin_mode = account.get("margin_mode")
+        if (
+            isinstance(raw_margin_mode, bool)
+            or not isinstance(raw_margin_mode, int)
+        ):
+            return ("account_execution_metadata_invalid", {}, False)
+        if (
+            bool(self.params.get("require_hedging_account", True))
+            and raw_margin_mode != HEDGING_MARGIN_MODE
+        ):
+            return (
+                "account_margin_mode_mismatch",
+                {"hedging_required": True},
+                False,
+            )
+        permission_keys = (
+            "account_trade_allowed",
+            "account_trade_expert",
+            "terminal_trade_allowed",
+            "mql_trade_allowed",
+        )
+        if any(not isinstance(account.get(key), bool) for key in permission_keys):
+            return ("account_execution_metadata_invalid", {}, False)
+        disabled = [key for key in permission_keys if account.get(key) is not True]
+        if disabled:
+            return (
+                "trade_permission_precheck_blocked",
+                {"disabled_flags": disabled},
+                True,
+            )
+        return None
+
     def _close_basket(self, strat: dict[str, Any], reason: str, price_row: pd.Series, pnl: float) -> str:
         st = self._st(strat)
+        live_origin = any(pos.get("shadow") is False for pos in self._basket_rows(strat))
+        if not self.live_enabled and live_origin:
+            self._set_sync_block(
+                strat,
+                "live_origin_inventory_requires_live_close",
+                {"tickets": [pos.get("ticket") for pos in self._basket_rows(strat)]},
+                recoverable=False,
+            )
+            self._save_state()
+            return "failed"
         if self.live_enabled:
-            for pos in list(st["basket"]):
-                ticket = int(pos.get("ticket") or 0)
-                position_id = int(pos.get("position_identifier") or ticket)
-                live_pos = self.executor.get_position(ticket)
-                if live_pos is None:
-                    self._set_sync_block(strat, "position_query_unavailable_before_close", {"ticket": ticket}, recoverable=False)
-                    self._save_state()
-                    return "failed"
-                if live_pos is False or not self._owned_position(strat, live_pos) or int(getattr(live_pos, "identifier", 0) or live_pos.ticket) != position_id:
-                    self._set_sync_block(strat, "state_ticket_unowned_or_foreign", {"ticket": ticket, "position_identifier": position_id}, recoverable=False)
-                    self._save_state()
+            if not self._basket_close_intent_valid(st):
+                self._set_sync_block(
+                    strat,
+                    "state_basket_close_intent_invalid",
+                    {},
+                    recoverable=False,
+                )
+                self._save_state()
+                return "failed"
+            positions_to_close = [
+                pos for pos in list(st["basket"])
+                if not bool(pos.get("close_requested"))
+            ]
+            if not positions_to_close:
+                return "requested"
+            unresolved_submissions = [
+                int(pos.get("ticket") or 0)
+                for pos in positions_to_close
+                if self._close_submission_unresolved(pos)
+            ]
+            if unresolved_submissions:
+                self._set_sync_block(
+                    strat,
+                    "close_submission_result_unresolved",
+                    {"tickets": sorted(unresolved_submissions)},
+                    recoverable=False,
+                )
+                self._save_state()
+                return "failed"
+            for pos in positions_to_close:
+                if not self._validate_live_position_before_close(strat, pos):
                     return "failed"
             st["pending_close_reason"] = reason
             st["pending_close_signal_bar"] = str(price_row.name)
             if reason == "basket_target" and self._basket_is_long(strat):
                 self._arm_long_target_portfolio_rearm(strat, utc_now())
             self._save_state()
-            for pos in list(st["basket"]):
+            for pos in positions_to_close:
+                # Broker state can change while an earlier ticket CLOSE is in
+                # flight. Re-prove the complete ownership tuple immediately
+                # before every later ticket submission.
+                if not self._validate_live_position_before_close(strat, pos):
+                    return "failed"
                 ticket = int(pos.get("ticket") or 0)
-                close_result = self.executor.close_position(ticket, int(self.params.get("deviation_points", 50)))
+                pos["close_submission_started_utc"] = dt_text(utc_now())
+                self._save_state()
+                close_result = self.executor.close_position(
+                    ticket,
+                    int(self.params.get("deviation_points", 50)),
+                    expected_login=int(MT5_LOGIN),
+                    expected_server=str(MT5_SERVER),
+                    expected_symbol=str(pos["owner_symbol"]),
+                    expected_magic=int(pos["owner_magic"]),
+                    expected_comment=str(pos["owner_comment"]),
+                    expected_identifier=int(pos["position_identifier"]),
+                )
                 if not close_result:
                     close_status = str(getattr(close_result, "status", "FAILED"))
-                    if close_status == "MARKET_CLOSED" and reason in {"morning_fixed_hold", "midday_fixed_hold"}:
-                        st["pending_close_reason"] = None
-                        st["pending_close_signal_bar"] = None
+                    definitive_no_fill = self._close_result_definitive_no_fill(
+                        close_result
+                    )
+                    if definitive_no_fill:
+                        pos["close_submission_started_utc"] = None
+                    if close_status in {"ACCOUNT_IDENTITY_GUARD", "ACCOUNT_MODE_GUARD", "POSITION_OWNERSHIP_GUARD"}:
+                        block_reason = (
+                            "account_identity_mismatch"
+                            if close_status == "ACCOUNT_IDENTITY_GUARD"
+                            else (
+                                "account_margin_mode_mismatch"
+                                if close_status == "ACCOUNT_MODE_GUARD"
+                                else "position_ownership_guard_rejected"
+                            )
+                        )
+                        self._set_sync_block(
+                            strat,
+                            block_reason,
+                            {"ticket": ticket, "atomic_close_guard": close_status},
+                            recoverable=False,
+                        )
+                        self._save_state()
+                        return "failed"
+                    if self._record_close_trade_permission_reject(
+                        strat, close_result, price_row.name,
+                    ):
+                        return "trade_permission_rejected"
+                    if close_status == "MARKET_CLOSED":
+                        has_submitted_close = any(
+                            bool(position.get("close_requested"))
+                            for position in self._basket_rows(strat)
+                        )
+                        if not has_submitted_close:
+                            st["pending_close_reason"] = None
+                            st["pending_close_signal_bar"] = None
+                            if reason == "basket_target" and self._basket_is_long(strat):
+                                routing = self.state["routing"]
+                                had_pending_rearm = (
+                                    routing.get("long_target_rearm_pending_confirmation") is True
+                                )
+                                self._refresh_long_target_rearm_pending_summary(
+                                    exclude_lane_id=int(strat["lane_id"]),
+                                    exclude_basket_id=st.get("current_basket_id"),
+                                )
+                                if (
+                                    had_pending_rearm
+                                    and routing.get("long_target_rearm_pending_confirmation") is False
+                                ):
+                                    self._trade_row(
+                                        "portfolio_rearm_cancelled",
+                                        strat,
+                                        side="LONG",
+                                        reason="target_close_definitive_no_fill",
+                                        note=(
+                                            f"basket_id={st.get('current_basket_id')};"
+                                            f"ticket={ticket};retcode={getattr(close_result, 'retcode', None)}"
+                                        ),
+                                    )
                         self._trade_row(
                             "time_close_deferred", strat, ticket=ticket,
-                            position_identifier=int(pos.get("position_identifier") or ticket),
+                            position_identifier=int(pos.get("position_identifier")),
                             reason="market_closed_10018", signal_bar_time=str(price_row.name),
                             note=f"retcode={getattr(close_result, 'retcode', None)}",
                         )
                         self._save_state()
                         return "market_closed"
+                    if not definitive_no_fill:
+                        self._set_sync_block(
+                            strat,
+                            "close_submission_result_unresolved",
+                            {"tickets": [ticket], "status": close_status},
+                            recoverable=False,
+                        )
+                        self._save_state()
+                        return "failed"
                     block_reason = "live_time_close_unconfirmed" if close_status in {"MISSING_UNCONFIRMED", "MALFORMED_OK"} else "live_time_close_failed"
                     self._set_sync_block(
                         strat, block_reason,
                         {"ticket": ticket, "status": close_status, "retcode": getattr(close_result, "retcode", None)},
-                        recoverable=False,
+                        recoverable=True,
                     )
                     self._save_state()
                     return "failed"
+                self._clear_trade_permission_reject_state(strat)
                 pos["close_requested"] = True
+                # Persist each broker-confirmed submission before the next
+                # ticket can be sent.  A process stop between tickets must not
+                # lose the successful ticket marker and later duplicate CLOSE.
+                self._save_state()
             self._trade_row("basket_close_requested", strat, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
             self._save_state()
-            return
+            return "requested"
         closed_basket_id = st.get("current_basket_id")
         closed_basket_was_long = self._basket_is_long(strat)
+        closed_basket_was_reverse = self._validated_reverse_used(strat)
+        closed_basket_atr30 = st.get("frozen_basket_atr30")
         self._trade_row("basket_close", strat, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
         self._record_daily_realized(strat, pnl, price_row.name)
         if reason == "basket_target" and closed_basket_was_long:
             self._confirm_long_target_portfolio_rearm(strat, price_row.name, closed_basket_id)
-        self._clear_basket_state(strat, reason, str(price_row.name))
+        else:
+            self._cancel_unconfirmed_long_target_rearm_after_other_close(
+                strat, closed_basket_id, reason,
+            )
+        if reason == "basket_stop" and closed_basket_was_long and closed_basket_was_reverse:
+            self._arm_trend_recovery_episode(strat, price_row.name, closed_basket_id, closed_basket_atr30)
+        self._clear_basket_state(
+            strat, reason, str(price_row.name), closed_at_utc=price_row.name,
+        )
         self._save_state()
         return "closed"
 
@@ -2168,11 +5853,44 @@ class S23HorizontalInventoryRunner:
         *,
         basket_atr30: float | None = None,
         execution_time: datetime | pd.Timestamp | None = None,
+        admission_time: datetime | pd.Timestamp | None = None,
         opportunity: dict[str, Any] | None = None,
         apply_portfolio_rearm: bool = True,
         use_confirmed_fill_time: bool = False,
     ) -> bool:
         st = self._st(strat)
+        if not bool(self.params.get("enabled", True)):
+            self._trade_row(
+                "entry_skip", strat, reason="bot_entries_disabled",
+                signal_bar_time=str(price_row.name), note="global_entry_guard",
+            )
+            return False
+        if not self.live_enabled and not self.shadow_enabled:
+            self._trade_row(
+                "entry_skip", strat, reason="execution_modes_disabled",
+                signal_bar_time=str(price_row.name), note="live_and_shadow_disabled",
+            )
+            return False
+        if not isinstance(side, str) or side not in {"LONG", "SHORT"}:
+            self._trade_row(
+                "entry_skip", strat, reason="invalid_entry_side",
+                signal_bar_time=str(price_row.name), note="final_open_guard",
+            )
+            return False
+        if not st["basket"]:
+            basket_block = self._new_basket_block_reason(
+                strat,
+                execution_time if execution_time is not None else utc_now(),
+            )
+            if basket_block:
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    reason=basket_block,
+                    signal_bar_time=str(price_row.name),
+                    note="final_za_new_basket_guard",
+                )
+                return False
         if not st["basket"] and apply_portfolio_rearm:
             portfolio_block = self._portfolio_new_long_basket_block_reason(side, execution_time)
             if portfolio_block:
@@ -2188,6 +5906,14 @@ class S23HorizontalInventoryRunner:
         if entry_block:
             self._trade_row("entry_skip", strat, reason=entry_block, signal_bar_time=str(price_row.name), note="final_open_guard")
             return False
+        if st["basket"] and any(
+            str(pos.get("side") or "") != side for pos in self._basket_rows(strat)
+        ):
+            self._trade_row(
+                "entry_skip", strat, reason="opposite_side_inventory",
+                signal_bar_time=str(price_row.name), note="final_open_guard",
+            )
+            return False
         if note != "reverse_after_stop" and st.get("last_closed_signal_bar") == str(price_row.name):
             self._trade_row("entry_skip", strat, reason="same_bar_reentry_after_close", signal_bar_time=str(price_row.name))
             return False
@@ -2197,12 +5923,95 @@ class S23HorizontalInventoryRunner:
         ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
         bid = float(getattr(info, "bid", price_row["Open"]))
         entry_price = normalize_price(ask if side == "LONG" else bid, digits)
+        if self.live_enabled:
+            host_clock = utc_now()
+            quote_time = self._broker_quote_time(info, host_clock)
+            host_submit_time = pd.Timestamp(host_clock)
+            host_submit_time = (
+                host_submit_time.tz_localize("UTC")
+                if host_submit_time.tzinfo is None
+                else host_submit_time.tz_convert("UTC")
+            )
+            try:
+                max_clock_minutes = float(
+                    self.params.get("max_signal_delay_minutes", 2.0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                max_clock_minutes = math.nan
+            max_clock_delta = (
+                pd.Timedelta(minutes=max_clock_minutes)
+                if math.isfinite(max_clock_minutes) and max_clock_minutes > 0.0
+                else None
+            )
+            if (
+                quote_time is None
+                or max_clock_delta is None
+                or abs(host_submit_time - quote_time) > max_clock_delta
+            ):
+                max_delta_text = (
+                    f"{max_clock_delta.total_seconds():.0f}"
+                    if max_clock_delta is not None
+                    else "invalid"
+                )
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    reason="broker_quote_clock_out_of_bounds",
+                    signal_bar_time=str(price_row.name),
+                    note=(
+                        f"host_submit_utc={dt_text(host_submit_time)};"
+                        f"broker_quote_utc={dt_text(quote_time) if quote_time is not None else None};"
+                        f"max_delta_seconds={max_delta_text}"
+                    ),
+                )
+                return False
+        broker_contract_error = self._broker_entry_contract_error(info, lot=lot, digits=digits)
+        if broker_contract_error is not None:
+            self._trade_row(
+                "entry_skip", strat, reason="broker_symbol_contract_mismatch",
+                signal_bar_time=str(price_row.name), note=broker_contract_error,
+            )
+            return False
         ticket = None
         confirmed = None
+        confirmed_open_epoch = 0
+        confirmed_open_time = None
+        post_open_inventory_anomaly = None
+        post_open_orders_unavailable = False
         if self.live_enabled:
             opportunity_id = str((opportunity or {}).get("opportunity_id") or "")
+            reservation_time = pd.Timestamp(execution_time if execution_time is not None else utc_now())
+            reservation_time = (
+                reservation_time.tz_localize("UTC")
+                if reservation_time.tzinfo is None
+                else reservation_time.tz_convert("UTC")
+            )
             st["pending_open_opportunity_id"] = opportunity_id or f"lane{strat['lane_id']}:{dt_text(utc_now())}"
-            st["pending_open_started_utc"] = dt_text(utc_now())
+            st["pending_open_started_utc"] = dt_text(reservation_time)
+            st["pending_open_expires_utc"] = dt_text(
+                reservation_time + pd.Timedelta(
+                    minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
+                )
+            )
+            st["pending_open_side"] = side
+            st["pending_open_lot"] = lot
+            st["pending_open_symbol"] = symbol
+            st["pending_open_magic"] = int(strat["magic"])
+            st["pending_open_comment"] = str(strat["comment_prefix"])
+            st["pending_open_signal_bar"] = str(price_row.name)
+            st["pending_open_basket_atr30"] = (
+                float(basket_atr30)
+                if basket_atr30 is not None and math.isfinite(float(basket_atr30))
+                else None
+            )
+            entry_policy = dict((opportunity or {}).get("entry_policy") or {})
+            st["pending_open_reverse_used"] = bool(
+                side == "LONG"
+                and str(entry_policy.get("policy_id") or "") == EXPECTED_ENTRY_POLICY_ID
+                and str(entry_policy.get("action") or "") == "reverse_long"
+            )
+            st["pending_open_expected_positions"] = len(self._basket_rows(strat))
+            self._save_state()
             self._trade_row(
                 "open_reserved",
                 strat,
@@ -2213,7 +6022,131 @@ class S23HorizontalInventoryRunner:
                 decision_time=(opportunity or {}).get("decision_time"),
                 executable_at=dt_text(execution_time if execution_time is not None else utc_now()),
             )
-            self._save_state()
+            inventory_block = self._pre_open_live_inventory_block(strat)
+            if inventory_block is not None:
+                reason, details, recoverable = inventory_block
+                self._clear_pending_open(strat)
+                self._set_sync_block(
+                    strat, reason, details, recoverable=recoverable,
+                )
+                self._save_state()
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    opportunity_id=opportunity_id,
+                    side=side,
+                    lot=lot,
+                    reason=reason,
+                    signal_bar_time=str(price_row.name),
+                    note="post_reservation_inventory_guard",
+                )
+                return False
+            account_block = self._pre_open_account_block()
+            if account_block is not None:
+                reason, details, recoverable = account_block
+                self._clear_pending_open(strat)
+                if reason == "trade_permission_precheck_blocked":
+                    st["autotrading_reject_streak"] = int(
+                        st.get("autotrading_reject_streak", 0)
+                    ) + 1
+                    st["open_retry_after_utc"] = dt_text(
+                        pd.Timestamp(utc_now())
+                        + pd.Timedelta(
+                            seconds=float(
+                                self.params.get("trade_permission_retry_seconds", 30.0)
+                            )
+                        )
+                    )
+                    threshold = int(
+                        self.params.get("trade_permission_alert_threshold", 3)
+                    )
+                    self._save_state()
+                    if (
+                        st["autotrading_reject_streak"] >= threshold
+                        and not st.get("autotrading_reject_notified")
+                    ):
+                        delivered = self._notify_manual_action(
+                            strat,
+                            title="trade permission disabled repeatedly",
+                            reason=reason,
+                            action="Check MT5 AutoTrading and account trade permissions.",
+                            key=f"bot23:trade-permission:{strat['id']}",
+                        )
+                        if delivered:
+                            st["autotrading_reject_notified"] = True
+                            self._save_state()
+                elif reason == "account_execution_metadata_unavailable":
+                    st["open_retry_after_utc"] = dt_text(
+                        pd.Timestamp(utc_now())
+                        + pd.Timedelta(
+                            seconds=float(
+                                self.params.get("trade_permission_retry_seconds", 30.0)
+                            )
+                        )
+                    )
+                else:
+                    self._set_sync_block(
+                        strat, reason, details, recoverable=recoverable,
+                    )
+                self._save_state()
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    opportunity_id=opportunity_id,
+                    side=side,
+                    lot=lot,
+                    reason=reason,
+                    signal_bar_time=str(price_row.name),
+                    note="post_reservation_account_guard",
+                )
+                return False
+            # The durable reservation write is part of the submission path and
+            # can cross a time-policy or quote-freshness boundary. Re-evaluate
+            # those live guards at the actual broker-command boundary.
+            actual_submit_time = pd.Timestamp(utc_now())
+            actual_submit_time = (
+                actual_submit_time.tz_localize("UTC")
+                if actual_submit_time.tzinfo is None
+                else actual_submit_time.tz_convert("UTC")
+            )
+            post_reservation_block = None
+            if not st["basket"]:
+                post_reservation_block = self._new_basket_block_reason(
+                    strat, actual_submit_time,
+                )
+            if (
+                post_reservation_block is None
+                and not st["basket"]
+                and apply_portfolio_rearm
+            ):
+                post_reservation_block = self._portfolio_new_long_basket_block_reason(
+                    side, actual_submit_time,
+                )
+            actual_quote_time = self._broker_quote_time(info, actual_submit_time)
+            if (
+                post_reservation_block is None
+                and (
+                    actual_quote_time is None
+                    or max_clock_delta is None
+                    or abs(actual_submit_time - actual_quote_time) > max_clock_delta
+                )
+            ):
+                post_reservation_block = "broker_quote_clock_out_of_bounds"
+            if post_reservation_block is not None:
+                self._clear_pending_open(strat)
+                self._save_state()
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    opportunity_id=opportunity_id,
+                    side=side,
+                    lot=lot,
+                    reason=post_reservation_block,
+                    signal_bar_time=str(price_row.name),
+                    executable_at=dt_text(actual_submit_time),
+                    note="post_reservation_final_guard",
+                )
+                return False
             order_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
             ticket = self.executor.open_position(
                 symbol,
@@ -2225,38 +6158,287 @@ class S23HorizontalInventoryRunner:
                 magic=int(strat["magic"]),
                 comment=str(strat["comment_prefix"]),
                 digits=digits,
+                expected_login=int(MT5_LOGIN),
+                expected_server=str(MT5_SERVER),
+                expected_owned_positions=int(st["pending_open_expected_positions"]),
             )
             if ticket is None:
                 error = str(getattr(self.executor, "last_order_error", None) or "UNKNOWN_OPEN_FAILURE")
             else:
                 error = ""
+            if ticket is None and error in {
+                "ERR|COMMAND_BUSY",
+                "ERR|CLAIM_BUSY",
+                "ERR|LOCK_TIMEOUT",
+                "ERR|WRITE_FAILED",
+                "ERR|CLAIM_FAILED",
+                "ERR|REQUEST_EXPIRED",
+                "ERR|RESPONSE_BUSY",
+                "ERR|INVALID_TIMEOUT",
+            }:
+                self._clear_pending_open(strat)
+                self._set_sync_block(
+                    strat,
+                    "ipc_open_not_published",
+                    {"error": error},
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
+            if ticket is None and error in {
+                "ERR|ACCOUNT_IDENTITY_GUARD",
+                "ERR|ACCOUNT_MODE_GUARD",
+            }:
+                reason = (
+                    "account_identity_mismatch"
+                    if error == "ERR|ACCOUNT_IDENTITY_GUARD"
+                    else "account_margin_mode_mismatch"
+                )
+                self._clear_pending_open(strat)
+                self._set_sync_block(
+                    strat,
+                    reason,
+                    {"atomic_open_guard": error.split("|", 1)[1]},
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
+            if ticket is None and error in {
+                "INVALID_OPEN_REQUEST",
+                "OPEN_POLICY_GUARD",
+                "ERR|OPEN_POLICY_GUARD",
+                "ERR|SYMBOL_ADMISSION_GUARD",
+                "ERR|MARGIN_ADMISSION_GUARD",
+                "ERR|OPEN_INVENTORY_GUARD",
+                "ERR|OPEN_INVENTORY_QUERY",
+                "ERR|OPEN_ORDER_QUERY",
+                "ERR|BAD_OPEN_GUARD",
+                "ERR|BAD_OPEN_TYPE",
+            }:
+                self._clear_pending_open(strat)
+                self._set_sync_block(
+                    strat,
+                    "open_command_contract_rejected",
+                    {"error": error},
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
             positions = self.executor.get_positions(symbol, int(strat["magic"]))
             if positions is None:
                 self._set_sync_block(strat, "positions_unavailable_after_open", {"ticket": int(ticket or 0), "error": error}, recoverable=True)
                 self._save_state()
                 return True
+            post_open_orders = self.executor.get_orders(symbol, int(strat["magic"]))
+            post_open_orders_unavailable = post_open_orders is None
+            post_open_orders = [] if post_open_orders is None else post_open_orders
             owned = [pos for pos in positions if self._owned_position(strat, pos)]
-            known_ids = {int(pos.get("position_identifier") or pos.get("ticket") or 0) for pos in st.get("basket", [])}
-            new_owned = [pos for pos in owned if int(getattr(pos, "identifier", 0) or pos.ticket) not in known_ids]
+            unexpected_same_magic = [
+                pos for pos in positions if not self._owned_position(strat, pos)
+            ]
+            owned_identity = [
+                (pos, self._live_position_identity(pos))
+                for pos in owned
+            ]
+            if any(identity is None for _pos, identity in owned_identity):
+                self._set_sync_block(
+                    strat,
+                    "live_position_identity_invalid",
+                    {"live_rows": len(owned)},
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
+            live_tickets = [
+                int(identity[0])
+                for _pos, identity in owned_identity
+                if identity is not None
+            ]
+            live_position_ids = [
+                int(identity[1])
+                for _pos, identity in owned_identity
+                if identity is not None
+            ]
+            duplicate_tickets = sorted(
+                {value for value in live_tickets if live_tickets.count(value) > 1}
+            )
+            duplicate_position_ids = sorted(
+                {
+                    value
+                    for value in live_position_ids
+                    if live_position_ids.count(value) > 1
+                }
+            )
+            if duplicate_tickets or duplicate_position_ids:
+                self._set_sync_block(
+                    strat,
+                    "live_position_identity_invalid",
+                    {
+                        "duplicate_tickets": duplicate_tickets,
+                        "duplicate_position_ids": duplicate_position_ids,
+                    },
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
+            known_ids = {
+                int(pos["position_identifier"])
+                for pos in self._basket_rows(strat)
+                if isinstance(pos, dict)
+            }
+            new_owned = [
+                pos
+                for pos, identity in owned_identity
+                if identity is not None and identity[1] not in known_ids
+            ]
+            def observed_ticket_list(records: list[Any]) -> list[int]:
+                tickets: set[int] = set()
+                for record in records:
+                    try:
+                        observed_ticket = int(getattr(record, "ticket", 0) or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if observed_ticket > 0:
+                        tickets.add(observed_ticket)
+                return sorted(tickets)
+
+            definitive_permission_reject = bool(
+                error.startswith("ERR|10026")
+                or error.startswith("ERR|10027")
+                or error == "ERR|TRADE_PERMISSION_GUARD"
+            )
+            definitive_market_closed_reject = bool(
+                error == "ERR|10018" or error.startswith("ERR|10018|")
+            )
+            if (
+                ticket is None
+                and (definitive_market_closed_reject or definitive_permission_reject)
+                and (new_owned or unexpected_same_magic or post_open_orders)
+            ):
+                self._clear_pending_open(strat)
+                self._set_sync_block(
+                    strat,
+                    "definitive_open_reject_with_untracked_inventory",
+                    {
+                        "error": error,
+                        "observed_tickets": observed_ticket_list(
+                            [*new_owned, *unexpected_same_magic]
+                        ),
+                        "observed_order_tickets": observed_ticket_list(post_open_orders),
+                    },
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
             if ticket is not None:
-                matches = [pos for pos in new_owned if int(pos.ticket) == int(ticket) or int(getattr(pos, "identifier", 0) or 0) == int(ticket)]
+                matches = [
+                    pos
+                    for pos in new_owned
+                    if self._live_position_identity(pos) is not None
+                    and int(ticket) in self._live_position_identity(pos)
+                ]
                 if len(matches) != 1:
                     self._set_sync_block(strat, "open_success_position_not_confirmed", {"ticket": int(ticket)}, recoverable=False)
                     self._save_state()
                     return True
                 confirmed = matches[0]
+                confirmed_ticket_identity = self._live_position_identity(confirmed)
+                confirmed_position_identifier = (
+                    int(confirmed_ticket_identity[1])
+                    if confirmed_ticket_identity is not None
+                    else 0
+                )
+                extra_new_owned = [
+                    pos
+                    for pos in new_owned
+                    if self._live_position_identity(pos) is not None
+                    and int(self._live_position_identity(pos)[1])
+                    != confirmed_position_identifier
+                ]
+                unexpected_tickets = observed_ticket_list(
+                    [*extra_new_owned, *unexpected_same_magic]
+                )
+                unexpected_order_tickets = observed_ticket_list(post_open_orders)
+                if unexpected_tickets or unexpected_order_tickets:
+                    post_open_inventory_anomaly = {
+                        "confirmed_ticket": int(ticket),
+                        "unexpected_tickets": unexpected_tickets,
+                        "unexpected_order_tickets": unexpected_order_tickets,
+                    }
+            elif not new_owned and (error == "ERR|10018" or error.startswith("ERR|10018|")):
+                retry_clock = pd.Timestamp(
+                    admission_time if admission_time is not None else reservation_time
+                )
+                retry_clock = (
+                    retry_clock.tz_localize("UTC")
+                    if retry_clock.tzinfo is None
+                    else retry_clock.tz_convert("UTC")
+                )
+                st["open_retry_after_utc"] = dt_text(
+                    retry_clock
+                    + pd.Timedelta(
+                        seconds=float(
+                            self.params.get("fixed_hold_market_closed_retry_seconds", 60.0)
+                        )
+                    )
+                )
+                self._clear_pending_open(strat)
+                self._save_state()
+                self._trade_row(
+                    "entry_skip",
+                    strat,
+                    reason="market_closed_open_rejected",
+                    signal_bar_time=str(price_row.name),
+                    note=f"retry_after={st['open_retry_after_utc']}",
+                )
+                return True
             elif not new_owned and (error.startswith("ERR|10026") or error.startswith("ERR|10027")):
                 st["autotrading_reject_streak"] = int(st.get("autotrading_reject_streak", 0)) + 1
-                st["open_retry_after_utc"] = dt_text(utc_now() + pd.Timedelta(seconds=float(self.params.get("trade_permission_retry_seconds", 30.0))))
+                st["open_retry_after_utc"] = dt_text(
+                    reservation_time
+                    + pd.Timedelta(seconds=float(self.params.get("trade_permission_retry_seconds", 30.0)))
+                )
                 self._clear_pending_open(strat)
                 threshold = int(self.params.get("trade_permission_alert_threshold", 3))
-                self._trade_row("entry_skip", strat, reason="trade_permission_rejected", signal_bar_time=str(price_row.name), note=f"streak={st['autotrading_reject_streak']}")
-                if st["autotrading_reject_streak"] >= threshold and not st.get("autotrading_reject_notified"):
-                    st["autotrading_reject_notified"] = True
-                    self._notify_manual_action(strat, title="trade permission rejected repeatedly", reason=error, action="Check MT5 AutoTrading and account trade permissions.", key=f"bot23:trade-permission:{strat['id']}")
                 self._save_state()
+                if st["autotrading_reject_streak"] >= threshold and not st.get("autotrading_reject_notified"):
+                    delivered = self._notify_manual_action(strat, title="trade permission rejected repeatedly", reason=error, action="Check MT5 AutoTrading and account trade permissions.", key=f"bot23:trade-permission:{strat['id']}")
+                    if delivered:
+                        st["autotrading_reject_notified"] = True
+                        self._save_state()
+                self._trade_row("entry_skip", strat, reason="trade_permission_rejected", signal_bar_time=str(price_row.name), note=f"streak={st['autotrading_reject_streak']}")
                 return True
-            elif len(new_owned) == 1:
+            elif not new_owned and error == "ERR|TRADE_PERMISSION_GUARD":
+                st["autotrading_reject_streak"] = int(st.get("autotrading_reject_streak", 0)) + 1
+                st["open_retry_after_utc"] = dt_text(
+                    reservation_time
+                    + pd.Timedelta(seconds=float(self.params.get("trade_permission_retry_seconds", 30.0)))
+                )
+                self._clear_pending_open(strat)
+                threshold = int(self.params.get("trade_permission_alert_threshold", 3))
+                self._save_state()
+                if st["autotrading_reject_streak"] >= threshold and not st.get("autotrading_reject_notified"):
+                    delivered = self._notify_manual_action(
+                        strat,
+                        title="trade permission rejected repeatedly",
+                        reason=error,
+                        action="Check MT5 AutoTrading and account trade permissions.",
+                        key=f"bot23:trade-permission:{strat['id']}",
+                    )
+                    if delivered:
+                        st["autotrading_reject_notified"] = True
+                        self._save_state()
+                self._trade_row(
+                    "entry_skip", strat, reason="trade_permission_rejected",
+                    signal_bar_time=str(price_row.name),
+                    note=f"atomic_guard_streak={st['autotrading_reject_streak']}",
+                )
+                return True
+            elif (
+                len(new_owned) == 1
+                and not unexpected_same_magic
+                and not post_open_orders
+            ):
                 confirmed = new_owned[0]
                 ticket = int(confirmed.ticket)
             else:
@@ -2264,7 +6446,68 @@ class S23HorizontalInventoryRunner:
                 self._set_sync_block(strat, reason, {"tickets": [int(pos.ticket) for pos in new_owned], "error": error}, recoverable=False)
                 self._save_state()
                 return True
-            entry_price = float(confirmed.open_price)
+            try:
+                confirmed_identity = self._live_position_identity(confirmed)
+                if confirmed_identity is None:
+                    raise ValueError("missing live position identity")
+                confirmed_ticket, confirmed_position_id = confirmed_identity
+                confirmed_type = int(confirmed.type)
+                confirmed_lot = float(confirmed.volume)
+                confirmed_entry_price = float(confirmed.open_price)
+                confirmed_open_epoch = int(getattr(confirmed, "open_time", 0) or 0)
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                confirmed_position_id = 0
+                confirmed_type = -1
+                confirmed_lot = math.nan
+                confirmed_entry_price = math.nan
+                confirmed_open_epoch = 0
+            pending_started = parse_ts(st.get("pending_open_started_utc"))
+            confirmed_open_msc = int(
+                getattr(confirmed, "open_time_msc", confirmed_open_epoch * 1000) or 0
+            ) if confirmed is not None else 0
+            confirmed_open_time = (
+                pd.Timestamp(confirmed_open_msc, unit="ms", tz="UTC")
+                if confirmed_open_msc > 0
+                else None
+            )
+            confirmed_time_outside_submission = bool(
+                confirmed_open_time is not None
+                and (
+                    pending_started is None
+                    or confirmed_open_time < pending_started.floor("s") - pd.Timedelta(seconds=2)
+                    or confirmed_open_time > pending_started + pd.Timedelta(
+                        minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
+                    )
+                )
+            )
+            if (
+                confirmed_position_id <= 0
+                or confirmed_type != order_type
+                or not math.isfinite(confirmed_lot)
+                or not math.isclose(confirmed_lot, lot, rel_tol=0.0, abs_tol=1e-9)
+                or not math.isfinite(confirmed_entry_price)
+                or confirmed_entry_price <= 0.0
+                or confirmed_time_outside_submission
+            ):
+                self._set_sync_block(
+                    strat,
+                    "open_confirmation_mismatch",
+                    {
+                        "ticket": int(getattr(confirmed, "ticket", 0) or 0),
+                        "position_identifier": confirmed_position_id,
+                        "expected_type": order_type,
+                        "observed_type": confirmed_type,
+                        "expected_lot": lot,
+                        "observed_lot": str(getattr(confirmed, "volume", None)),
+                        "observed_entry_price": str(getattr(confirmed, "open_price", None)),
+                        "pending_open_started_utc": st.get("pending_open_started_utc"),
+                        "observed_open_time": str(getattr(confirmed, "open_time", None)),
+                    },
+                    recoverable=False,
+                )
+                self._save_state()
+                return True
+            entry_price = confirmed_entry_price
             st["autotrading_reject_streak"] = 0
             st["autotrading_reject_notified"] = False
             st["open_retry_after_utc"] = None
@@ -2273,16 +6516,15 @@ class S23HorizontalInventoryRunner:
             st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
         opportunity_id = str((opportunity or {}).get("opportunity_id") or st.get("pending_entry_opportunity_id") or "")
         entry_time = execution_time if execution_time is not None else (parse_ts(price_row.name) or pd.Timestamp(utc_now())) + pd.Timedelta(minutes=1)
-        confirmed_open_epoch = int(getattr(confirmed, "open_time", 0) or 0) if confirmed is not None else 0
-        fill_time_unavailable = bool(self.live_enabled and use_confirmed_fill_time and confirmed_open_epoch <= 0)
-        if use_confirmed_fill_time and confirmed_open_epoch > 0:
-            entry_time = pd.Timestamp(confirmed_open_epoch, unit="s", tz="UTC")
+        fill_time_unavailable = bool(self.live_enabled and confirmed_open_epoch <= 0)
+        if self.live_enabled and confirmed_open_time is not None:
+            entry_time = confirmed_open_time
         elif fill_time_unavailable:
             entry_time = None
         st["basket"].append(
             {
-                "ticket": ticket,
-                "position_identifier": int(getattr(confirmed, "identifier", 0) or ticket or 0) if confirmed is not None else 0,
+                "ticket": confirmed_ticket if confirmed is not None else ticket,
+                "position_identifier": confirmed_position_id if confirmed is not None else 0,
                 "side": side,
                 "lot": lot,
                 "entry_price": entry_price,
@@ -2298,6 +6540,12 @@ class S23HorizontalInventoryRunner:
             }
         )
         if len(st["basket"]) == 1:
+            entry_policy = dict((opportunity or {}).get("entry_policy") or {})
+            st["reverse_used"] = bool(
+                side == "LONG"
+                and str(entry_policy.get("policy_id") or "") == EXPECTED_ENTRY_POLICY_ID
+                and str(entry_policy.get("action") or "") == "reverse_long"
+            )
             st["basket_peak_pnl_usd"] = None
             st["frozen_basket_atr30"] = float(basket_atr30) if basket_atr30 is not None and math.isfinite(float(basket_atr30)) else None
             self._clear_pending_entry(strat)
@@ -2308,18 +6556,36 @@ class S23HorizontalInventoryRunner:
             self._set_sync_block(
                 strat,
                 "confirmed_fill_time_unavailable",
-                {"ticket": int(ticket or 0), "position_identifier": int(getattr(confirmed, "identifier", 0) or ticket or 0)},
+                {"ticket": int(ticket or 0), "position_identifier": confirmed_position_id},
                 recoverable=True,
             )
             self._trade_row(
                 "position_lifecycle_deferred",
                 strat,
                 ticket=ticket or "",
-                position_identifier=int(getattr(confirmed, "identifier", 0) or ticket or 0),
+                position_identifier=confirmed_position_id,
                 reason="confirmed_fill_time_unavailable",
                 signal_bar_time=str(price_row.name),
                 note="poll time was not substituted; next exact owned-position sync may recover broker open_time",
             )
+        if post_open_inventory_anomaly is not None:
+            self._set_sync_block(
+                strat,
+                "post_open_owned_inventory_delta_invalid",
+                post_open_inventory_anomaly,
+                recoverable=False,
+            )
+        elif post_open_orders_unavailable:
+            self._set_sync_block(
+                strat,
+                "orders_unavailable_after_open",
+                {"confirmed_ticket": int(ticket or 0)},
+                recoverable=True,
+            )
+        # Broker-confirmed lifecycle state is authoritative. Persist it before
+        # the non-authoritative CSV audit so an audit I/O failure cannot leave
+        # a real position outside the durable owned basket.
+        self._save_state()
         self._trade_row(
             "entry",
             strat,
@@ -2336,19 +6602,77 @@ class S23HorizontalInventoryRunner:
             executable_at=dt_text(execution_time if execution_time is not None else utc_now()),
             note=note,
         )
-        self._save_state()
         return True
+
+    def _broker_entry_contract_error(self, info: Any, *, lot: float, digits: int) -> str | None:
+        """Validate the real MT5 symbol contract without affecting exits."""
+        if not self.live_enabled or not isinstance(info, SymbolInfo):
+            return None
+        try:
+            volume_min = float(info.volume_min)
+            volume_max = float(info.volume_max)
+            volume_step = float(info.volume_step)
+            broker_point = float(info.point)
+            broker_contract = float(info.contract_size)
+            broker_tick_value = float(info.tick_value)
+            broker_tick_size = float(info.tick_size)
+            margin_free = float(info.margin_free)
+            configured_point = float(self.params.get("point_size", 0.0))
+            configured_contract = float(self.params.get("contract_size", 0.0))
+            values = (lot, volume_min, volume_max, volume_step, broker_point, configured_point, broker_contract, broker_tick_value, broker_tick_size, margin_free, configured_contract)
+            if not all(math.isfinite(value) for value in values):
+                return "nonfinite_symbol_contract"
+            if volume_min <= 0.0 or volume_max < volume_min or volume_step <= 0.0:
+                return "invalid_volume_contract"
+            if lot < volume_min - 1e-12 or lot > volume_max + 1e-12:
+                return f"lot_out_of_range:lot={lot};min={volume_min};max={volume_max}"
+            steps = (lot - volume_min) / volume_step
+            if not math.isclose(steps, round(steps), rel_tol=0.0, abs_tol=1e-9):
+                return f"lot_off_step:lot={lot};min={volume_min};step={volume_step}"
+            if int(info.digits) != int(digits):
+                return f"digits_mismatch:configured={digits};broker={int(info.digits)}"
+            if configured_point <= 0.0 or not math.isclose(
+                broker_point, configured_point, rel_tol=0.0,
+                abs_tol=max(1e-12, configured_point * 1e-9),
+            ):
+                return f"point_mismatch:configured={configured_point};broker={broker_point}"
+            if configured_contract <= 0.0 or not math.isclose(
+                broker_contract, configured_contract, rel_tol=0.0, abs_tol=1e-9,
+            ):
+                return f"contract_size_mismatch:configured={configured_contract};broker={broker_contract}"
+            expected_tick_value = broker_tick_size * broker_contract
+            if not math.isclose(
+                broker_tick_value, expected_tick_value, rel_tol=1e-6,
+                abs_tol=max(1e-9, expected_tick_value * 1e-6),
+            ):
+                return f"tick_value_mismatch:expected={expected_tick_value};broker={broker_tick_value}"
+            if margin_free <= 0.0:
+                return "free_margin_unavailable"
+            if int(info.trade_mode) != 4 or (int(info.order_mode) & 1) == 0:
+                return f"symbol_not_full_market:trade_mode={int(info.trade_mode)};order_mode={int(info.order_mode)}"
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return "symbol_contract_unavailable"
+        return None
 
     @staticmethod
     def _account_identity_error(account: dict[str, Any]) -> str | None:
         observed_login = account.get("login")
         observed_server = str(account.get("server") or "")
-        if observed_login is None or not observed_server:
+        observed_currency = str(account.get("currency") or "")
+        if observed_login is None or not observed_server or not observed_currency:
             return "account_identity_unavailable; recompile and attach the current BotBridge_s23"
-        if int(observed_login) != int(MT5_LOGIN) or observed_server.casefold() != str(MT5_SERVER).casefold():
+        try:
+            login_matches = int(observed_login) == int(MT5_LOGIN)
+        except (TypeError, ValueError, OverflowError):
+            return "account_identity_invalid"
+        server_matches = observed_server.casefold() == str(MT5_SERVER).casefold()
+        currency_matches = observed_currency == "USD"
+        if not login_matches or not server_matches or not currency_matches:
             return (
-                f"observed_login={int(observed_login)} observed_server={observed_server} "
-                f"expected_login={int(MT5_LOGIN)} expected_server={MT5_SERVER}"
+                "account_identity_mismatch:"
+                f"login_match={str(login_matches).lower()};"
+                f"server_match={str(server_matches).lower()}"
+                f";currency_match={str(currency_matches).lower()}"
             )
         return None
 
@@ -2370,6 +6694,82 @@ class S23HorizontalInventoryRunner:
                 )
         return None
 
+    def _broker_quote_time(
+        self, info: Any, poll_time: datetime | pd.Timestamp,
+    ) -> pd.Timestamp | None:
+        quote_time_msc = getattr(info, "quote_time_msc", None)
+        if quote_time_msc is not None:
+            try:
+                value = int(quote_time_msc)
+                return pd.Timestamp(value, unit="ms", tz="UTC") if value > 0 else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if self.live_enabled:
+            return None
+        stamp = pd.Timestamp(poll_time)
+        return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+    def _set_market_closed_close_retry(
+        self, strat: dict[str, Any], quote_time: pd.Timestamp,
+    ) -> None:
+        self._st(strat)["time_close_retry_after_utc"] = dt_text(
+            quote_time + pd.Timedelta(
+                seconds=float(
+                    self.params.get("fixed_hold_market_closed_retry_seconds", 60.0)
+                )
+            )
+        )
+        self._save_state()
+
+    def _validated_time_close_retry_after(
+        self,
+        strat: dict[str, Any],
+        quote_time: pd.Timestamp | None,
+    ) -> pd.Timestamp | None:
+        """Return a writer-bounded close retry or reset corrupt delay state."""
+        st = self._st(strat)
+        raw_retry_after = st.get("time_close_retry_after_utc")
+        retry_after = (
+            parse_ts(raw_retry_after)
+            if isinstance(raw_retry_after, str)
+            else None
+        )
+        retry_seconds = max(
+            float(self.params.get("fixed_hold_market_closed_retry_seconds", 60.0)),
+            float(self.params.get("trade_permission_retry_seconds", 30.0)),
+        )
+        retry_bound = (
+            quote_time
+            + pd.Timedelta(
+                seconds=retry_seconds
+            )
+            if quote_time is not None
+            else None
+        )
+        valid = bool(
+            raw_retry_after is None
+            or (
+                isinstance(raw_retry_after, str)
+                and retry_after is not None
+                and (retry_bound is None or retry_after <= retry_bound)
+            )
+        )
+        if valid:
+            return retry_after
+        st["time_close_retry_after_utc"] = None
+        self._trade_row(
+            "position_lifecycle_recovered",
+            strat,
+            reason="time_close_retry_state_invalid_reset",
+            note=(
+                f"previous_retry={raw_retry_after!r};"
+                f"quote_time={dt_text(quote_time) if quote_time is not None else None};"
+                f"max_future={dt_text(retry_bound) if retry_bound is not None else None}"
+            ),
+        )
+        self._save_state()
+        return None
+
     def _monitor_open_basket(self, strat: dict[str, Any], info: Any, price_row: pd.Series, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         st = self._st(strat)
         if st.get("pending_close_reason"):
@@ -2378,6 +6778,13 @@ class S23HorizontalInventoryRunner:
             return False
         at_utc = pd.Timestamp(poll_time if poll_time is not None else utc_now())
         at_utc = at_utc.tz_localize("UTC") if at_utc.tzinfo is None else at_utc.tz_convert("UTC")
+        quote_time = self._broker_quote_time(info, at_utc)
+        retry_after = self._validated_time_close_retry_after(strat, quote_time)
+        if retry_after is not None:
+            if quote_time is None or quote_time < retry_after:
+                return True
+            st["time_close_retry_after_utc"] = None
+            self._save_state()
         bid = float(getattr(info, "bid", price_row["Close"]))
         ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
         pnl = self._basket_pnl(strat, bid, ask)
@@ -2387,10 +6794,59 @@ class S23HorizontalInventoryRunner:
             self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
             self._save_state()
             return True
-        held = max(0, int((at_utc - min(valid_entries)).total_seconds() // 60))
+        lifecycle_time = quote_time
+        if lifecycle_time is None and not self.live_enabled:
+            lifecycle_time = at_utc
+        held = max(
+            0,
+            int(
+                (
+                    (lifecycle_time if lifecycle_time is not None else min(valid_entries))
+                    - min(valid_entries)
+                ).total_seconds()
+                // 60
+            ),
+        )
         previous_peak = st.get("basket_peak_pnl_usd")
-        peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
+        previous_peak_is_number = (
+            isinstance(previous_peak, (int, float))
+            and not isinstance(previous_peak, bool)
+        )
+        previous_peak_value = float(previous_peak) if previous_peak_is_number else math.nan
+        if previous_peak is None or not math.isfinite(previous_peak_value):
+            peak = float(pnl)
+            if previous_peak is not None:
+                self._trade_row(
+                    "position_lifecycle_recovered",
+                    strat,
+                    reason="basket_peak_pnl_invalid_reset",
+                    note=f"previous_peak={previous_peak!r};reset_peak={peak}",
+                )
+        else:
+            peak = max(previous_peak_value, float(pnl))
         st["basket_peak_pnl_usd"] = peak
+        raw_frozen_atr30 = st.get("frozen_basket_atr30")
+        frozen_atr30_is_number = (
+            isinstance(raw_frozen_atr30, (int, float))
+            and not isinstance(raw_frozen_atr30, bool)
+        )
+        frozen_atr30 = (
+            None
+            if raw_frozen_atr30 is None
+            else float(raw_frozen_atr30) if frozen_atr30_is_number else math.nan
+        )
+        if raw_frozen_atr30 is not None and (
+            not math.isfinite(frozen_atr30)
+            or frozen_atr30 <= 0.0
+        ):
+            st["frozen_basket_atr30"] = None
+            self._trade_row(
+                "position_lifecycle_recovered",
+                strat,
+                reason="frozen_basket_atr30_invalid_reset",
+                note=f"previous_atr30={raw_frozen_atr30!r};fallback=fixed_exit_thresholds",
+            )
+            self._save_state()
         target, stop, ftp_peak = self._exit_thresholds(strat)
         reason = None
         if pnl >= target:
@@ -2403,8 +6859,10 @@ class S23HorizontalInventoryRunner:
             reason = "max_hold"
         if reason:
             row = price_row.copy()
-            row.name = at_utc
-            self._close_basket(strat, reason, row, pnl)
+            row.name = quote_time if quote_time is not None else at_utc
+            result = self._close_basket(strat, reason, row, pnl)
+            if result == "market_closed" and quote_time is not None:
+                self._set_market_closed_close_retry(strat, quote_time)
             return True
         return False
 
@@ -2455,11 +6913,76 @@ class S23HorizontalInventoryRunner:
         # Host/poll clock drift must neither advance nor delay the deadline.
         if quote_time < due:
             return False if at_utc < due else True
-        retry_after = parse_ts(st.get("time_close_retry_after_utc"))
+        raw_retry_after = st.get("time_close_retry_after_utc")
+        retry_after = self._validated_time_close_retry_after(strat, quote_time)
+        raw_defer_started = st.get("time_close_defer_started_utc")
+        defer_started = parse_ts(raw_defer_started) if isinstance(raw_defer_started, str) else None
+        raw_last_quote_msc = st.get("time_close_last_quote_msc")
+        raw_stable_count = st.get("time_close_stable_count")
+        raw_wide_seen = st.get("time_close_wide_seen")
+        try:
+            last_quote_msc = (
+                None if raw_last_quote_msc is None else int(raw_last_quote_msc)
+            )
+            stable_count = int(raw_stable_count)
+            close_state_valid = (
+                (
+                    raw_last_quote_msc is None
+                    or (
+                        isinstance(raw_last_quote_msc, int)
+                        and not isinstance(raw_last_quote_msc, bool)
+                        and last_quote_msc >= 0
+                        and last_quote_msc <= quote_time_msc
+                    )
+                )
+                and not isinstance(raw_stable_count, bool)
+                and isinstance(raw_stable_count, int)
+                and stable_count >= 0
+                and isinstance(raw_wide_seen, bool)
+                and (
+                    raw_defer_started is None
+                    or (
+                        isinstance(raw_defer_started, str)
+                        and defer_started is not None
+                        and defer_started <= quote_time
+                    )
+                )
+                and (
+                    (raw_wide_seen and defer_started is not None)
+                    or (
+                        not raw_wide_seen
+                        and defer_started is None
+                        and stable_count == 0
+                    )
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            last_quote_msc = None
+            stable_count = 0
+            close_state_valid = False
+        if not close_state_valid:
+            st["time_close_defer_started_utc"] = None
+            st["time_close_last_quote_msc"] = None
+            st["time_close_stable_count"] = 0
+            st["time_close_wide_seen"] = False
+            defer_started = None
+            last_quote_msc = None
+            stable_count = 0
+            self._trade_row(
+                "position_lifecycle_recovered",
+                strat,
+                reason="fixed_hold_close_state_invalid_reset",
+                signal_bar_time=str(due),
+                note=(
+                    f"retry={raw_retry_after!r};defer={raw_defer_started!r};"
+                    f"last_quote={raw_last_quote_msc!r};stable={raw_stable_count!r};"
+                    f"wide={raw_wide_seen!r}"
+                ),
+            )
+            self._save_state()
         if retry_after is not None and quote_time < retry_after:
             return True
-        last_quote_msc = st.get("time_close_last_quote_msc")
-        if last_quote_msc is not None and quote_time_msc <= int(last_quote_msc):
+        if last_quote_msc is not None and quote_time_msc <= last_quote_msc:
             return True
         st["time_close_last_quote_msc"] = quote_time_msc
         bid = float(getattr(info, "bid"))
@@ -2468,7 +6991,6 @@ class S23HorizontalInventoryRunner:
         spread_points = max(0.0, ask - bid) / point if point > 0 else math.inf
         spread_cap = float(self.params.get("fixed_hold_close_max_spread_points", 300.0))
         wide_seen = bool(st.get("time_close_wide_seen"))
-        defer_started = parse_ts(st.get("time_close_defer_started_utc"))
         if not wide_seen and spread_points > spread_cap:
             st["time_close_wide_seen"] = True
             st["time_close_defer_started_utc"] = dt_text(quote_time)
@@ -2489,7 +7011,7 @@ class S23HorizontalInventoryRunner:
             )
             if quote_time < force_after:
                 if spread_points <= spread_cap:
-                    st["time_close_stable_count"] = int(st.get("time_close_stable_count") or 0) + 1
+                    st["time_close_stable_count"] = stable_count + 1
                 else:
                     st["time_close_stable_count"] = 0
                 stable_required = int(self.params.get("fixed_hold_close_stable_polls", 3))
@@ -2515,6 +7037,737 @@ class S23HorizontalInventoryRunner:
     def _monitor_midday_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         return self._monitor_fixed_hold_position(strat, info, poll_time, "midday_fixed_hold")
 
+    def _monitor_pre_eu30_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        return self._monitor_fixed_hold_position(strat, info, poll_time, "pre_eu30_fixed_hold")
+
+    def _monitor_session_vwap_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        return self._monitor_fixed_hold_position(strat, info, poll_time, "session_vwap_fixed_hold")
+
+    def _session_vwap_quote_time(
+        self, info: Any, poll_time: datetime | pd.Timestamp,
+    ) -> pd.Timestamp | None:
+        return self._broker_quote_time(info, poll_time)
+
+    def _refresh_session_vwap_history(self, info: Any, poll_time: pd.Timestamp) -> None:
+        """Advance history acquisition without admitting an order."""
+        if not bool(self.params.get("session_vwap_enabled", False)):
+            self._session_vwap_snapshot = None
+            return
+        quote_time = self._session_vwap_quote_time(info, poll_time)
+        if quote_time is None:
+            self._session_vwap_snapshot = None
+            return
+        self._session_vwap_snapshot = self.session_vwap_history.advance(quote_time)
+        if self._session_vwap_snapshot.reason == "completed_bar_revision_conflict":
+            details = {
+                "quote_time": dt_text(quote_time),
+                "history_reason": self._session_vwap_snapshot.reason,
+            }
+            for strat in self._session_vwap_strategies():
+                self._set_sync_block(
+                    strat,
+                    "session_vwap_completed_bar_revision_conflict",
+                    details,
+                    recoverable=False,
+                )
+            self._save_state()
+
+    def _process_session_vwap_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        quote_time = self._session_vwap_quote_time(info, poll_time)
+        session_active = bool(
+            self.params.get("session_vwap_enabled", False)
+            and quote_time is not None
+            and in_session_vwap_entry_session(quote_time)
+        )
+        for strat in self._session_vwap_strategies():
+            entry_enabled = bool(strat.get("enabled", True))
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                session_active or st.get("basket") or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason") or st.get("sync_block_new_entries")
+                or st.get("session_vwap_retry_opportunity")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="session_vwap_sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            exit_blocked = self._monitor_session_vwap_position(strat, info, poll_time)
+            readiness[lane_id] = entry_enabled and not exit_blocked
+        return readiness
+
+    def _process_session_vwap_retries(
+        self,
+        info: Any,
+        admission_time: pd.Timestamp,
+        readiness: dict[int, bool],
+        *,
+        execution_time: pd.Timestamp | None = None,
+    ) -> None:
+        """Retry persisted, previously submitted session-VWAP opportunities.
+
+        The original signal identity is lane-local so a newer completed M1 or
+        a runner restart cannot silently replace it. Ambiguous OPEN outcomes
+        remain blocked by pending_open/sync state and are never resent until a
+        later owned-inventory reconciliation proves the lane safe again.
+        """
+        point = float(self.params.get("point_size", 0.001))
+        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+        spread_cap = float(self.params.get("max_entry_spread_points", 300.0))
+        for strat in self._session_vwap_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            st = self._st(strat)
+            retry = st.get("session_vwap_retry_opportunity")
+            if retry is None:
+                continue
+            if not isinstance(retry, dict):
+                st["session_vwap_retry_opportunity"] = None
+                self._trade_row(
+                    "session_vwap_decision",
+                    strat,
+                    reason="retry_state_invalid",
+                    note=f"non_object_retry={retry!r};discarded",
+                )
+                self._save_state()
+                continue
+            identity = self._session_vwap_retry_identity(retry)
+            opportunity = identity["opportunity"]
+            signal_bar = identity["signal_bar"]
+            release_time = identity["release_time"]
+            expires = identity["expires"]
+            side = str(identity["side"])
+            opportunity_id = str(identity["opportunity_id"])
+            invalid = not bool(identity["valid"])
+            if not invalid and admission_time < release_time:
+                # A canonical persisted retry may be loaded before its M1 is
+                # executable after a clock rollback. Preserve it untouched
+                # until the original release boundary is reached.
+                continue
+            closed_cutoff, closed_state_invalid = self._session_vwap_closed_cutoff(side, admission_time)
+            stale_after_close = bool(
+                not invalid
+                and not closed_state_invalid
+                and closed_cutoff is not None
+                and release_time <= closed_cutoff
+            )
+            if invalid or closed_state_invalid or admission_time > expires or stale_after_close:
+                st["session_vwap_retry_opportunity"] = None
+                self._trade_row(
+                    "session_vwap_decision",
+                    strat,
+                    opportunity_id=opportunity_id,
+                    side=side,
+                    reason=(
+                        "retry_state_invalid" if invalid
+                        else "last_closed_state_invalid" if closed_state_invalid
+                        else "stale_same_direction_after_close" if stale_after_close
+                        else "retry_expired"
+                    ),
+                    signal_bar_time=dt_text(signal_bar) if signal_bar is not None else retry.get("signal_bar_time"),
+                )
+                self._save_state()
+                continue
+            if any(
+                str(pos.get("opportunity_id") or "") == opportunity_id
+                for pos in self._basket_rows(strat)
+            ):
+                st["session_vwap_retry_opportunity"] = None
+                self._save_state()
+                continue
+            if (
+                st.get("pending_open_opportunity_id")
+                or st.get("sync_block_new_entries")
+                or not readiness.get(int(strat["lane_id"]), False)
+                or spread_points > spread_cap
+            ):
+                continue
+            raw_retry_after = st.get("open_retry_after_utc")
+            retry_after = (
+                parse_ts(raw_retry_after)
+                if isinstance(raw_retry_after, str)
+                else None
+            )
+            if raw_retry_after is not None and retry_after is None:
+                st["session_vwap_retry_opportunity"] = None
+                self._trade_row(
+                    "session_vwap_decision",
+                    strat,
+                    opportunity_id=opportunity_id,
+                    side=side,
+                    reason="open_retry_state_invalid",
+                    signal_bar_time=dt_text(signal_bar),
+                    note=f"previous_retry={raw_retry_after!r};retry_discarded",
+                )
+                self._save_state()
+                continue
+            if retry_after is not None and admission_time < retry_after:
+                continue
+            price_row = pd.Series(
+                {"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)},
+                name=signal_bar,
+            )
+            opened = self._open_entry(
+                strat,
+                side,
+                price_row,
+                info,
+                note=str(retry.get("note") or "session_vwap_retry"),
+                execution_time=execution_time if execution_time is not None else admission_time,
+                admission_time=admission_time,
+                opportunity=opportunity,
+                apply_portfolio_rearm=False,
+                use_confirmed_fill_time=True,
+            )
+            confirmed_open = any(
+                str(pos.get("opportunity_id") or "") == opportunity_id
+                for pos in self._basket_rows(strat)
+            )
+            if confirmed_open:
+                st["session_vwap_retry_opportunity"] = None
+                decision_reason = "entry_opened_from_retry"
+            elif st.get("pending_open_opportunity_id") or st.get("sync_block_new_entries"):
+                decision_reason = "entry_action_unconfirmed"
+            elif st.get("open_retry_after_utc"):
+                decision_reason = "entry_retry_scheduled"
+            else:
+                st["session_vwap_retry_opportunity"] = None
+                decision_reason = "entry_retry_not_opened" if not opened else "entry_action_unconfirmed"
+            self._trade_row(
+                "session_vwap_decision",
+                strat,
+                opportunity_id=opportunity_id,
+                side=side,
+                reason=decision_reason,
+                signal_bar_time=dt_text(signal_bar),
+            )
+            self._save_state()
+
+    def _process_session_vwap_entries(self, info: Any, poll_time: pd.Timestamp, readiness: dict[int, bool]) -> None:
+        if not bool(self.params.get("session_vwap_enabled", False)):
+            return
+        host_time = pd.Timestamp(poll_time)
+        host_time = host_time.tz_localize("UTC") if host_time.tzinfo is None else host_time.tz_convert("UTC")
+        quote_time = self._session_vwap_quote_time(info, poll_time)
+        if quote_time is None:
+            return
+        # Admission must fail closed if either the host poll clock or the
+        # broker quote clock proves the signal expired.  Broker time remains
+        # the execution/submission clock used to confirm the resulting fill.
+        admission_time = max(host_time, quote_time)
+        self._process_session_vwap_retries(
+            info, admission_time, readiness, execution_time=quote_time,
+        )
+        snapshot = self._session_vwap_snapshot
+        if snapshot is None:
+            snapshot = self.session_vwap_history.advance(quote_time)
+            self._session_vwap_snapshot = snapshot
+        routing = self.state["routing"]
+        unavailable_bar = dt_text(quote_time.floor("min") - pd.Timedelta(minutes=1))
+        primary = self._session_vwap_strategies()[0]
+        if not snapshot.ready or not snapshot.fresh or snapshot.bars.empty:
+            if routing.get("session_vwap_last_unavailable_bar") != unavailable_bar:
+                routing["session_vwap_last_unavailable_bar"] = unavailable_bar
+                self._trade_row(
+                    "session_vwap_decision", primary, reason="not_evaluated_data_unavailable",
+                    signal_bar_time=unavailable_bar,
+                    note=f"history={snapshot.reason};failures={snapshot.failures};retry_after={snapshot.retry_after_seconds:.1f}s",
+                )
+                self._save_state()
+            return
+        price_row = snapshot.bars.iloc[-1]
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        if admission_time < release_time:
+            return
+        if not in_session_vwap_entry_session(release_time):
+            return
+        history_issue = session_vwap_entry_history_issue(
+            snapshot.bars,
+            quote_time,
+            coverage_days=int(self.params.get("session_vwap_lookback_calendar_days", 20)),
+            atr_period=int(self.params.get("session_vwap_atr_period", 60)),
+        )
+        if history_issue is not None:
+            self.session_vwap_history.request_rebackfill()
+            unavailable_bar = dt_text(signal_bar)
+            if routing.get("session_vwap_last_unavailable_bar") != unavailable_bar:
+                routing["session_vwap_last_unavailable_bar"] = unavailable_bar
+                self._trade_row(
+                    "session_vwap_decision",
+                    primary,
+                    reason="not_evaluated_data_unavailable",
+                    signal_bar_time=unavailable_bar,
+                    note=f"history={history_issue}",
+                )
+                self._save_state()
+            return
+        signal_bar_text = dt_text(signal_bar)
+        previous_evaluated = routing.get("session_vwap_last_evaluated_bar")
+        if previous_evaluated is not None and (
+            not isinstance(previous_evaluated, str)
+            or parse_ts(previous_evaluated) is None
+        ):
+            details = {
+                "previous_last_evaluated_bar": repr(previous_evaluated),
+                "current_signal_bar": signal_bar_text,
+            }
+            for strat in self._session_vwap_strategies():
+                self._set_sync_block(
+                    strat,
+                    "session_vwap_decision_receipt_state_invalid",
+                    details,
+                    recoverable=False,
+                )
+            self._trade_row(
+                "session_vwap_decision",
+                primary,
+                reason="decision_receipt_state_invalid",
+                signal_bar_time=signal_bar_text,
+                note=f"previous_last_evaluated_bar={previous_evaluated!r};current_bar_not_consumed",
+            )
+            self._save_state()
+            return
+        previous_evaluated_bar = (
+            parse_ts(previous_evaluated)
+            if isinstance(previous_evaluated, str)
+            else None
+        )
+        if (
+            previous_evaluated_bar is not None
+            and previous_evaluated_bar >= signal_bar
+        ):
+            if previous_evaluated_bar > signal_bar:
+                details = {
+                    "previous_last_evaluated_bar": dt_text(previous_evaluated_bar),
+                    "current_signal_bar": signal_bar_text,
+                    "broker_quote_time": dt_text(quote_time),
+                }
+                for strat in self._session_vwap_strategies():
+                    self._set_sync_block(
+                        strat,
+                        "session_vwap_decision_receipt_future",
+                        details,
+                        recoverable=False,
+                    )
+                self._trade_row(
+                    "session_vwap_decision",
+                    primary,
+                    reason="decision_receipt_future",
+                    signal_bar_time=signal_bar_text,
+                    note=json.dumps(details, ensure_ascii=True, sort_keys=True),
+                )
+                self._save_state()
+            return
+        try:
+            side, signal_row = latest_session_vwap_signal(
+                snapshot.bars,
+                quantile=float(self.params.get("session_vwap_quantile", 0.90)),
+                lookback_days=int(self.params.get("session_vwap_lookback_calendar_days", 20)),
+            )
+        except (TypeError, ValueError, OverflowError, FloatingPointError, pd.errors.DataError) as exc:
+            self.session_vwap_history.request_rebackfill()
+            if routing.get("session_vwap_last_unavailable_bar") != signal_bar_text:
+                routing["session_vwap_last_unavailable_bar"] = signal_bar_text
+                self._trade_row(
+                    "session_vwap_decision",
+                    primary,
+                    reason="not_evaluated_signal_error",
+                    signal_bar_time=signal_bar_text,
+                    note=f"{type(exc).__name__}:{exc}",
+                )
+                self._save_state()
+            return
+        # Commit the durable receipt only after the complete signal calculation
+        # has produced an outcome. A calculation failure must retry this bar.
+        routing["session_vwap_last_evaluated_bar"] = signal_bar_text
+        self._save_state()
+        if side is None:
+            self._trade_row("session_vwap_decision", primary, reason="no_signal", signal_bar_time=signal_bar_text)
+            return
+        opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|session_vwap_extension_fade|{side}"
+        total_positions = sum(len(self._basket_rows(row)) for row in self._session_vwap_strategies())
+        point = float(self.params.get("point_size", 0.001))
+        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+        stale = stale_signal_decision(
+            str(price_row.name), timeframe_hours=1.0 / 60.0,
+            max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+            now_utc=admission_time,
+            options=self.safety,
+        )
+        common_reason = ""
+        if total_positions >= int(self.params.get("session_vwap_max_positions", 5)):
+            common_reason = "session_vwap_capacity_full"
+        elif spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+            common_reason = "spread_guard"
+        elif stale.stale:
+            common_reason = "stale_signal_skip"
+        closed_cutoff, closed_state_invalid = self._session_vwap_closed_cutoff(side, admission_time)
+        if not common_reason and closed_state_invalid:
+            common_reason = "last_closed_state_invalid"
+        elif not common_reason and closed_cutoff is not None and release_time <= closed_cutoff:
+            common_reason = "stale_same_direction_after_close"
+        for strat in self._session_vwap_strategies():
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            reason = common_reason
+            if not reason and not readiness.get(lane_id, False):
+                reason = "exit_or_sync_block"
+            elif not reason and st.get("session_vwap_retry_opportunity"):
+                reason = "session_vwap_retry_pending"
+            elif not reason and (st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1))):
+                reason = "lane_capacity_full"
+            if reason:
+                self._trade_row(
+                    "session_vwap_decision", strat, opportunity_id=opportunity_id,
+                    side=side, reason=reason, signal_bar_time=signal_bar_text,
+                )
+                continue
+            opportunity = {
+                "opportunity_id": opportunity_id, "source": "session_vwap_extension_fade",
+                "side": side, "raw_side": side, "effective_side": side,
+                "event_time": signal_bar_text, "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time), "decision_time": dt_text(admission_time),
+                "executable_at": dt_text(quote_time),
+            }
+            note = "session_vwap_q90_20d_atr60_hold_15m"
+            if signal_row is not None:
+                note += f";z={float(signal_row['Z']):.6f};q90={float(signal_row['Q90']):.6f}"
+            st["session_vwap_retry_opportunity"] = {
+                "opportunity": opportunity,
+                "signal_bar_time": signal_bar_text,
+                "expires_utc": dt_text(
+                    release_time + pd.Timedelta(
+                        minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
+                    )
+                ),
+                "note": note,
+            }
+            self._save_state()
+            opened = self._open_entry(
+                strat, side, price_row, info, note=note, execution_time=quote_time,
+                admission_time=admission_time,
+                opportunity=opportunity, apply_portfolio_rearm=False, use_confirmed_fill_time=True,
+            )
+            confirmed_open = any(
+                str(pos.get("opportunity_id") or "") == opportunity_id
+                for pos in self._basket_rows(strat)
+            )
+            retry_scheduled = bool(
+                not confirmed_open
+                and not self._st(strat).get("pending_open_opportunity_id")
+                and self._st(strat).get("open_retry_after_utc")
+            )
+            if retry_scheduled:
+                # The lane-local retry record retains the original bar across
+                # newer M1 bars and restarts. Global evaluated identity stays
+                # consumed so the first submission is never duplicated.
+                pass
+            elif confirmed_open:
+                st["session_vwap_retry_opportunity"] = None
+                self._save_state()
+            elif not st.get("pending_open_opportunity_id") and not st.get("sync_block_new_entries"):
+                st["session_vwap_retry_opportunity"] = None
+                self._save_state()
+            if confirmed_open:
+                decision_reason = "entry_opened"
+            elif retry_scheduled:
+                decision_reason = "entry_retry_scheduled"
+            elif opened:
+                decision_reason = "entry_action_unconfirmed"
+            else:
+                decision_reason = "entry_not_opened"
+            self._trade_row(
+                "session_vwap_decision", strat, opportunity_id=opportunity_id, side=side,
+                reason=decision_reason, signal_bar_time=signal_bar_text,
+            )
+            return
+        self._trade_row(
+            "session_vwap_decision", primary, opportunity_id=opportunity_id,
+            side=side, reason="all_lanes_unavailable", signal_bar_time=signal_bar_text,
+        )
+
+    def _monitor_t0530_edge_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
+        return self._monitor_fixed_hold_position(strat, info, poll_time, "t0530_edge_fixed_hold")
+
+    def _process_t0530_edge_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        group_enabled = bool(self.params.get("t0530_edge_enabled", False))
+        session_active = in_t0530_edge_release_session(poll_time)
+        for strat in self._t0530_edge_strategies():
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                (group_enabled and session_active)
+                or st.get("basket")
+                or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason")
+                or st.get("sync_block_new_entries")
+                or st.get("t0530_edge_retry_opportunity")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="t0530_edge_sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            exit_blocked = self._monitor_t0530_edge_position(strat, info, poll_time)
+            readiness[lane_id] = bool(group_enabled and strat.get("enabled", True) and not exit_blocked)
+        return readiness
+
+    def _attempt_t0530_edge_open(
+        self,
+        strat: dict[str, Any],
+        opportunity: dict[str, Any],
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        note: str,
+    ) -> bool:
+        st = self._st(strat)
+        opened = self._open_entry(
+            strat, str(opportunity["side"]), price_row, info, note=note,
+            execution_time=poll_time, admission_time=poll_time,
+            opportunity=opportunity, apply_portfolio_rearm=False,
+            use_confirmed_fill_time=True,
+        )
+        opportunity_id = str(opportunity["opportunity_id"])
+        confirmed = any(
+            str(position.get("opportunity_id") or "") == opportunity_id
+            for position in self._basket_rows(strat)
+        )
+        if confirmed:
+            st["t0530_edge_retry_opportunity"] = None
+            self._save_state()
+        elif not st.get("pending_open_opportunity_id") and not st.get("open_retry_after_utc"):
+            st["t0530_edge_retry_opportunity"] = None
+            self._save_state()
+        return bool(opened or confirmed)
+
+    def _process_t0530_edge_retries(
+        self,
+        info: Any,
+        poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+        price_row: pd.Series,
+    ) -> bool:
+        for strat in self._t0530_edge_strategies():
+            st = self._st(strat)
+            retry = st.get("t0530_edge_retry_opportunity")
+            if retry is None:
+                continue
+            if not isinstance(retry, dict) or not isinstance(retry.get("opportunity"), dict):
+                st["t0530_edge_retry_opportunity"] = None
+                self._set_sync_block(strat, "t0530_edge_retry_state_invalid", {"retry": repr(retry)}, recoverable=False)
+                self._save_state()
+                return True
+            opportunity = retry["opportunity"]
+            side = str(opportunity.get("side") or "")
+            raw_event_time = opportunity.get("event_time")
+            raw_release_time = opportunity.get("release_time")
+            raw_available_time = opportunity.get("available_time")
+            raw_expiry = retry.get("expires_utc")
+            event_time = parse_ts(raw_event_time) if isinstance(raw_event_time, str) else None
+            release_time = parse_ts(raw_release_time) if isinstance(raw_release_time, str) else None
+            available_time = parse_ts(raw_available_time) if isinstance(raw_available_time, str) else None
+            expiry = parse_ts(raw_expiry) if isinstance(raw_expiry, str) else None
+            raw_group_receipt = self.state["routing"].get("t0530_edge_last_evaluated_bar")
+            group_receipt = parse_ts(raw_group_receipt) if isinstance(raw_group_receipt, str) else None
+            expected_id = (
+                f"{self.params.get('mt5_symbol', self.params['symbol'])}|"
+                f"{raw_event_time}|t0530_edge_break_fade|{side}"
+            )
+            identity_valid = (
+                side in {"LONG", "SHORT"}
+                and opportunity.get("source") == "t0530_edge_break_fade"
+                and opportunity.get("opportunity_id") == expected_id
+                and event_time is not None
+                and release_time is not None
+                and available_time is not None
+                and expiry is not None
+                and raw_event_time == dt_text(event_time)
+                and raw_release_time == dt_text(release_time)
+                and raw_available_time == dt_text(available_time)
+                and raw_expiry == dt_text(expiry)
+                and group_receipt is not None
+                and raw_group_receipt == dt_text(group_receipt)
+                and group_receipt == event_time
+                and release_time == event_time + pd.Timedelta(minutes=1)
+                and available_time == release_time
+                and expiry == release_time + pd.Timedelta(
+                    minutes=int(self.params.get("t0530_edge_max_signal_delay_minutes", 5))
+                )
+                and in_t0530_edge_release_session(release_time)
+            )
+            if not identity_valid:
+                st["t0530_edge_retry_opportunity"] = None
+                self._set_sync_block(strat, "t0530_edge_retry_identity_invalid", recoverable=False)
+                self._save_state()
+                return True
+            if st.get("basket"):
+                st["t0530_edge_retry_opportunity"] = None
+                self._save_state()
+                continue
+            if poll_time > expiry:
+                st["t0530_edge_retry_opportunity"] = None
+                st["open_retry_after_utc"] = None
+                self._trade_row("t0530_edge_decision", strat, opportunity_id=expected_id, side=side, reason="retry_expired")
+                self._save_state()
+                continue
+            if poll_time < release_time:
+                return True
+            if st.get("pending_open_opportunity_id"):
+                return True
+            raw_retry_after = st.get("open_retry_after_utc")
+            retry_after = parse_ts(raw_retry_after) if isinstance(raw_retry_after, str) else None
+            if (
+                raw_retry_after is not None
+                and (
+                    retry_after is None
+                    or raw_retry_after != dt_text(retry_after)
+                    or retry_after > expiry
+                )
+            ):
+                st["t0530_edge_retry_opportunity"] = None
+                st["open_retry_after_utc"] = None
+                self._set_sync_block(strat, "t0530_edge_retry_clock_invalid", recoverable=False)
+                self._save_state()
+                return True
+            if retry_after is not None and poll_time < retry_after:
+                return True
+            if not readiness.get(int(strat["lane_id"]), False):
+                return True
+            self._attempt_t0530_edge_open(
+                strat, opportunity, price_row, info, poll_time,
+                str(retry.get("note") or "t0530_edge_w15_hold_15m"),
+            )
+            return True
+        return False
+
+    def _process_t0530_edge_entries(
+        self,
+        bars: pd.DataFrame,
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+    ) -> None:
+        if not bool(self.params.get("t0530_edge_enabled", False)):
+            return
+        routing = self.state["routing"]
+        raw_previous = routing.get("t0530_edge_last_evaluated_bar")
+        previous = parse_ts(raw_previous) if isinstance(raw_previous, str) else None
+        if raw_previous is not None and (
+            previous is None or raw_previous != dt_text(previous)
+        ):
+            for strat in self._t0530_edge_strategies():
+                self._set_sync_block(
+                    strat, "t0530_edge_decision_receipt_state_invalid",
+                    {"previous": repr(raw_previous)}, recoverable=False,
+                )
+            self._save_state()
+            return
+        if self._process_t0530_edge_retries(info, poll_time, readiness, price_row):
+            return
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        if poll_time < release_time or not in_t0530_edge_release_session(release_time):
+            return
+        signal_bar_text = dt_text(signal_bar)
+        if previous is not None and previous >= signal_bar:
+            if previous > signal_bar:
+                for strat in self._t0530_edge_strategies():
+                    self._set_sync_block(
+                        strat, "t0530_edge_decision_receipt_future",
+                        {"previous": dt_text(previous), "current": signal_bar_text},
+                        recoverable=False,
+                    )
+                self._save_state()
+            return
+        try:
+            side = latest_t0530_edge_signal(bars)
+        except (TypeError, ValueError, OverflowError, FloatingPointError, pd.errors.DataError) as exc:
+            for strat in self._t0530_edge_strategies():
+                self._set_sync_block(
+                    strat, "t0530_edge_history_invalid",
+                    {"type": type(exc).__name__, "message": str(exc)}, recoverable=True,
+                )
+            self._save_state()
+            return
+        if side is None:
+            routing["t0530_edge_last_evaluated_bar"] = signal_bar_text
+            self._save_state()
+            return
+        opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|t0530_edge_break_fade|{side}"
+        total_positions = sum(len(self._basket_rows(strat)) for strat in self._t0530_edge_strategies())
+        stale = stale_signal_decision(
+            signal_bar_text, timeframe_hours=1.0 / 60.0,
+            max_delay_minutes=float(self.params.get("t0530_edge_max_signal_delay_minutes", 5)),
+            now_utc=poll_time, options=self.safety,
+        )
+        point = float(self.params.get("point_size", 0.001))
+        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+        for strat in self._t0530_edge_strategies():
+            reason = ""
+            st = self._st(strat)
+            if total_positions >= int(self.params.get("t0530_edge_max_positions", 4)):
+                reason = "t0530_edge_capacity_full"
+            elif spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+                reason = "spread_guard"
+            elif stale.stale:
+                reason = "stale_signal_skip"
+            elif not readiness.get(int(strat["lane_id"]), False):
+                reason = "exit_or_sync_block"
+            elif st.get("basket"):
+                reason = "lane_capacity_full"
+            if reason:
+                self._trade_row("t0530_edge_decision", strat, opportunity_id=opportunity_id, side=side, reason=reason, signal_bar_time=signal_bar_text)
+                continue
+            opportunity = {
+                "opportunity_id": opportunity_id, "source": "t0530_edge_break_fade",
+                "side": side, "raw_side": side, "effective_side": side,
+                "event_time": signal_bar_text, "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time), "decision_time": dt_text(poll_time),
+                "executable_at": dt_text(poll_time),
+            }
+            note = "t0530_edge_w15_onset_hold_15m"
+            st["t0530_edge_retry_opportunity"] = {
+                "opportunity": opportunity,
+                "expires_utc": dt_text(
+                    release_time + pd.Timedelta(
+                        minutes=int(self.params.get("t0530_edge_max_signal_delay_minutes", 5))
+                    )
+                ),
+                "note": note,
+            }
+            # One atomic state image both consumes the group-wide signal and
+            # leaves a lane-local recovery record before any broker command.
+            routing["t0530_edge_last_evaluated_bar"] = signal_bar_text
+            self._save_state()
+            opened = self._attempt_t0530_edge_open(strat, opportunity, price_row, info, poll_time, note)
+            retry_scheduled = bool(
+                not opened and not st.get("pending_open_opportunity_id") and st.get("open_retry_after_utc")
+            )
+            self._trade_row(
+                "t0530_edge_decision", strat, opportunity_id=opportunity_id, side=side,
+                reason="entry_opened" if opened else "entry_retry_scheduled" if retry_scheduled else "entry_not_opened",
+                signal_bar_time=signal_bar_text,
+            )
+            return
+        routing["t0530_edge_last_evaluated_bar"] = signal_bar_text
+        self._save_state()
+
     def _process_morning_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
         readiness: dict[int, bool] = {}
         session_active = in_session(
@@ -2523,8 +7776,7 @@ class S23HorizontalInventoryRunner:
             EXPECTED_MORNING_SESSION_END_UTC,
         )
         for strat in self._morning_strategies():
-            if not bool(strat.get("enabled", True)):
-                continue
+            entry_enabled = bool(strat.get("enabled", True))
             lane_id = int(strat["lane_id"])
             st = self._st(strat)
             needs_reconciliation = bool(
@@ -2542,7 +7794,8 @@ class S23HorizontalInventoryRunner:
                 self._save_state()
                 readiness[lane_id] = False
                 continue
-            readiness[lane_id] = not self._monitor_morning_position(strat, info, poll_time)
+            exit_blocked = self._monitor_morning_position(strat, info, poll_time)
+            readiness[lane_id] = entry_enabled and not exit_blocked
         return readiness
 
     def _process_morning_entries(
@@ -2557,21 +7810,23 @@ class S23HorizontalInventoryRunner:
         if signal_bar is None:
             return "requested"
         release_time = signal_bar + pd.Timedelta(minutes=1)
+        if poll_time < release_time:
+            return
         if not in_session(release_time, EXPECTED_MORNING_SESSION_START_UTC, EXPECTED_MORNING_SESSION_END_UTC):
             return
         sides = self._morning_signal_sides(bars)
         signal_bar_text = dt_text(signal_bar)
-        total_positions = sum(len(self._st(strat).get("basket") or []) for strat in self._morning_strategies())
+        total_positions = sum(len(self._basket_rows(strat)) for strat in self._morning_strategies())
         for strat in self._morning_strategies():
             if not bool(strat.get("enabled", True)):
                 continue
             st = self._st(strat)
-            if st.get("last_evaluated_bar") == signal_bar_text:
-                continue
             # Durable evaluation reservation prevents duplicate opens when a
             # poll is retried after an uncertain bridge response.
-            st["last_evaluated_bar"] = signal_bar_text
-            self._save_state()
+            if not self._reserve_lane_evaluation_bar(
+                strat, signal_bar_text, "morning_decision",
+            ):
+                continue
             side = sides.get(str(strat["signal_id"]))
             if side is None:
                 self._trade_row("morning_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
@@ -2595,6 +7850,7 @@ class S23HorizontalInventoryRunner:
                 str(price_row.name),
                 timeframe_hours=1.0 / 60.0,
                 max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                now_utc=poll_time,
                 options=self.safety,
             )
             if stale.stale:
@@ -2625,8 +7881,7 @@ class S23HorizontalInventoryRunner:
         readiness: dict[int, bool] = {}
         session_active = in_session(poll_time, EXPECTED_MIDDAY_SESSION_START_UTC, EXPECTED_MIDDAY_SESSION_END_UTC)
         for strat in self._midday_strategies():
-            if not bool(strat.get("enabled", True)):
-                continue
+            entry_enabled = bool(strat.get("enabled", True))
             lane_id = int(strat["lane_id"])
             st = self._st(strat)
             needs_reconciliation = bool(
@@ -2641,7 +7896,8 @@ class S23HorizontalInventoryRunner:
                 self._save_state()
                 readiness[lane_id] = False
                 continue
-            readiness[lane_id] = not self._monitor_midday_position(strat, info, poll_time)
+            exit_blocked = self._monitor_midday_position(strat, info, poll_time)
+            readiness[lane_id] = entry_enabled and not exit_blocked
         return readiness
 
     def _process_midday_entries(
@@ -2656,18 +7912,20 @@ class S23HorizontalInventoryRunner:
         if signal_bar is None:
             return
         release_time = signal_bar + pd.Timedelta(minutes=1)
+        if poll_time < release_time:
+            return
         if not in_session(release_time, EXPECTED_MIDDAY_SESSION_START_UTC, EXPECTED_MIDDAY_SESSION_END_UTC):
             return
         signal_bar_text = dt_text(signal_bar)
-        total_positions = sum(len(self._st(strat).get("basket") or []) for strat in self._midday_strategies())
+        total_positions = sum(len(self._basket_rows(strat)) for strat in self._midday_strategies())
         for strat in self._midday_strategies():
             if not bool(strat.get("enabled", True)):
                 continue
             st = self._st(strat)
-            if st.get("last_evaluated_bar") == signal_bar_text:
+            if not self._reserve_lane_evaluation_bar(
+                strat, signal_bar_text, "midday_decision",
+            ):
                 continue
-            st["last_evaluated_bar"] = signal_bar_text
-            self._save_state()
             side = self._midday_signal_side(bars, strat)
             if side is None:
                 self._trade_row("midday_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
@@ -2709,7 +7967,8 @@ class S23HorizontalInventoryRunner:
                 continue
             stale = stale_signal_decision(
                 str(price_row.name), timeframe_hours=1.0 / 60.0,
-                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)), options=self.safety,
+                max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                now_utc=poll_time, options=self.safety,
             )
             if stale.stale:
                 self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="stale_signal_skip", signal_bar_time=signal_bar_text)
@@ -2730,45 +7989,237 @@ class S23HorizontalInventoryRunner:
                 reason="entry_opened" if opened else "entry_not_opened",
             )
 
+    def _process_pre_eu30_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        session_active = in_pre_eu30_entry_session(poll_time)
+        for strat in self._pre_eu30_strategies():
+            entry_enabled = bool(strat.get("enabled", True))
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                session_active or st.get("basket") or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason") or st.get("sync_block_new_entries")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            exit_blocked = self._monitor_pre_eu30_position(strat, info, poll_time)
+            readiness[lane_id] = entry_enabled and not exit_blocked
+        return readiness
+
+    def _process_pre_eu30_entries(
+        self,
+        bars: pd.DataFrame,
+        price_row: pd.Series,
+        info: Any,
+        poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+    ) -> None:
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        if poll_time < release_time:
+            return
+        # The frozen policy is M5-based. Evaluate only at an M5 release, and
+        # use the common DST-aware clock for new-entry admission only.
+        if int(release_time.minute) % 5 != 0 or not in_pre_eu30_entry_session(release_time):
+            return
+        sides = pre_eu30_signal_sides(bars)
+        signal_bar_text = dt_text(signal_bar)
+        total_positions = sum(len(self._basket_rows(strat)) for strat in self._pre_eu30_strategies())
+        for strat in self._pre_eu30_strategies():
+            if not bool(strat.get("enabled", True)):
+                continue
+            st = self._st(strat)
+            if not self._reserve_lane_evaluation_bar(
+                strat, signal_bar_text, "pre_eu30_decision",
+            ):
+                continue
+            side = sides.get(str(strat["signal_id"]))
+            if side is None:
+                self._trade_row("pre_eu30_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
+                continue
+            opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|{strat['signal_id']}|{side}"
+            opportunity = {
+                "opportunity_id": opportunity_id,
+                "source": "jst1300_pre_eu30",
+                "side": side,
+                "raw_side": side,
+                "effective_side": side,
+                "event_time": signal_bar_text,
+                "release_time": dt_text(release_time),
+                "available_time": dt_text(release_time),
+                "decision_time": dt_text(poll_time),
+                "executable_at": dt_text(poll_time),
+            }
+            shadow_context = self._shadow_context(price_row, info, readiness)
+            self._pre_eu30_observer_call(
+                "register_opportunity", opportunity=opportunity, at=poll_time,
+                bid=float(info.bid), ask=float(info.ask), context=shadow_context,
+            )
+            self._pre_eu30_state_tagger_call(
+                "tag_opportunity", opportunity=opportunity, at=poll_time, bars=bars,
+                bid=float(info.bid), ask=float(info.ask), context=shadow_context,
+            )
+            lane_id = int(strat["lane_id"])
+            if not readiness.get(lane_id, False):
+                reason = "exit_or_sync_block"
+            elif st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1)):
+                reason = "lane_capacity_full"
+            elif total_positions >= int(self.params.get("pre_eu30_session_max_positions", EXPECTED_PRE_EU30_MAX_POSITIONS)):
+                reason = "pre_eu30_capacity_full"
+            else:
+                point = float(self.params.get("point_size", 0.001))
+                spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+                if spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+                    reason = "spread_guard"
+                else:
+                    stale = stale_signal_decision(
+                        str(price_row.name), timeframe_hours=1.0 / 60.0,
+                        max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                        now_utc=poll_time, options=self.safety,
+                    )
+                    reason = "stale_signal_skip" if stale.stale else ""
+            if reason:
+                self._trade_row(
+                    "pre_eu30_decision", strat, opportunity_id=opportunity_id,
+                    side=side, reason=reason, signal_bar_time=signal_bar_text,
+                )
+                self._pre_eu30_observer_call(
+                    "record_route", opportunity_id=opportunity_id, at=poll_time,
+                    status="stale_rejected" if reason == "stale_signal_skip" else "unconsumed",
+                    reason=reason,
+                )
+                continue
+            opened = self._open_entry(
+                strat, side, price_row, info,
+                note=f"pre_eu30_{strat['signal_id']}_hold_{int(strat['hold_minutes'])}m",
+                execution_time=poll_time, opportunity=opportunity,
+                apply_portfolio_rearm=False, use_confirmed_fill_time=True,
+            )
+            if opened:
+                total_positions += 1
+            self._pre_eu30_observer_call(
+                "record_route", opportunity_id=opportunity_id, at=poll_time,
+                status="consumed" if opened else "unconsumed",
+                consumed_lane_id=lane_id if opened else None,
+                reason="entry_opened" if opened else "entry_not_opened",
+            )
+
     def _monitor_pending_entry(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         st = self._st(strat)
-        side = str(st.get("pending_entry_side") or "")
+        raw_side = st.get("pending_entry_side")
+        side = raw_side if isinstance(raw_side, str) else ""
         if not side or st["basket"]:
             return False
         at_utc = pd.Timestamp(poll_time if poll_time is not None else utc_now())
         at_utc = at_utc.tz_localize("UTC") if at_utc.tzinfo is None else at_utc.tz_convert("UTC")
+        basket_block = self._new_basket_block_reason(strat, at_utc)
+        if basket_block:
+            signal_bar = st.get("pending_entry_signal_bar")
+            opportunity_id = st.get("pending_entry_opportunity_id")
+            self._clear_pending_entry(strat)
+            self._trade_row(
+                "entry_skip",
+                strat,
+                opportunity_id=opportunity_id,
+                reason=basket_block,
+                signal_bar_time=signal_bar,
+                note="pending_za_new_basket_guard",
+            )
+            self._save_state()
+            return True
         entry_block = self._entry_submission_block_reason(strat, at_utc)
         if entry_block:
             self._trade_row("entry_skip", strat, reason=entry_block, signal_bar_time=st.get("pending_entry_signal_bar"), note="pending_open_guard")
             return True
-        expires = parse_ts(st.get("pending_entry_expires_utc"))
-        try:
-            target = float(st["pending_entry_target"])
-            atr30 = float(st["pending_entry_atr30"])
-        except (KeyError, TypeError, ValueError):
-            target, atr30 = math.nan, math.nan
-        if side not in {"LONG", "SHORT"} or expires is None or not math.isfinite(target) or not math.isfinite(atr30) or atr30 <= 0.0:
-            invalid_fields = [
-                field
-                for field, valid in (
-                    ("pending_entry_side", side in {"LONG", "SHORT"}),
-                    ("pending_entry_target", math.isfinite(target)),
-                    ("pending_entry_expires_utc", expires is not None),
-                    ("pending_entry_atr30", math.isfinite(atr30) and atr30 > 0.0),
+        raw_expires = st.get("pending_entry_expires_utc")
+        raw_signal_bar = st.get("pending_entry_signal_bar")
+        raw_event_time = st.get("pending_entry_event_time")
+        raw_release_time = st.get("pending_entry_release_time")
+        expires = parse_ts(raw_expires) if isinstance(raw_expires, str) else None
+        signal_bar = parse_ts(raw_signal_bar) if isinstance(raw_signal_bar, str) else None
+        event_time = parse_ts(raw_event_time) if isinstance(raw_event_time, str) else None
+        release_time = parse_ts(raw_release_time) if isinstance(raw_release_time, str) else None
+        raw_opportunity_id = st.get("pending_entry_opportunity_id")
+        opportunity_id = raw_opportunity_id.strip() if isinstance(raw_opportunity_id, str) else ""
+        raw_target = st.get("pending_entry_target")
+        raw_atr30 = st.get("pending_entry_atr30")
+        target = (
+            float(raw_target)
+            if isinstance(raw_target, (int, float)) and not isinstance(raw_target, bool)
+            else math.nan
+        )
+        atr30 = (
+            float(raw_atr30)
+            if isinstance(raw_atr30, (int, float)) and not isinstance(raw_atr30, bool)
+            else math.nan
+        )
+        canonical_release = bool(
+            event_time is not None
+            and release_time is not None
+            and release_time == event_time + pd.Timedelta(minutes=1)
+        )
+        max_expiry = (
+            release_time
+            + pd.Timedelta(
+                minutes=(
+                    int(strat.get("entry_wait_minutes", 0))
+                    + float(self.params.get("max_signal_delay_minutes", 2.0))
                 )
-                if not valid
-            ]
-            signal_bar = st.get("pending_entry_signal_bar")
-            opportunity_id = st.get("pending_entry_opportunity_id")
+            )
+            if release_time is not None
+            else None
+        )
+        opportunity_parts = opportunity_id.split("|") if opportunity_id else []
+        canonical_opportunity_id = (
+            len(opportunity_parts) == 5
+            and opportunity_parts[0] == str(self.params.get("symbol") or "")
+            and signal_bar is not None
+            and opportunity_parts[1] == dt_text(signal_bar)
+            and opportunity_parts[2] in {"LONG", "SHORT"}
+            and opportunity_parts[3] == side
+            and opportunity_parts[4] == str(self.params.get("entry_policy_id") or "")
+        )
+        invalid_fields = [
+            field
+            for field, valid in (
+                ("pending_entry_side", side in {"LONG", "SHORT"}),
+                ("pending_entry_target", math.isfinite(target) and target > 0.0),
+                ("pending_entry_expires_utc", expires is not None),
+                ("pending_entry_atr30", math.isfinite(atr30) and atr30 > 0.0),
+                ("pending_entry_opportunity_id", canonical_opportunity_id),
+                ("pending_entry_signal_bar", signal_bar is not None),
+                ("pending_entry_event_time", event_time is not None and event_time == signal_bar),
+                ("pending_entry_release_time", canonical_release),
+                (
+                    "pending_entry_expiry_window",
+                    expires is not None
+                    and release_time is not None
+                    and max_expiry is not None
+                    and release_time <= expires <= max_expiry,
+                ),
+            )
+            if not valid
+        ]
+        if invalid_fields:
+            raw_signal_bar = st.get("pending_entry_signal_bar")
+            raw_opportunity_id = st.get("pending_entry_opportunity_id")
             self._clear_pending_entry(strat)
-            self._trade_row("entry_skip", strat, opportunity_id=opportunity_id, reason="pending_entry_state_invalid", signal_bar_time=signal_bar, note=",".join(invalid_fields))
+            self._trade_row("entry_skip", strat, opportunity_id=raw_opportunity_id, reason="pending_entry_state_invalid", signal_bar_time=raw_signal_bar, note=",".join(invalid_fields))
             self._save_state()
             return True
         if at_utc > expires:
-            signal_bar = st.get("pending_entry_signal_bar")
-            opportunity_id = st.get("pending_entry_opportunity_id")
+            raw_signal_bar = st.get("pending_entry_signal_bar")
+            raw_opportunity_id = st.get("pending_entry_opportunity_id")
             self._clear_pending_entry(strat)
-            self._trade_row("entry_skip", strat, opportunity_id=opportunity_id, reason="za_pullback_expired", signal_bar_time=signal_bar)
+            self._trade_row("entry_skip", strat, opportunity_id=raw_opportunity_id, reason="za_pullback_expired", signal_bar_time=raw_signal_bar)
             self._save_state()
             return False
         bid, ask = float(info.bid), float(info.ask)
@@ -2778,7 +8229,6 @@ class S23HorizontalInventoryRunner:
         max_ratio = float(strat.get("entry_max_spread_atr_ratio", 0.0))
         if self._low_vol_regime(strat, atr30) and max_ratio > 0.0 and (ask - bid) / atr30 > max_ratio:
             return False
-        signal_bar = parse_ts(st.get("pending_entry_signal_bar")) or at_utc
         row = pd.Series({"Open": bid, "Close": bid, "AskOpen": ask}, name=signal_bar)
         opportunity = {
             "opportunity_id": st.get("pending_entry_opportunity_id"),
@@ -2803,11 +8253,15 @@ class S23HorizontalInventoryRunner:
         entry_block = self._entry_submission_block_reason(strat, poll_time)
         if entry_block:
             return False, entry_block, False
-        pending_side = str(st.get("pending_entry_side") or "")
-        try:
-            pending_target = float(st.get("pending_entry_target"))
-        except (TypeError, ValueError):
-            pending_target = math.nan
+        raw_pending_side = st.get("pending_entry_side")
+        pending_side = raw_pending_side if isinstance(raw_pending_side, str) else ""
+        raw_pending_target = st.get("pending_entry_target")
+        pending_target = (
+            float(raw_pending_target)
+            if isinstance(raw_pending_target, (int, float))
+            and not isinstance(raw_pending_target, bool)
+            else math.nan
+        )
         pending_expiry = parse_ts(st.get("pending_entry_expires_utc"))
         pending_touch = (
             pending_side in {"LONG", "SHORT"}
@@ -2883,7 +8337,22 @@ class S23HorizontalInventoryRunner:
         entry_block = self._entry_submission_block_reason(strat, poll_time)
         if entry_block:
             return False, entry_block
-        cooldown_until = parse_ts(st.get("cooldown_until_utc"))
+        raw_cooldown_until = st.get("cooldown_until_utc")
+        cooldown_until = parse_ts(raw_cooldown_until) if isinstance(raw_cooldown_until, str) else None
+        if raw_cooldown_until is not None and cooldown_until is None:
+            return False, "cooldown_state_invalid"
+        try:
+            cooldown_minutes = int(strat.get("cooldown", 0))
+        except (TypeError, ValueError, OverflowError):
+            cooldown_minutes = -1
+        if (
+            cooldown_until is not None
+            and (
+                cooldown_minutes < 0
+                or cooldown_until > poll_time + pd.Timedelta(minutes=cooldown_minutes)
+            )
+        ):
+            return False, "cooldown_state_invalid"
         if cooldown_until is not None and poll_time < cooldown_until:
             return False, "cooldown"
         if len(st["basket"]) >= int(strat["max_positions"]):
@@ -3022,14 +8491,41 @@ class S23HorizontalInventoryRunner:
         self._save_state()
         return None, "all_lanes_noop"
 
+    def _contain_poll_exception(self, exc: BaseException) -> None:
+        """Fail new entries closed while preserving the next exit-monitoring poll."""
+        details = {"type": type(exc).__name__, "message": str(exc)}
+        for strat in self._all_strategies():
+            try:
+                self._set_sync_block(
+                    strat, "poll_exception", details, recoverable=True,
+                )
+                if self._st(strat).get("basket"):
+                    self._notify_reconciliation_required(
+                        strat, "poll_exception_with_owned_inventory", details,
+                    )
+            except Exception:
+                logging.exception(
+                    "S23 could not persist poll containment for %s", strat.get("id")
+                )
+        try:
+            self._save_state()
+        except Exception:
+            logging.exception("S23 poll containment state could not be persisted")
+
     def run_once(self) -> None:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         info = self.executor.get_symbol_info(symbol)
         if info is None:
             for strat in self._all_strategies():
-                if bool(strat.get("enabled", True)):
+                st = self._st(strat)
+                if (
+                    bool(strat.get("enabled", True))
+                    or st.get("basket")
+                    or st.get("pending_close_reason")
+                    or st.get("pending_open_opportunity_id")
+                ):
                     self._set_sync_block(strat, "symbol_info_failed", recoverable=True)
-                    if self._st(strat).get("basket"):
+                    if st.get("basket"):
                         self._notify_manual_action(
                             strat,
                             title="market data unavailable while bot23 inventory is open",
@@ -3042,16 +8538,25 @@ class S23HorizontalInventoryRunner:
         quote_time = pd.Timestamp(utc_now())
         self._observer_call("observe_quote", at=quote_time, bid=float(info.bid), ask=float(info.ask))
         self._midday_observer_call("observe_quote", at=quote_time, bid=float(info.bid), ask=float(info.ask))
+        self._pre_eu30_observer_call("observe_quote", at=quote_time, bid=float(info.bid), ask=float(info.ask))
         # Fixed-time overlay exits depend only on the executable quote and the
         # persisted actual fill time, so they remain active even if HIST/M1 is
         # temporarily unavailable.
         morning_readiness = self._process_morning_exits(info, quote_time)
         midday_readiness = self._process_midday_exits(info, quote_time)
+        pre_eu30_readiness = self._process_pre_eu30_exits(info, quote_time)
+        trend_recovery_readiness = self._process_trend_recovery_exits(info, quote_time)
+        session_vwap_readiness = self._process_session_vwap_exits(info, quote_time)
+        t0530_edge_readiness = self._process_t0530_edge_exits(info, quote_time)
+        # History acquisition is independent of the legacy 420-bar HIST
+        # consumer. This keeps backfill/retry moving even when the later legacy
+        # signal path cannot evaluate a bar on this poll.
+        self._refresh_session_vwap_history(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
                 self._trade_row("entry_skip", strat, reason="m1_bars_unavailable")
-                if not bool(strat.get("enabled", True)) or not self._st(strat)["basket"]:
+                if not self._st(strat)["basket"]:
                     continue
                 if not self._sync_strategy(strat):
                     self._save_state()
@@ -3059,32 +8564,35 @@ class S23HorizontalInventoryRunner:
                 quote_time = utc_now()
                 quote_row = pd.Series({"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)}, name=pd.Timestamp(quote_time))
                 self._monitor_open_basket(strat, info, quote_row, quote_time)
+            self._process_session_vwap_entries(info, pd.Timestamp(utc_now()), session_vwap_readiness)
             return
         if len(bars) < 2:
+            self._process_session_vwap_entries(info, pd.Timestamp(utc_now()), session_vwap_readiness)
             return
         price_row = bars.iloc[-1]
         signal_bar = parse_ts(price_row.name)
         poll_time = pd.Timestamp(utc_now())
         if signal_bar is None:
-            for strat in self._all_strategies():
+            for strat in self._legacy_signal_strategies():
                 if bool(strat.get("enabled", True)):
                     self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(price_row.name)}, recoverable=True)
             self._save_state()
+            self._process_session_vwap_entries(info, poll_time, session_vwap_readiness)
             return
         self._process_morning_entries(bars, price_row, info, poll_time, morning_readiness)
         self._process_midday_entries(bars, price_row, info, poll_time, midday_readiness)
+        self._process_pre_eu30_entries(bars, price_row, info, poll_time, pre_eu30_readiness)
+        self._process_trend_recovery_entry(price_row, info, poll_time, trend_recovery_readiness)
         # Match the ordered-tick replay: observe the frozen balanced-book
         # range at the first processing of each completed M1, before this
         # poll's basket exits can change the local inventory state.
-        self._advance_inventory_range_fade(price_row)
+        self._advance_inventory_range_fade(price_row, poll_time)
         # Process every lane's sync and exits before allowing any lane to fill a
         # pending entry or consume a new opportunity. A LONG target close in a
         # later lane therefore arms the portfolio guard before an earlier lane
         # can open a new LONG basket on the same poll.
         exit_pass_ready: dict[int, bool] = {}
         for strat in self.params["strategies"]:
-            if not bool(strat.get("enabled", True)):
-                continue
             lane_id = int(strat["lane_id"])
             st = self._st(strat)
             if not self._sync_strategy(strat):
@@ -3095,7 +8603,7 @@ class S23HorizontalInventoryRunner:
             if self._monitor_open_basket(strat, info, price_row, poll_time):
                 exit_pass_ready[lane_id] = False
                 continue
-            exit_pass_ready[lane_id] = True
+            exit_pass_ready[lane_id] = bool(strat.get("enabled", True))
         lane_readiness: dict[int, tuple[bool, str, bool]] = {}
         for strat in self.params["strategies"]:
             if not bool(strat.get("enabled", True)):
@@ -3109,7 +8617,41 @@ class S23HorizontalInventoryRunner:
         raw_side = self._signal(price_row, primary)
         signal_bar_text = dt_text(signal_bar)
         routing = self.state["routing"]
-        if raw_side and routing.get("last_routed_signal_bar") != signal_bar_text:
+        previous_routed_bar = routing.get("last_routed_signal_bar")
+        previous_routed_time = (
+            parse_ts(previous_routed_bar)
+            if isinstance(previous_routed_bar, str)
+            else None
+        )
+        routing_receipt_valid = bool(
+            previous_routed_bar is None
+            or (
+                isinstance(previous_routed_bar, str)
+                and previous_routed_time is not None
+            )
+        )
+        if raw_side and not routing_receipt_valid:
+            routing["last_routed_signal_bar"] = signal_bar_text
+            routing["last_routed_opportunity_id"] = None
+            routing["last_consumed_lane_id"] = None
+            routing["last_route_decision_utc"] = dt_text(poll_time)
+            self._trade_row(
+                "entry_skip",
+                primary,
+                reason="routing_decision_state_invalid",
+                signal_bar_time=signal_bar_text,
+                note=f"previous_last_routed_signal_bar={previous_routed_bar!r};current_bar_consumed",
+            )
+            self._save_state()
+        if (
+            raw_side
+            and routing_receipt_valid
+            and poll_time >= signal_bar + pd.Timedelta(minutes=1)
+            and (
+                previous_routed_time is None
+                or previous_routed_time < signal_bar
+            )
+        ):
             side, entry_policy = self._apply_entry_policy(raw_side, bars, info)
             release_time = signal_bar + pd.Timedelta(minutes=1)
             opportunity = {
@@ -3170,6 +8712,7 @@ class S23HorizontalInventoryRunner:
                     str(price_row.name),
                     timeframe_hours=1.0 / 60.0,
                     max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                    now_utc=poll_time,
                     options=self.safety,
                 )
                 if stale.stale:
@@ -3214,6 +8757,43 @@ class S23HorizontalInventoryRunner:
                 symbol=symbol,
             )
             if opportunity is not None:
+                opportunity_time = parse_ts(opportunity.get("event_time"))
+                if opportunity_time is None or not routing_receipt_valid:
+                    routing["last_routed_signal_bar"] = opportunity.get("event_time")
+                    routing["last_routed_opportunity_id"] = opportunity.get("opportunity_id")
+                    routing["last_consumed_lane_id"] = None
+                    routing["last_route_decision_utc"] = dt_text(poll_time)
+                    self._trade_row(
+                        "opportunity_rejected",
+                        primary,
+                        side=opportunity.get("side"),
+                        reason="routing_decision_state_invalid",
+                        note=(
+                            f"previous_last_routed_signal_bar={previous_routed_bar!r};"
+                            "range_opportunity_consumed"
+                        ),
+                        **self._opportunity_fields(opportunity),
+                    )
+                    self._save_state()
+                    opportunity = None
+                elif (
+                    previous_routed_time is not None
+                    and previous_routed_time >= opportunity_time
+                ):
+                    # Do not lower the portfolio-wide routing high-water mark.
+                    self._trade_row(
+                        "opportunity_rejected",
+                        primary,
+                        side=opportunity.get("side"),
+                        reason="routing_decision_nonmonotonic",
+                        note=(
+                            f"high_watermark={previous_routed_bar!r};"
+                            f"range_event={opportunity.get('event_time')!r};preserved"
+                        ),
+                        **self._opportunity_fields(opportunity),
+                    )
+                    opportunity = None
+            if opportunity is not None:
                 shadow_context = self._shadow_context(price_row, info, lane_readiness)
                 self._observer_call(
                     "register_opportunity",
@@ -3233,13 +8813,14 @@ class S23HorizontalInventoryRunner:
                     context=shadow_context,
                 )
                 stale = stale_signal_decision(
-                    str(price_row.name),
+                    str(opportunity["event_time"]),
                     timeframe_hours=1.0 / 60.0,
                     max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+                    now_utc=poll_time,
                     options=self.safety,
                 )
                 if stale.stale:
-                    routing["last_routed_signal_bar"] = signal_bar_text
+                    routing["last_routed_signal_bar"] = opportunity["event_time"]
                     routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
                     routing["last_consumed_lane_id"] = None
                     routing["last_route_decision_utc"] = dt_text(poll_time)
@@ -3272,9 +8853,15 @@ class S23HorizontalInventoryRunner:
                         consumed_lane_id=consumed_lane_id,
                         reason=route_reason,
                     )
+        # Append-only overlay processing: all pre-existing entry and exit paths
+        # above retain their original order and complete first.
+        self._process_session_vwap_entries(info, poll_time, session_vwap_readiness)
+        self._process_t0530_edge_entries(
+            bars, price_row, info, poll_time, t0530_edge_readiness,
+        )
         now = time.time()
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 60)):
-            logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._st(s)["basket"]) for s in self._all_strategies()})
+            logging.info("S23 status: live=%s shadow=%s strategies=%s", self.live_enabled, self.shadow_enabled, {s["id"]: len(self._basket_rows(s)) for s in self._all_strategies()})
             self._last_status_log = now
 
 
@@ -3302,7 +8889,11 @@ class FakeExecutor:
         self.last_order_error = None
 
     def get_bridge_capabilities(self) -> dict[str, Any]:
-        return {"name": "BotBridge_s23", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
+        return {
+            "name": "BotBridge_s23",
+            "version": EXPECTED_BRIDGE_VERSION,
+            "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS),
+        }
 
     def get_account_info(self) -> dict[str, Any]:
         return {
@@ -3310,6 +8901,7 @@ class FakeExecutor:
             "margin_mode_name": "RETAIL_HEDGING" if self.margin_mode == HEDGING_MARGIN_MODE else "RETAIL_NETTING",
             "login": MT5_LOGIN,
             "server": MT5_SERVER,
+            "currency": "USD",
         }
 
     def get_symbol_info(self, *_: Any) -> Any:
@@ -3334,7 +8926,7 @@ class FakeExecutor:
         return SimpleNamespace(
             deal=8000 + position_id, position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
             reason="DEAL_REASON_EXPERT", price=2066.0, profit=1.0, commission=-0.1, swap=0.0, fee=0.0,
-            deal_time=1767272520, net_profit=0.9,
+            deal_time=1767272520, exit_volume=0.01, net_profit=0.9,
         )
 
     def open_position(self, *_: Any, **__: Any) -> int:
@@ -3346,7 +8938,10 @@ class FakeExecutor:
 
 def load_params(path: str = PARAMS_FILE) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        params = strict_json_load(f)
+    if not isinstance(params, dict):
+        raise ValueError("params root must be a JSON object")
+    return params
 
 
 def self_test() -> None:
@@ -3357,6 +8952,8 @@ def self_test() -> None:
     params["shadow_state_tagger"]["enabled"] = False
     params["midday_shadow_opportunity_observer"]["enabled"] = False
     params["midday_shadow_state_tagger"]["enabled"] = False
+    params["pre_eu30_shadow_opportunity_observer"]["enabled"] = False
+    params["pre_eu30_shadow_state_tagger"]["enabled"] = False
     params["safety"]["stale_signal_guard"] = False
     strategy = params["strategies"][0]
     assert params["candidate_id"] == EXPECTED_CANDIDATE_ID
@@ -3385,6 +8982,12 @@ def self_test() -> None:
     assert tuple(int(row["magic"]) for row in params["midday_session_strategies"]) == EXPECTED_MIDDAY_MAGICS
     assert [int(row["lane_id"]) for row in params["midday_session_strategies"]] == [8]
     assert [int(row["hold_minutes"]) for row in params["midday_session_strategies"]] == [60]
+    assert params["pre_eu30_session_policy_id"] == PRE_EU30_POLICY_ID
+    assert params["pre_eu30_session_params_hash"] == PRE_EU30_POLICY_PARAMS_HASH
+    assert tuple(int(row["magic"]) for row in params["pre_eu30_session_strategies"]) == EXPECTED_PRE_EU30_MAGICS
+    assert [int(row["lane_id"]) for row in params["pre_eu30_session_strategies"]] == [9, 10, 11]
+    assert [int(row["hold_minutes"]) for row in params["pre_eu30_session_strategies"]] == [45, 60, 45]
+    assert int(params["m1_bars"]) == EXPECTED_PRE_EU30_M1_BARS
     assert int(strategy["max_positions"]) == 2 and float(strategy["add_atr"]) == 0.65
     assert (float(strategy["entry_wait_z"]), float(strategy["entry_wait_sigma"]), int(strategy["entry_wait_minutes"])) == (2.0, 1.0, 10)
     assert (float(strategy["target_atr_mult"]), float(strategy["stop_atr_mult"]), float(strategy["failure_to_progress_peak_atr_mult"])) == (3.5, 6.5, 1.0)
@@ -3412,8 +9015,19 @@ def self_test() -> None:
     state["frozen_basket_atr30"] = 2.0
     assert runner._exit_thresholds(strategy) == (10.0, 18.0, 3.0)
 
-    state.update({"pending_entry_side": "LONG", "pending_entry_target": 2064.05, "pending_entry_expires_utc": dt_text(utc_now() + pd.Timedelta(minutes=5)), "pending_entry_atr30": 1.5, "pending_entry_signal_bar": dt_text(utc_now() - pd.Timedelta(minutes=1))})
-    assert runner._monitor_pending_entry(strategy, SimpleNamespace(bid=2064.02, ask=2064.05), utc_now())
+    pending_now = pd.Timestamp("2026-08-25T13:01:02Z")
+    pending_event = pending_now - pd.Timedelta(minutes=1)
+    state.update({
+        "pending_entry_side": "LONG",
+        "pending_entry_target": 2064.05,
+        "pending_entry_expires_utc": dt_text(pending_now + pd.Timedelta(minutes=5)),
+        "pending_entry_atr30": 1.5,
+        "pending_entry_signal_bar": dt_text(pending_event),
+        "pending_entry_opportunity_id": f"XAUUSD|{dt_text(pending_event)}|LONG|LONG|{EXPECTED_ENTRY_POLICY_ID}",
+        "pending_entry_event_time": dt_text(pending_event),
+        "pending_entry_release_time": dt_text(pending_now),
+    })
+    assert runner._monitor_pending_entry(strategy, SimpleNamespace(bid=2064.02, ask=2064.05), pending_now)
     assert len(state["basket"]) == 1 and state["frozen_basket_atr30"] == 1.5
 
     foreign = SimpleNamespace(ticket=9100, identifier=9100, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC, comment="s22_foreign", type=ORDER_TYPE_BUY)
@@ -3429,6 +9043,11 @@ def main() -> int:
     args = parser.parse_args()
     os.makedirs(LOG_DIR, exist_ok=True)
     params = load_params()
+    # Validate before logging setup or any bridge/runtime construction so
+    # coercible log, timing, execution, and risk fields cannot take effect.
+    validate_boolean_config(params)
+    validate_strategy_topology_config(params)
+    validate_execution_numeric_config(params)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
@@ -3448,14 +9067,27 @@ def main() -> int:
         self_test()
         print("s23 self-test ok")
         return 0
+    runner_lock = acquire_runner_singleton_lock()
+    if runner_lock is None:
+        logging.critical("Another bot23 runner already owns the state/order namespace; refusing to start")
+        return 1
     runner = S23HorizontalInventoryRunner(params)
     if not runner.connect_and_preflight():
         return 1
     if args.once:
-        runner.run_once()
-        return 0
+        try:
+            runner.run_once()
+            return 0
+        except Exception as exc:
+            logging.exception("S23 poll failed")
+            runner._contain_poll_exception(exc)
+            return 1
     while True:
-        runner.run_once()
+        try:
+            runner.run_once()
+        except Exception as exc:
+            logging.exception("S23 poll failed; entries contained and polling will continue")
+            runner._contain_poll_exception(exc)
         time.sleep(float(params.get("poll_interval_seconds", 5)))
 
 

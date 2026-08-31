@@ -1,23 +1,27 @@
-"""Market-DST-aware admission blocks; never a position-exit clock."""
+"""UTC admission blocks resolved from market DST; never an exit clock."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 
 UTC = timezone.utc
-JST = timezone(timedelta(hours=9), name="JST")
 EU_TIMEZONE = ZoneInfo("Europe/London")
 US_TIMEZONE = ZoneInfo("America/New_York")
+
+FIXED_START_UTC_MINUTE = 4 * 60
+EU_END_UTC_MINUTE = {True: 6 * 60 + 30, False: 7 * 60 + 30}
+US_PREOPEN_UTC_MINUTE = {True: 11 * 60 + 30, False: 12 * 60 + 30}
+US_LATE_END_UTC_MINUTE = {True: 20 * 60 + 30, False: 21 * 60 + 30}
 
 
 @dataclass(frozen=True)
 class EntryAdmissionBlock:
     id: str
-    start_jst: str
-    end_jst: str
+    start_utc: str
+    end_utc: str
     eu_summer_time: bool
     us_summer_time: bool
 
@@ -40,37 +44,40 @@ def is_us_summer_time(at_utc: datetime) -> bool:
     return bool(new_york.dst())
 
 
+def _hhmm(minute: int) -> str:
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
 def classify_entry_admission(at_utc: datetime) -> EntryAdmissionBlock | None:
     """Classify a new-entry instant; this result must not govern open positions."""
     instant = _as_utc(at_utc)
     eu_summer = is_eu_summer_time(instant)
     us_summer = is_us_summer_time(instant)
-    minute = instant.astimezone(JST).hour * 60 + instant.astimezone(JST).minute
-    # London governs the European boundary. New York independently governs
-    # the US boundaries because their DST change dates differ for several
-    # weeks each year.
-    pre_eu_end = 15 * 60 + 30 + (0 if eu_summer else 60)
-    us_preopen = 20 * 60 + 30 + (0 if us_summer else 60)
-    us_late_end = 5 * 60 + 30 + (0 if us_summer else 60)
+    minute = instant.hour * 60 + instant.minute
+    # Runtime comparison is UTC-only. London and New York are consulted only
+    # to select their independently DST-resolved UTC boundaries.
+    pre_eu_end = EU_END_UTC_MINUTE[eu_summer]
+    us_preopen = US_PREOPEN_UTC_MINUTE[us_summer]
+    us_late_end = US_LATE_END_UTC_MINUTE[us_summer]
 
-    if 13 * 60 <= minute < pre_eu_end:
+    if FIXED_START_UTC_MINUTE <= minute < pre_eu_end:
         return EntryAdmissionBlock(
-            "jst1300_pre_eu30", "13:00", "15:30" if eu_summer else "16:30",
+            "jst1300_pre_eu30", _hhmm(FIXED_START_UTC_MINUTE), _hhmm(pre_eu_end),
             eu_summer, us_summer,
         )
     if pre_eu_end <= minute < us_preopen:
         return EntryAdmissionBlock(
             "eu_open_to_us_preopen",
-            "15:30" if eu_summer else "16:30",
-            "20:30" if us_summer else "21:30",
+            _hhmm(pre_eu_end),
+            _hhmm(us_preopen),
             eu_summer,
             us_summer,
         )
-    if minute >= us_preopen or minute < us_late_end:
+    if us_preopen <= minute < us_late_end:
         return EntryAdmissionBlock(
             "us_to_eu_late",
-            "20:30" if us_summer else "21:30",
-            "05:30" if us_summer else "06:30",
+            _hhmm(us_preopen),
+            _hhmm(us_late_end),
             eu_summer,
             us_summer,
         )

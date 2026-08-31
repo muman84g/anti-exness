@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import os
 import logging
+import math
 import re
 import threading
 import time
+import uuid
 
 
-DIAGNOSTIC_COMMANDS = {"HIST", "INFO", "ORDERS", "POSITIONS"}
+DIAGNOSTIC_COMMANDS = {"HIST", "HISTPAGE", "INFO", "ORDERS", "POSITIONS"}
 HEALTH_CONTINUATION_LOG_SECONDS = 60.0
 
 
@@ -34,6 +36,7 @@ class EABridgeServer:
         self.bridge_dir = files_dir or resolve_files_dir()
         self.cmd_file = os.path.join(self.bridge_dir, os.environ.get("EA_BRIDGE_COMMAND_FILE", f"cmd_{suffix}.txt"))
         self.res_file = os.path.join(self.bridge_dir, os.environ.get("EA_BRIDGE_RESPONSE_FILE", f"res_{suffix}.txt"))
+        self.claim_file = os.path.join(self.bridge_dir, os.environ.get("EA_BRIDGE_CLAIM_FILE", f"claim_{suffix}.txt"))
         self.lock_file = os.path.join(self.bridge_dir, os.environ.get("EA_BRIDGE_LOCK_FILE", f"ea_bridge_{suffix}.lock"))
         self._command_lock = threading.Lock()
         self._command_health: dict[str, dict[str, float | int | str]] = {}
@@ -115,26 +118,44 @@ class EABridgeServer:
     def start_server(self) -> None:
         self.start()
 
-    def _acquire_ipc_lock(self, timeout: float) -> int | None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+    def _acquire_ipc_lock(self, timeout: float):
+        deadline = time.monotonic() + timeout
+        os.makedirs(self.bridge_dir, exist_ok=True)
+        handle = open(self.lock_file, "a+b")
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        while time.monotonic() < deadline:
             try:
-                return os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except (OSError, IOError):
                 time.sleep(0.05)
+        handle.close()
         return None
 
-    def _release_ipc_lock(self, fd: int | None) -> None:
-        if fd is None:
+    def _release_ipc_lock(self, handle) -> None:
+        if handle is None:
             return
         try:
-            os.close(fd)
-        except OSError:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, IOError):
             pass
-        try:
-            os.remove(self.lock_file)
-        except FileNotFoundError:
-            pass
+        handle.close()
 
     def send_command(self, cmd_str: str, timeout: float = 10) -> str:
         with self._command_lock:
@@ -145,42 +166,72 @@ class EABridgeServer:
                 self._record_command_health(command, result, started_at, time.monotonic())
                 return result
 
-            fd = self._acquire_ipc_lock(timeout)
-            if fd is None:
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(float(timeout))
+                or float(timeout) <= 0.0
+                or float(timeout) > 300.0
+            ):
+                return finish("ERR|INVALID_TIMEOUT")
+            timeout = float(timeout)
+
+            lock_handle = self._acquire_ipc_lock(timeout)
+            if lock_handle is None:
                 return finish("ERR|LOCK_TIMEOUT")
+            request_id = uuid.uuid4().hex
+            deadline_msc = int((time.time() + timeout) * 1000)
+            envelope = f"REQ|{request_id}|{deadline_msc}|{cmd_str}"
+            temp_cmd = f"{self.cmd_file}.{request_id}.tmp"
             try:
+                # Never overwrite or queue behind an unclaimed command or a
+                # durable EA claim. The EA must drain the single mutation slot
+                # before another correlated request can be published.
+                if os.path.exists(self.claim_file):
+                    return finish("ERR|CLAIM_BUSY")
+                if os.path.exists(self.cmd_file):
+                    return finish("ERR|COMMAND_BUSY")
                 if os.path.exists(self.res_file):
                     try:
                         os.remove(self.res_file)
                     except OSError:
-                        pass
+                        if os.path.exists(self.res_file):
+                            return finish("ERR|RESPONSE_BUSY")
                 try:
-                    with open(self.cmd_file, "w", encoding="utf-8") as f:
-                        f.write(cmd_str)
+                    with open(temp_cmd, "x", encoding="utf-8") as f:
+                        f.write(envelope)
                         f.flush()
                         os.fsync(f.fileno())
-                    written_at = time.time()
+                    os.replace(temp_cmd, self.cmd_file)
                 except OSError:
+                    try:
+                        os.remove(temp_cmd)
+                    except OSError:
+                        pass
                     return finish("ERR|WRITE_FAILED")
-                deadline = time.time() + timeout
-                while time.time() < deadline:
+                wait_deadline = time.monotonic() + timeout
+                while time.monotonic() < wait_deadline:
                     if os.path.exists(self.res_file):
                         try:
-                            if os.path.getmtime(self.res_file) + 0.001 < written_at:
-                                os.remove(self.res_file)
-                                continue
                             with open(self.res_file, "r", encoding="utf-8", errors="replace") as f:
                                 res = f.read().strip()
-                            os.remove(self.res_file)
-                            if res:
-                                return finish(res)
+                            prefix = f"RES|{request_id}|"
+                            suffix = "|ENDRES"
+                            if res.startswith(prefix) and res.endswith(suffix):
+                                try:
+                                    os.remove(self.res_file)
+                                except OSError:
+                                    pass
+                                return finish(res[len(prefix):-len(suffix)])
                         except OSError:
                             time.sleep(0.05)
                             continue
                     time.sleep(0.1)
+                # Leave a published timeout in place. The EA owns expiry and
+                # correlated cleanup; deleting here races with durable claim.
                 return finish("ERR|TIMEOUT")
             finally:
-                self._release_ipc_lock(fd)
+                self._release_ipc_lock(lock_handle)
 
 
 ea_bridge = EABridgeServer()
