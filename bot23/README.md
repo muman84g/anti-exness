@@ -1,10 +1,11 @@
 # Bot23 integrated inventory and independent session overlays
 
-## NY 05:30 edge-break fade（研究best移植済み・初期無効）
+## NY 05:30 edge-break fade（研究best移植済み・有効候補）
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
-（magic 230040-230043）へ移植しています。`t0530_edge_enabled=false`のため、
-更新・起動だけではこの戦略の新規注文を出しません。CentOS/MT5への配置、設定切替、
+（magic 230040-230043）へ移植しています。現在のローカル候補
+`bot23-integrated-session-vwap-off-t0530-edge-on-v003`では
+`t0530_edge_enabled=true`です。CentOS/MT5への配置、設定切替、
 再起動、live/forward確認はこのローカル候補の範囲外です。
 
 確定M1の直前15本High/Lowを現在Closeが上抜けたときSHORT、下抜けたときLONGとし、
@@ -170,6 +171,13 @@ nearest 2.5-USD grid boundary, a bar must sweep that boundary by at least
 is admitted. One private 0.01-lot lane holds the confirmed broker fill for 60
 minutes and has capacity one. It does not enter ZA routing or use ZA pullback,
 adds, adaptive exits, cooldown, or LONG-target rearm.
+
+Operational status as of 2026-09-02: `midday_session_enabled=false`. An
+unchanged-candidate extended-forward diagnostic produced 25 Stress trades /
+USD -52.561 / PF 0.511, while the live sample was also negative. The master
+switch therefore blocks new Midday orders while preserving passive shadow
+opportunity/state-tag evidence and management of any already-owned Midday
+position. Morning, pre-EU30, and ZA routing are unchanged.
 
 The adopted pre-Europe overlay keeps the original JST 13:00-to-15:30/16:30
 market-time meaning, but runtime admission is resolved and compared only in

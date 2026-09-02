@@ -8,7 +8,7 @@
 - Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
 - Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
 - Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
-- Runtime boundary: local files only; `t0530_edge_enabled=false`; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+- Runtime boundary: local candidate `bot23-integrated-session-vwap-off-t0530-edge-on-v003`; `t0530_edge_enabled=true`; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
 
 ## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate
 
@@ -281,6 +281,14 @@ Canonical runs:
 The forward file was already consumed during selection and contains only four
 trades. It is reported for transparency, not treated as independent forward
 proof and not available for retuning.
+
+An unchanged-candidate diagnostic rerun on the extended forward tick file
+through 2026-09-02 produced 25 Stress trades / USD -52.561 / PF 0.5107 /
+every-tick MTM MDD USD 79.952, with all three sampled weeks negative. This is
+diagnostic evidence on an already observed period rather than a reusable
+holdout. It rejects continued live entry use of the fixed Midday candidate;
+`midday_session_enabled=false` blocks new orders while its frozen identity,
+passive shadow evidence, and owned-position exit handling remain intact.
 
 ### JST09-13 combined portfolio-risk evidence
 

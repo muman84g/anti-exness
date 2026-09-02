@@ -87,7 +87,7 @@ EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-integrated-plus-session-vwap-disabled-plus-t0530-edge-disabled-v002"
+EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-off-t0530-edge-on-v003"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
 EXPECTED_BRIDGE_VERSION = "2026-08-31-s23-edge-policy-v28"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
@@ -3879,8 +3879,6 @@ class S23HorizontalInventoryRunner:
                 or int(row.get("cooldown", -1)) != 0
             ):
                 return f"invalid_morning_lane_contract:{row.get('id')}"
-        if not bool(self.params.get("midday_session_enabled", False)):
-            return "midday_session_disabled"
         if str(self.params.get("midday_session_policy_id") or "") != EXPECTED_MIDDAY_POLICY_ID:
             return f"invalid_midday_policy_id={self.params.get('midday_session_policy_id')}"
         if str(self.params.get("midday_session_params_hash") or "") != EXPECTED_MIDDAY_POLICY_PARAMS_HASH:
@@ -7947,6 +7945,16 @@ class S23HorizontalInventoryRunner:
                 "tag_opportunity", opportunity=opportunity, at=poll_time, bars=bars,
                 bid=float(info.bid), ask=float(info.ask), context=shadow_context,
             )
+            if not bool(self.params.get("midday_session_enabled", False)):
+                self._trade_row(
+                    "midday_decision", strat, opportunity_id=opportunity_id, side=side,
+                    reason="midday_session_disabled", signal_bar_time=signal_bar_text,
+                )
+                self._midday_observer_call(
+                    "record_route", opportunity_id=opportunity_id, at=poll_time,
+                    status="unconsumed", reason="midday_session_disabled",
+                )
+                continue
             if not readiness.get(int(strat["lane_id"]), False):
                 self._trade_row("midday_decision", strat, opportunity_id=opportunity_id, side=side, reason="exit_or_sync_block", signal_bar_time=signal_bar_text)
                 self._midday_observer_call("record_route", opportunity_id=opportunity_id, at=poll_time, status="unconsumed", reason="exit_or_sync_block")

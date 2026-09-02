@@ -5931,6 +5931,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_midday_capacity_one_blocks_second_position(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["midday_session_enabled"] = True
         strat = runner.params["midday_session_strategies"][0]
         signal_bar = pd.Timestamp("2026-08-28 02:10", tz="UTC")
         bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
@@ -5945,6 +5946,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_midday_opportunity_is_passively_observed_and_tagged_before_routing(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["midday_session_enabled"] = True
         strat = runner.params["midday_session_strategies"][0]
         observer = RecordingObserver()
         tag_calls = []
@@ -5966,6 +5968,51 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(registered["effective_side"], "LONG")
         self.assertEqual(observer.calls[1][1]["status"], "consumed")
         self.assertEqual(len(tag_calls), 1)
+
+    def test_midday_master_switch_blocks_orders_but_keeps_shadow_evidence(self):
+        runner, _za, _state = make_runner(live=False)
+        self.assertFalse(runner.params["midday_session_enabled"])
+        strat = runner.params["midday_session_strategies"][0]
+        observer = RecordingObserver()
+        tag_calls = []
+        runner.midday_shadow_observer = observer
+        runner.midday_shadow_state_tagger = SimpleNamespace(
+            enabled=True,
+            tag_opportunity=lambda **kwargs: tag_calls.append(dict(kwargs)),
+        )
+        signal_bar = pd.Timestamp("2026-08-28 02:10", tz="UTC")
+        bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
+        quote = SimpleNamespace(bid=100.0, ask=100.03)
+        with patch.object(runner, "_midday_signal_side", return_value="LONG"), patch.object(
+            live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)
+        ):
+            runner._process_midday_entries(
+                bars, bars.iloc[-1], quote,
+                signal_bar + pd.Timedelta(minutes=1), {8: True},
+            )
+        self.assertFalse(runner._st(strat)["basket"])
+        self.assertEqual(len(tag_calls), 1)
+        self.assertEqual([method for method, _kwargs in observer.calls], ["register_opportunity", "record_route"])
+        self.assertEqual(observer.calls[1][1]["status"], "unconsumed")
+        self.assertEqual(observer.calls[1][1]["reason"], "midday_session_disabled")
+
+    def test_midday_master_switch_preserves_owned_exit_monitoring(self):
+        runner, _za, _state = make_runner(live=False)
+        self.assertFalse(runner.params["midday_session_enabled"])
+        strat = runner.params["midday_session_strategies"][0]
+        state = runner._st(strat)
+        state["basket"] = [{
+            "side": "LONG", "lot": 0.01, "entry_price": 100.0,
+            "entry_time_utc": "2026-08-28T02:10:00+00:00",
+        }]
+        quote = SimpleNamespace(bid=99.0, ask=99.03)
+        poll_time = pd.Timestamp("2026-08-28 03:10", tz="UTC")
+        with patch.object(runner, "_sync_strategy", return_value=True), patch.object(
+            runner, "_monitor_midday_position", return_value=True,
+        ) as monitor:
+            readiness = runner._process_midday_exits(quote, poll_time)
+        monitor.assert_called_once_with(strat, quote, poll_time)
+        self.assertFalse(readiness[8])
 
     def test_price_effort_direction_control_signal(self):
         index = pd.date_range("2026-08-28 00:10", periods=20, freq="1min", tz="UTC")
