@@ -678,8 +678,12 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot24/live_config.py:/app/bot24/live_config.py:ro
       - ./bot24/live_s24_bot.py:/app/bot24/live_s24_bot.py:ro
+      - ./bot24/time_regime_wrapper.py:/app/bot24/time_regime_wrapper.py:ro
       - ./bot24/shadow_opportunity_observer.py:/app/bot24/shadow_opportunity_observer.py:ro
       - ./bot24/shadow_state_tagger.py:/app/bot24/shadow_state_tagger.py:ro
+      - ./bot24/v206_range_strategy.py:/app/bot24/v206_range_strategy.py:ro
+      - ./bot24/v206_execution.py:/app/bot24/v206_execution.py:ro
+      - ./bot24/v206_live_lane.py:/app/bot24/v206_live_lane.py:ro
       - ./bot24/live_data_fetcher.py:/app/bot24/live_data_fetcher.py:ro
       - ./bot24/live_executor.py:/app/bot24/live_executor.py:ro
       - ./bot24/live_safety.py:/app/bot24/live_safety.py:ro
@@ -696,6 +700,9 @@ services:
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot24
       - BOT_RUNNER_FILE=live_s24_bot.py
+      - BOT24_MT5_LOGIN=${BOT24_MT5_LOGIN:-0}
+      - BOT24_MT5_PASSWORD=${BOT24_MT5_PASSWORD:-}
+      - BOT24_MT5_SERVER=${BOT24_MT5_SERVER:-UNCONFIGURED}
       - EA_BRIDGE_EXPERT_NAME=BotBridge_s24
       - EA_BRIDGE_SOURCE_FILE=/app/bot24/BotBridge_s24.mq5
       - EA_BRIDGE_COMMAND_FILE=cmd_s24.txt
@@ -706,6 +713,8 @@ services:
       - EA_BRIDGE_COMMAND_RETRIES=1
       - EA_BRIDGE_RETRY_SLEEP_SECONDS=0.2
       - EA_BRIDGE_SLOW_COMMAND_LOG_SECONDS=3.0
+      - BOT_MANUAL_ALERT_ENABLED=1
+      - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
       - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 

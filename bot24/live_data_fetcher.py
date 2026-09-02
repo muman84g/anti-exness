@@ -35,14 +35,19 @@ class MT5DataManager:
         if not res or not res.startswith("OK|"):
             return None
         rows: list[dict[str, Any]] = []
+        malformed = 0
         for item in res[3:].split("|"):
-            parts = [part.strip() for part in item.split(",")]
-            if len(parts) < 6:
+            parts = item.split(",")
+            if len(parts) != 6 or any(part != part.strip() for part in parts):
+                malformed += 1
                 continue
             try:
+                epoch = int(parts[0])
+                if epoch <= 0:
+                    raise ValueError("nonpositive epoch")
                 rows.append(
                     {
-                        "time": parts[0],
+                        "time": epoch,
                         "Open": float(parts[1]),
                         "High": float(parts[2]),
                         "Low": float(parts[3]),
@@ -50,15 +55,18 @@ class MT5DataManager:
                         "Volume": int(float(parts[5])),
                     }
                 )
-            except ValueError:
+            except (TypeError, ValueError, OverflowError):
+                malformed += 1
                 continue
-        if not rows:
+        if not rows or malformed:
             return None
         df = pd.DataFrame(rows)
         try:
-            idx = pd.DatetimeIndex(pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M"))
-        except ValueError:
-            idx = pd.DatetimeIndex(pd.to_datetime(df["time"]))
+            idx = pd.DatetimeIndex(pd.to_datetime(df["time"], unit="s", utc=True))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if idx.has_duplicates or not idx.is_monotonic_increasing:
+            return None
         df.index = idx
         bars = df[["Open", "High", "Low", "Close", "Volume"]]
         return normalize_hist_bars(

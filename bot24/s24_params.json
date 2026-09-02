@@ -2,19 +2,67 @@
   "enabled": true, "live_trading_enabled": true, "shadow_forward_enabled": false,
   "require_hedging_account": true, "bot_number": "24", "bot_suffix": "s24",
   "strategy_id": "bot24_visual_no_adverse_c_target16", "expected_magic": 200024,
-  "expected_bridge_name": "BotBridge_s24", "symbol": "XAUUSD", "mt5_symbol": "XAUUSD",
+  "expected_bridge_name": "BotBridge_s24", "expected_bridge_version": "2026-09-02-s24-core-atomic-v13", "symbol": "XAUUSD", "mt5_symbol": "XAUUSD",
   "default_lot": 0.01, "contract_size": 100.0, "poll_interval_seconds": 5,
-  "status_log_interval_seconds": 60, "broker_timezone": "UTC", "m1_timeframe": 1,
-  "m1_bars": 360, "drop_latest_m1_bar": true, "max_signal_delay_minutes": 2,
+  "status_log_interval_seconds": 60, "broker_timezone": "UTC", "hist_timestamp_basis": "unix_seconds_utc", "m1_timeframe": 1,
+  "m1_bars": 360, "v206_enabled": true, "v206_m1_bars": 1000,
+  "v206_strategy": {
+    "enabled": true, "id": "range_rotation_v206_lane_1", "lane_id": 206,
+    "spec_id": "man_237_v206", "signal_id": "path_monotonic_center_approach",
+    "magic": 240206, "comment_prefix": "s24_v206", "lot": 0.01,
+    "max_positions": 1, "cooldown": 5, "timeout_minutes": 30,
+    "stop_atr": 0.5, "target_r": 1.0
+  },
+  "drop_latest_m1_bar": true, "max_signal_delay_minutes": 2,
   "point_size": 0.001, "price_digits": 3, "max_entry_spread_points": 300.0,
+  "time_close_max_spread_points": 300.0, "time_close_stable_quotes": 3,
+  "time_close_force_after_minutes": 30.0, "time_close_market_closed_retry_seconds": 60.0,
   "deviation_points": 50,
+  "entry_time_routing": {
+    "enabled": true,
+    "regimes": [{
+      "id": "utc_1300_1800_current",
+      "timezone": "UTC",
+      "start_local": "13:00",
+      "end_local": "18:00",
+      "strategy_ids": ["visual_no_adverse_c_target16"],
+      "weekdays": [0, 1, 2, 3, 4, 5, 6],
+      "enabled": true
+    }]
+  },
   "safety": {"hist_timestamps_are_utc": true, "stale_signal_guard": true, "preflight_clean_sync": true, "periodic_clean_sync": true, "clear_recoverable_sync_block": true, "save_state_after_clear": true, "broker_sl_residual_clear": false, "audit_log": true},
+  "runner_shadow": {
+    "enabled": true,
+    "execution_mode": "shadow",
+    "lane_id": 2,
+    "lot": 0.01,
+    "max_positions": 2,
+    "add_atr": 0.85,
+    "basket_target_usd": 32.0,
+    "basket_stop_usd": 48.0,
+    "max_hold_bars": 120,
+    "cooldown": 3,
+    "exit_clock": "confirmed_m1",
+    "state_tagger": {
+      "enabled": true,
+      "csv": "s24_shadow_state_tags.csv"
+    },
+    "opportunity_observer": {
+      "enabled": true,
+      "horizons_minutes": [1, 5, 15, 30, 60],
+      "completed_id_retention_days": 14,
+      "opportunity_csv": "s24_shadow_opportunities.csv",
+      "markout_csv": "s24_shadow_markouts.csv",
+      "state_file": "s24_shadow_observer_state.json"
+    }
+  },
   "strategies": [{
     "enabled": true, "id": "visual_no_adverse_c_target16", "spec_id": "visual_no_adverse_c:target16",
     "magic": 200024, "comment_prefix": "s24_no_adverse", "lot": 0.01,
     "session_start_utc": 13, "session_end_utc": 18, "mode": "breakout_impulse",
     "impulse_bars": 10, "impulse_atr": 0.60, "add_atr": 0.45, "max_positions": 8,
     "basket_target_usd": 16.0, "basket_stop_usd": 48.0, "max_hold_bars": 120,
+    "exit_clock": "confirmed_m1",
     "cooldown": 3, "vol_min": 1.05, "failure_to_progress_bars": 0,
     "failure_to_progress_peak_usd": 0.0, "reverse_on_fail": false
   }]
