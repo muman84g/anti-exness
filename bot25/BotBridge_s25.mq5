@@ -7,12 +7,39 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s25"
-#define BRIDGE_VERSION "2026-08-27-s25-man231-ops-v5"
-#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,PENDING,POSITIONS,POSITION,ORDERS,CLOSEDEAL,MODIFY,CANCEL,CLOSE"
+#define BRIDGE_VERSION "2026-09-04-s25-v24-atomic-v8"
+#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s25.txt";
 input string InpResponseFile = "res_s25.txt";
+input string InpClaimFile = "claim_s25.txt";
 input int InpTimerMs = 250;
+
+string consumer_owner_name = "BotBridge_s25_consumer_owner";
+string consumer_heartbeat_name = "BotBridge_s25_consumer_heartbeat";
+double consumer_token = 0.0;
+
+bool AcquireConsumerOwnership()
+{
+   consumer_token = (double)((ChartID() % 1000000000) * 1000000 + (long)(GetTickCount() % 1000000) + 1);
+   if(!GlobalVariableCheck(consumer_owner_name))
+      GlobalVariableSet(consumer_owner_name, 0.0);
+   double observed = GlobalVariableGet(consumer_owner_name);
+   // Never steal a non-zero owner automatically. A slow broker operation can
+   // exceed a heartbeat threshold; takeover would create two consumers.
+   if(observed != 0.0)
+      return false;
+   if(!GlobalVariableSetOnCondition(consumer_owner_name, consumer_token, observed))
+      return false;
+   GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal());
+   return true;
+}
+
+bool OwnsConsumerNamespace()
+{
+   return consumer_token != 0.0 &&
+      GlobalVariableGet(consumer_owner_name) == consumer_token;
+}
 
 string ReadCommand()
 {
@@ -26,18 +53,51 @@ string ReadCommand()
 
 void ClearCommand()
 {
-   int handle = FileOpen(InpCommandFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE);
-   if(handle != INVALID_HANDLE)
-      FileClose(handle);
+   FileDelete(InpCommandFile);
 }
 
-void WriteResponse(const string response)
+string ReadClaim()
+{
+   int handle = FileOpen(InpClaimFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE)
+      return "";
+   string claim = FileReadString(handle);
+   FileClose(handle);
+   return claim;
+}
+
+bool WriteClaim(const string claim)
+{
+   int handle = FileOpen(InpClaimFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE)
+      return false;
+   FileWriteString(handle, claim);
+   FileFlush(handle);
+   FileClose(handle);
+   return true;
+}
+
+void ClearClaim()
+{
+   FileDelete(InpClaimFile);
+}
+
+bool WriteResponse(const string response)
 {
    int handle = FileOpen(InpResponseFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
-      return;
-   FileWriteString(handle, response);
+      return false;
+   uint written = FileWriteString(handle, response);
+   FileFlush(handle);
    FileClose(handle);
+   if(written != (uint)StringLen(response))
+      return false;
+   int verify_handle = FileOpen(InpResponseFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE);
+   if(verify_handle == INVALID_HANDLE)
+      return false;
+   string observed = FileReadString(verify_handle);
+   FileClose(verify_handle);
+   return observed == response;
 }
 
 string PositionRecord()
@@ -52,10 +112,11 @@ string PositionRecord()
    double profit = PositionGetDouble(POSITION_PROFIT);
    long magic = PositionGetInteger(POSITION_MAGIC);
    datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+   long open_time_msc = PositionGetInteger(POSITION_TIME_MSC);
    ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
    string comment = PositionGetString(POSITION_COMMENT);
-   return StringFormat("%I64u,%s,%d,%.2f,%.10f,%.10f,%.10f,%.2f,%d,%d,%I64u,%s",
-      ticket, symbol, (int)type, volume, open_price, sl, tp, profit, (int)magic, (int)open_time, identifier, comment);
+   return StringFormat("%I64u,%s,%d,%.2f,%.10f,%.10f,%.10f,%.2f,%d,%d,%I64d,%I64u,%s",
+      ticket, symbol, (int)type, volume, open_price, sl, tp, profit, (int)magic, (int)open_time, open_time_msc, identifier, comment);
 }
 
 string OrderRecord()
@@ -89,14 +150,153 @@ bool IsMarketDone(const uint retcode, const ulong deal)
    return (retcode == TRADE_RETCODE_DONE && deal > 0);
 }
 
-bool IsPendingPlaced(const uint retcode, const ulong order)
+bool IsCanonicalS25Comment(const string comment)
 {
-   return ((retcode == TRADE_RETCODE_PLACED || retcode == TRADE_RETCODE_DONE) && order > 0);
+   string prefix = "s25_m231_";
+   int prefix_length = StringLen(prefix);
+   int length = StringLen(comment);
+   if(length < prefix_length + 5 || StringSubstr(comment, 0, prefix_length) != prefix)
+      return false;
+   ushort side = StringGetCharacter(comment, prefix_length);
+   if(side != 'L' && side != 'S')
+      return false;
+   for(int index = prefix_length + 1; index < length; ++index)
+   {
+      ushort character = StringGetCharacter(comment, index);
+      if(character < '0' || character > '9')
+         return false;
+   }
+   return true;
 }
 
-bool IsModifyDone(const uint retcode)
+bool IsCanonicalOpenPolicy(
+   const string symbol,
+   const int order_type,
+   const double volume,
+   const double sl,
+   const double tp,
+   const long magic,
+   const string comment,
+   const int deviation)
 {
-   return (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_NO_CHANGES);
+   return (
+      symbol == "XAUUSD" &&
+       (order_type == ORDER_TYPE_BUY || order_type == ORDER_TYPE_SELL) &&
+       MathAbs(volume - 0.01) <= 0.000000001 &&
+       sl == 0.0 &&
+       tp == 0.0 &&
+       magic == 200025 &&
+       IsCanonicalS25Comment(comment) &&
+      deviation == 50
+   );
+}
+
+bool ParseCanonicalUnsignedLong(const string value, long &parsed)
+{
+   int length = StringLen(value);
+   if(length <= 0 || (length > 1 && StringGetCharacter(value, 0) == '0'))
+      return false;
+   for(int i = 0; i < length; ++i)
+   {
+      ushort character = StringGetCharacter(value, i);
+      if(character < '0' || character > '9')
+         return false;
+   }
+   parsed = StringToInteger(value);
+   return parsed >= 0 && value == StringFormat("%I64d", parsed);
+}
+
+bool IsRequestId(const string value)
+{
+   if(StringLen(value) != 32)
+      return false;
+   for(int index = 0; index < 32; ++index)
+   {
+      ushort character = StringGetCharacter(value, index);
+      bool digit = character >= '0' && character <= '9';
+      bool lower_hex = character >= 'a' && character <= 'f';
+      if(!digit && !lower_hex)
+         return false;
+   }
+   return true;
+}
+
+bool IsUnsignedDecimalText(const string value)
+{
+   int length = StringLen(value);
+   if(length <= 0 || StringGetCharacter(value, 0) == '.' ||
+      StringGetCharacter(value, length - 1) == '.')
+      return false;
+   bool dot_seen = false;
+   for(int index = 0; index < length; ++index)
+   {
+      ushort character = StringGetCharacter(value, index);
+      if(character == '.')
+      {
+         if(dot_seen)
+            return false;
+         dot_seen = true;
+      }
+      else if(character < '0' || character > '9')
+         return false;
+   }
+   return true;
+}
+
+bool IsZeroArgCommand(string &parts[], const int count)
+{
+   return count == 1 || (count == 2 && parts[1] == "");
+}
+
+bool ValidOpenNumericFields(string &parts[])
+{
+   long parsed = 0;
+   return ParseCanonicalUnsignedLong(parts[2], parsed) &&
+      IsUnsignedDecimalText(parts[3]) && IsUnsignedDecimalText(parts[4]) &&
+      IsUnsignedDecimalText(parts[5]) &&
+      ParseCanonicalUnsignedLong(parts[6], parsed) &&
+      ParseCanonicalUnsignedLong(parts[8], parsed) &&
+      ParseCanonicalUnsignedLong(parts[9], parsed) &&
+      ParseCanonicalUnsignedLong(parts[11], parsed);
+}
+
+bool ValidCloseNumericFields(string &parts[])
+{
+   long parsed = 0;
+   return ParseCanonicalUnsignedLong(parts[1], parsed) &&
+      ParseCanonicalUnsignedLong(parts[2], parsed) &&
+      ParseCanonicalUnsignedLong(parts[3], parsed) &&
+      ParseCanonicalUnsignedLong(parts[6], parsed) &&
+      ParseCanonicalUnsignedLong(parts[8], parsed) &&
+      ParseCanonicalUnsignedLong(parts[9], parsed) &&
+      IsUnsignedDecimalText(parts[10]);
+}
+
+bool ValidHistoryNumericFields(string &parts[], const int count)
+{
+   long parsed = 0;
+   return count == 4 && ParseCanonicalUnsignedLong(parts[2], parsed) &&
+      ParseCanonicalUnsignedLong(parts[3], parsed);
+}
+
+bool IsOwnedMagic(const long magic)
+{
+   return magic == 200025;
+}
+
+bool OwnedOrdersFlat(const string symbol, const long magic)
+{
+   for(int index = OrdersTotal() - 1; index >= 0; --index)
+   {
+      ResetLastError();
+      ulong ticket = OrderGetTicket(index);
+      if(ticket == 0 || !OrderSelect(ticket))
+         return false;
+      if(OrderGetString(ORDER_SYMBOL) == symbol &&
+         OrderGetInteger(ORDER_MAGIC) == magic)
+         return false;
+   }
+   return true;
 }
 
 string HandleCommand(const string command)
@@ -107,13 +307,17 @@ string HandleCommand(const string command)
       return "ERR|EMPTY";
    string op = parts[0];
 
-   if(op == "ECHO")
+   if(op == "PENDING" || op == "MODIFY" || op == "CANCEL" ||
+      op == "HISTPAGE" || op == "TICKS")
+      return "ERR|COMMAND_DISABLED";
+
+   if(op == "ECHO" && IsZeroArgCommand(parts, n))
       return "OK|Alive";
 
-   if(op == "CAPS")
+   if(op == "CAPS" && IsZeroArgCommand(parts, n))
       return "OK|CAPS|" + BRIDGE_NAME + "|" + BRIDGE_VERSION + "|" + BRIDGE_COMMANDS;
 
-   if(op == "ACCOUNT")
+   if(op == "ACCOUNT" && IsZeroArgCommand(parts, n))
    {
       long margin_mode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
       long account_trade_allowed = AccountInfoInteger(ACCOUNT_TRADE_ALLOWED);
@@ -135,9 +339,11 @@ string HandleCommand(const string command)
          account_currency);
    }
 
-   if(op == "INFO" && n >= 2)
+   if(op == "INFO" && n == 2)
    {
       string symbol = parts[1];
+      if(symbol != "XAUUSD")
+         return "ERR|INFO_POLICY_GUARD";
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick))
          return "ERR|INFO_TICK";
@@ -150,16 +356,22 @@ string HandleCommand(const string command)
       double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
       int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
-      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d|%I64d",
-         tick.ask, tick.bid, AccountInfoDouble(ACCOUNT_MARGIN_FREE), point, min_vol, max_vol, vol_step,
-         tick_value, tick_size, contract, digits, stops_level, (long)tick.time_msc);
+      int trade_mode = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+      long order_mode = SymbolInfoInteger(symbol, SYMBOL_ORDER_MODE);
+      return StringFormat("OK|%.10f|%.10f|%.2f|%.10f|%.2f|%.2f|%.2f|%.10f|%.10f|%.2f|%d|%d|%I64d|%d|%I64d",
+           tick.ask, tick.bid, AccountInfoDouble(ACCOUNT_MARGIN_FREE), point, min_vol, max_vol, vol_step,
+           tick_value, tick_size, contract, digits, stops_level, tick.time_msc, trade_mode, order_mode);
    }
 
-   if(op == "HIST" && n >= 4)
+   if(op == "HIST" && n == 4)
    {
       string symbol = parts[1];
+      if(symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n))
+         return "ERR|BAD_HIST_GUARD";
       ENUM_TIMEFRAMES timeframe = (ENUM_TIMEFRAMES)((int)StringToInteger(parts[2]));
       int bars = (int)StringToInteger(parts[3]);
+       if(timeframe != PERIOD_M5)
+         return "ERR|HIST_POLICY_GUARD";
       if(bars <= 0 || bars > 5000)
          return "ERR|BAD_HIST_BARS";
       if(!SymbolSelect(symbol, true))
@@ -176,7 +388,7 @@ string HandleCommand(const string command)
       for(int i = copied - 1; i >= 0; --i)
       {
          string bar_time = TimeToString(rates[i].time, TIME_DATE | TIME_MINUTES);
-         response += "|" + StringFormat("%s,%.10f,%.10f,%.10f,%.10f,%I64d,%I64d",
+          response += "|" + StringFormat("%s,%.10f,%.10f,%.10f,%.10f,%I64d,%I64d",
             bar_time,
             rates[i].open,
             rates[i].high,
@@ -185,11 +397,13 @@ string HandleCommand(const string command)
             (long)rates[i].tick_volume,
             (long)rates[i].time);
       }
-      return response;
+       return response + "|" + StringFormat("END,%d", copied);
    }
 
-   if(op == "OPEN" && n >= 8)
+   if(op == "OPEN")
    {
+       if(n != 12 || !ValidOpenNumericFields(parts))
+         return "ERR|BAD_OPEN_GUARD";
       string symbol = parts[1];
       int order_type = (int)StringToInteger(parts[2]);
       double volume = StringToDouble(parts[3]);
@@ -200,6 +414,65 @@ string HandleCommand(const string command)
       int deviation = 20;
       if(n >= 9)
          deviation = (int)StringToInteger(parts[8]);
+       long expected_login = StringToInteger(parts[9]);
+       string expected_server = parts[10];
+       int expected_owned_positions = (int)StringToInteger(parts[11]);
+       if(expected_owned_positions < 0 || expected_owned_positions > 12)
+          return "ERR|OPEN_INVENTORY_GUARD";
+       if(!IsCanonicalOpenPolicy(symbol, order_type, volume, sl, tp, magic, comment, deviation))
+          return "ERR|OPEN_POLICY_GUARD";
+       int owned_positions = 0;
+       for(int position_index = 0; position_index < PositionsTotal(); position_index++)
+       {
+          ulong owned_ticket = PositionGetTicket(position_index);
+          if(owned_ticket == 0 || !PositionSelectByTicket(owned_ticket))
+             return "ERR|OPEN_INVENTORY_QUERY";
+          if(PositionGetString(POSITION_SYMBOL) == symbol &&
+             PositionGetInteger(POSITION_MAGIC) == magic)
+          {
+              if(!IsCanonicalS25Comment(PositionGetString(POSITION_COMMENT)))
+                return "ERR|OPEN_INVENTORY_GUARD";
+             owned_positions++;
+          }
+       }
+       if(owned_positions != expected_owned_positions)
+          return "ERR|OPEN_INVENTORY_GUARD";
+       for(int order_index = 0; order_index < OrdersTotal(); order_index++)
+       {
+          ulong owned_order = OrderGetTicket(order_index);
+          if(owned_order == 0 || !OrderSelect(owned_order))
+             return "ERR|OPEN_ORDER_QUERY";
+          if(OrderGetString(ORDER_SYMBOL) == symbol &&
+             OrderGetInteger(ORDER_MAGIC) == magic)
+             return "ERR|OPEN_INVENTORY_GUARD";
+       }
+       long symbol_trade_mode = SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+       long symbol_order_mode = SymbolInfoInteger(symbol, SYMBOL_ORDER_MODE);
+       if(symbol_trade_mode == SYMBOL_TRADE_MODE_DISABLED ||
+          symbol_trade_mode == SYMBOL_TRADE_MODE_CLOSEONLY ||
+          (order_type == ORDER_TYPE_BUY && symbol_trade_mode == SYMBOL_TRADE_MODE_SHORTONLY) ||
+          (order_type == ORDER_TYPE_SELL && symbol_trade_mode == SYMBOL_TRADE_MODE_LONGONLY) ||
+          (symbol_order_mode & SYMBOL_ORDER_MARKET) == 0)
+          return "ERR|SYMBOL_ADMISSION_GUARD";
+       MqlTick admission_tick;
+       double required_margin = 0.0;
+       if(!SymbolInfoTick(symbol, admission_tick) ||
+          !OrderCalcMargin((ENUM_ORDER_TYPE)order_type, symbol, volume,
+             order_type == ORDER_TYPE_BUY ? admission_tick.ask : admission_tick.bid,
+             required_margin) ||
+          !MathIsValidNumber(required_margin) || required_margin <= 0.0 ||
+          AccountInfoDouble(ACCOUNT_MARGIN_FREE) < required_margin * 2.0)
+          return "ERR|MARGIN_ADMISSION_GUARD";
+       if(AccountInfoInteger(ACCOUNT_LOGIN) != expected_login ||
+         AccountInfoString(ACCOUNT_SERVER) != expected_server)
+         return "ERR|ACCOUNT_IDENTITY_GUARD";
+      if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+         return "ERR|ACCOUNT_MODE_GUARD";
+      if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0 ||
+         AccountInfoInteger(ACCOUNT_TRADE_EXPERT) == 0 ||
+         TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 ||
+         MQLInfoInteger(MQL_TRADE_ALLOWED) == 0)
+         return "ERR|TRADE_PERMISSION_GUARD";
       trade.SetExpertMagicNumber(magic);
       trade.SetDeviationInPoints(deviation);
       trade.SetTypeFillingBySymbol(symbol);
@@ -216,86 +489,118 @@ string HandleCommand(const string command)
       ulong deal = trade.ResultDeal();
       if(!ok || !IsMarketDone(retcode, deal))
          return StringFormat("ERR|%d|ORDER=%I64u|DEAL=%I64u|LAST=%d", retcode, order, deal, GetLastError());
-      return StringFormat("OK|%I64u|%I64u|%.10f|%d", order, deal, trade.ResultPrice(), retcode);
+        if(!HistoryDealSelect(deal))
+           return "ERR|OPEN_POSITION_CONFIRMATION";
+        ulong identifier = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+        ulong position_ticket = 0;
+        long open_time_msc = 0;
+        for(int confirm_index = PositionsTotal() - 1; confirm_index >= 0; --confirm_index)
+        {
+           ulong candidate_ticket = PositionGetTicket(confirm_index);
+           if(candidate_ticket == 0 || !PositionSelectByTicket(candidate_ticket))
+              return "ERR|OPEN_POSITION_CONFIRMATION";
+           if((ulong)PositionGetInteger(POSITION_IDENTIFIER) == identifier &&
+              PositionGetString(POSITION_SYMBOL) == symbol &&
+              PositionGetInteger(POSITION_MAGIC) == magic &&
+              PositionGetString(POSITION_COMMENT) == comment)
+           {
+              if(position_ticket != 0)
+                 return "ERR|OPEN_POSITION_CONFIRMATION";
+              position_ticket = candidate_ticket;
+              open_time_msc = PositionGetInteger(POSITION_TIME_MSC);
+           }
+        }
+        if(identifier == 0 || position_ticket == 0 || open_time_msc <= 0)
+           return "ERR|OPEN_POSITION_CONFIRMATION";
+        return StringFormat("OK|%I64u|%I64u|%I64u|%.10f|%I64d|%d",
+           position_ticket, identifier, deal, trade.ResultPrice(), open_time_msc, retcode);
    }
 
-   if(op == "PENDING" && n >= 9)
+   if(op == "POSITIONS" && n == 3)
    {
       string symbol = parts[1];
-      int order_type = (int)StringToInteger(parts[2]);
-      double volume = StringToDouble(parts[3]);
-      double price = StringToDouble(parts[4]);
-      double sl = StringToDouble(parts[5]);
-      double tp = StringToDouble(parts[6]);
-      long magic = StringToInteger(parts[7]);
-      string comment = parts[8];
-      trade.SetExpertMagicNumber(magic);
-      trade.SetTypeFillingBySymbol(symbol);
-      ResetLastError();
-      bool ok = false;
-      if(order_type == ORDER_TYPE_BUY_STOP)
-         ok = trade.BuyStop(volume, price, symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
-      else if(order_type == ORDER_TYPE_SELL_STOP)
-         ok = trade.SellStop(volume, price, symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
-      else
-         return "ERR|BAD_PENDING_TYPE";
-      uint retcode = trade.ResultRetcode();
-      ulong order = trade.ResultOrder();
-      if(!ok || !IsPendingPlaced(retcode, order))
-         return StringFormat("ERR|%d|ORDER=%I64u|LAST=%d", retcode, order, GetLastError());
-      return StringFormat("OK|%I64u|%.10f|%d", order, price, retcode);
-   }
-
-   if(op == "POSITIONS" && n >= 3)
-   {
-      string symbol = parts[1];
+      long parsed_magic = 0;
+      if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
+         !IsOwnedMagic(parsed_magic))
+         return "ERR|POSITIONS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";
-      for(int i = PositionsTotal() - 1; i >= 0; --i)
+      int matched = 0;
+      int total = PositionsTotal();
+      for(int i = total - 1; i >= 0; --i)
       {
+         ResetLastError();
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0 || !PositionSelectByTicket(ticket))
-            continue;
+            return StringFormat("ERR|POSITIONS_SELECT|%d|%d", i, GetLastError());
          if(PositionGetString(POSITION_SYMBOL) != symbol)
             continue;
          if(magic_filter >= 0 && PositionGetInteger(POSITION_MAGIC) != magic_filter)
             continue;
          response += "|" + PositionRecord();
+         matched++;
       }
-      return response;
+      return response + "|" + StringFormat("END,%d", matched);
    }
 
-   if(op == "POSITION" && n >= 2)
+   if(op == "POSITION" && n == 2)
    {
-      ulong ticket = (ulong)StringToInteger(parts[1]);
+      long parsed_ticket = 0;
+      if(!ParseCanonicalUnsignedLong(parts[1], parsed_ticket) || parsed_ticket <= 0)
+         return "ERR|BAD_POSITION_GUARD";
+      ulong ticket = (ulong)parsed_ticket;
+      ResetLastError();
       if(!PositionSelectByTicket(ticket))
-         return "ERR|POSITION_NOT_FOUND";
+      {
+         int select_error = GetLastError();
+         if(select_error == 4753)
+            return "ERR|POSITION_NOT_FOUND";
+         return StringFormat("ERR|POSITION_QUERY|%d", select_error);
+      }
+      long selected_magic = PositionGetInteger(POSITION_MAGIC);
+       if(PositionGetString(POSITION_SYMBOL) != "XAUUSD" ||
+          !IsOwnedMagic(selected_magic) ||
+          !IsCanonicalS25Comment(PositionGetString(POSITION_COMMENT)))
+         return "ERR|POSITION_POLICY_GUARD";
       return "OK|" + PositionRecord();
    }
 
-   if(op == "ORDERS" && n >= 3)
+   if(op == "ORDERS" && n == 3)
    {
       string symbol = parts[1];
+      long parsed_magic = 0;
+      if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
+         !IsOwnedMagic(parsed_magic))
+         return "ERR|ORDERS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";
-      for(int i = OrdersTotal() - 1; i >= 0; --i)
+      int matched = 0;
+      int total = OrdersTotal();
+      for(int i = total - 1; i >= 0; --i)
       {
+         ResetLastError();
          ulong ticket = OrderGetTicket(i);
          if(ticket == 0 || !OrderSelect(ticket))
-            continue;
+            return StringFormat("ERR|ORDERS_SELECT|%d|%d", i, GetLastError());
          if(OrderGetString(ORDER_SYMBOL) != symbol)
             continue;
          if(magic_filter >= 0 && OrderGetInteger(ORDER_MAGIC) != magic_filter)
             continue;
          response += "|" + OrderRecord();
+         matched++;
       }
-      return response;
+      return response + "|" + StringFormat("END,%d", matched);
    }
 
-   if(op == "CLOSEDEAL" && n >= 3)
+   if(op == "CLOSEDEAL" && n == 3)
    {
-      ulong position_id = (ulong)StringToInteger(parts[1]);
-      datetime from_time = (datetime)StringToInteger(parts[2]);
+      long parsed_position_id = 0;
+      long parsed_from_time = 0;
+      if(!ParseCanonicalUnsignedLong(parts[1], parsed_position_id) ||
+         !ParseCanonicalUnsignedLong(parts[2], parsed_from_time))
+         return "ERR|BAD_CLOSEDEAL_GUARD";
+      ulong position_id = (ulong)parsed_position_id;
+      datetime from_time = (datetime)parsed_from_time;
       if(position_id == 0)
          return "ERR|BAD_POSITION_ID";
       if(from_time <= 0)
@@ -303,12 +608,13 @@ string HandleCommand(const string command)
       if(!HistorySelect(from_time, TimeCurrent() + 60))
          return StringFormat("ERR|CLOSEDEAL_HISTORY|%d", GetLastError());
       int total = HistoryDealsTotal();
-      ulong close_deal = 0;
-      string close_symbol = "";
-      long close_magic = 0;
-      long close_reason = 0;
-      double close_price = 0.0;
-      datetime close_time = 0;
+      ulong latest_deal = 0;
+      string latest_symbol = "";
+      long latest_magic = 0;
+      long latest_reason = 0;
+      datetime latest_deal_time = 0;
+      double total_exit_volume = 0.0;
+      double weighted_exit_price = 0.0;
       double total_profit = 0.0;
       double total_commission = 0.0;
       double total_swap = 0.0;
@@ -321,64 +627,98 @@ string HandleCommand(const string command)
          if((ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != position_id)
             continue;
          long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-         total_profit += HistoryDealGetDouble(deal, DEAL_PROFIT);
-         total_commission += HistoryDealGetDouble(deal, DEAL_COMMISSION);
-         total_swap += HistoryDealGetDouble(deal, DEAL_SWAP);
-         total_fee += HistoryDealGetDouble(deal, DEAL_FEE);
+         if(entry != DEAL_ENTRY_IN && entry != DEAL_ENTRY_OUT &&
+            entry != DEAL_ENTRY_INOUT && entry != DEAL_ENTRY_OUT_BY)
+            continue;
+         string symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
+         long magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+         long reason = HistoryDealGetInteger(deal, DEAL_REASON);
+         double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+         double volume = HistoryDealGetDouble(deal, DEAL_VOLUME);
+         double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+         double commission = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+         double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+         double fee = HistoryDealGetDouble(deal, DEAL_FEE);
          datetime deal_time = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
-         if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && deal_time >= close_time)
+         if(price <= 0.0 || deal_time <= 0)
+            continue;
+         total_profit += profit;
+         total_commission += commission;
+         total_swap += swap;
+         total_fee += fee;
+         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT && entry != DEAL_ENTRY_OUT_BY)
+            continue;
+         if(volume <= 0.0)
+            continue;
+         total_exit_volume += volume;
+         weighted_exit_price += price * volume;
+         if(latest_deal == 0 || deal_time > latest_deal_time)
          {
-            close_deal = deal;
-            close_symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
-            close_magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
-            close_reason = HistoryDealGetInteger(deal, DEAL_REASON);
-            close_price = HistoryDealGetDouble(deal, DEAL_PRICE);
-            close_time = deal_time;
+            latest_deal = deal;
+            latest_symbol = symbol;
+            latest_magic = magic;
+            latest_reason = reason;
+            latest_deal_time = deal_time;
          }
       }
-      if(close_deal > 0)
-         return StringFormat("OK|FOUND|%I64u|%I64u|%s|%d|%s|%.10f|%.2f|%.2f|%.2f|%.2f|%d",
-            close_deal, position_id, close_symbol, (int)close_magic, EnumToString((ENUM_DEAL_REASON)close_reason),
-            close_price, total_profit, total_commission, total_swap, total_fee, (int)close_time);
+      if(latest_deal > 0 && total_exit_volume > 0.0)
+      {
+         weighted_exit_price /= total_exit_volume;
+         return StringFormat("OK|FOUND|%I64u|%I64u|%s|%d|%s|%.10f|%.2f|%.2f|%.2f|%.2f|%d|%.10f",
+            latest_deal, position_id, latest_symbol, (int)latest_magic,
+            EnumToString((ENUM_DEAL_REASON)latest_reason), weighted_exit_price,
+            total_profit, total_commission, total_swap, total_fee, (int)latest_deal_time,
+            total_exit_volume);
+      }
       return "OK|NONE";
    }
 
-   if(op == "MODIFY" && n >= 4)
+   if(op == "CLOSE")
    {
-      ulong ticket = (ulong)StringToInteger(parts[1]);
-      double sl = StringToDouble(parts[2]);
-      double tp = StringToDouble(parts[3]);
-      if(!PositionSelectByTicket(ticket))
-         return "ERR|POSITION_NOT_FOUND";
-      ResetLastError();
-      bool ok = trade.PositionModify(ticket, sl, tp);
-      uint retcode = trade.ResultRetcode();
-      if(!ok || !IsModifyDone(retcode))
-         return StringFormat("ERR|%d|LAST=%d", retcode, GetLastError());
-      return StringFormat("OK|MODIFIED|%d", retcode);
-   }
-
-   if(op == "CANCEL" && n >= 2)
-   {
-      ulong ticket = (ulong)StringToInteger(parts[1]);
-      ResetLastError();
-      bool ok = trade.OrderDelete(ticket);
-      uint retcode = trade.ResultRetcode();
-      if(!ok || retcode != TRADE_RETCODE_DONE)
-         return StringFormat("ERR|%d|LAST=%d", retcode, GetLastError());
-      return StringFormat("OK|CANCELED|%d", retcode);
-   }
-
-   if(op == "CLOSE" && n >= 2)
-   {
+       if(n != 11 || !ValidCloseNumericFields(parts))
+         return "ERR|BAD_CLOSE_GUARD";
       ulong ticket = (ulong)StringToInteger(parts[1]);
       int deviation = 20;
       if(n >= 3)
          deviation = (int)StringToInteger(parts[2]);
+      long expected_login = StringToInteger(parts[3]);
+      string expected_server = parts[4];
+      string expected_symbol = parts[5];
+      long expected_magic = StringToInteger(parts[6]);
+       string expected_comment = parts[7];
+       ulong expected_identifier = (ulong)StringToInteger(parts[8]);
+       int expected_type = (int)StringToInteger(parts[9]);
+       double expected_volume = StringToDouble(parts[10]);
+       if(ticket == 0 || deviation != 50 || expected_symbol != "XAUUSD" ||
+          expected_magic != 200025 || !IsCanonicalS25Comment(expected_comment) ||
+          expected_identifier == 0 ||
+          (expected_type != POSITION_TYPE_BUY && expected_type != POSITION_TYPE_SELL) ||
+          MathAbs(expected_volume - 0.01) > 0.000000001)
+          return "ERR|CLOSE_POLICY_GUARD";
+      if(AccountInfoInteger(ACCOUNT_LOGIN) != expected_login ||
+         AccountInfoString(ACCOUNT_SERVER) != expected_server)
+         return "ERR|ACCOUNT_IDENTITY_GUARD";
+      if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+         return "ERR|ACCOUNT_MODE_GUARD";
+      if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0 ||
+         AccountInfoInteger(ACCOUNT_TRADE_EXPERT) == 0 ||
+         TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 ||
+         MQLInfoInteger(MQL_TRADE_ALLOWED) == 0)
+         return "ERR|TRADE_PERMISSION_GUARD";
       if(!PositionSelectByTicket(ticket))
          return "ERR|POSITION_NOT_FOUND";
       string symbol = PositionGetString(POSITION_SYMBOL);
-      double volume = PositionGetDouble(POSITION_VOLUME);
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      string comment = PositionGetString(POSITION_COMMENT);
+       ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+       int position_type = (int)PositionGetInteger(POSITION_TYPE);
+       double volume = PositionGetDouble(POSITION_VOLUME);
+       if(symbol != expected_symbol || magic != expected_magic ||
+          comment != expected_comment || identifier != expected_identifier ||
+          position_type != expected_type ||
+          MathAbs(volume - expected_volume) > 0.000000001 ||
+          !OwnedOrdersFlat(symbol, magic))
+          return "ERR|POSITION_OWNERSHIP_GUARD";
       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
       double profit_before = PositionGetDouble(POSITION_PROFIT);
       trade.SetDeviationInPoints(deviation);
@@ -398,6 +738,8 @@ string HandleCommand(const string command)
 
 int OnInit()
 {
+   if(!AcquireConsumerOwnership())
+      return INIT_FAILED;
    EventSetMillisecondTimer(InpTimerMs);
    return INIT_SUCCEEDED;
 }
@@ -405,13 +747,111 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(OwnsConsumerNamespace())
+      GlobalVariableSetOnCondition(consumer_owner_name, 0.0, consumer_token);
 }
 
 void OnTimer()
 {
-   string command = ReadCommand();
-   if(command == "")
+   if(!OwnsConsumerNamespace())
       return;
-   ClearCommand();
-   WriteResponse(HandleCommand(command));
+   GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal());
+   string envelope = ReadClaim();
+   bool recovered_claim = envelope != "";
+   if(!recovered_claim)
+      envelope = ReadCommand();
+   if(envelope == "")
+      return;
+   if(StringFind(envelope, "REQ|") != 0)
+   {
+      if(!recovered_claim)
+         ClearCommand();
+      // A malformed durable claim is evidence of an unresolved execution
+      // boundary. Preserve it and hold the slot for manual inspection.
+      return;
+   }
+   int request_end = StringFind(envelope, "|", 4);
+   int deadline_end = request_end >= 0 ? StringFind(envelope, "|", request_end + 1) : -1;
+   if(request_end <= 4 || deadline_end <= request_end + 1)
+   {
+      if(!recovered_claim)
+         ClearCommand();
+      // Do not erase a corrupt recovered claim automatically.
+      return;
+   }
+   string request_id = StringSubstr(envelope, 4, request_end - 4);
+   string deadline_text = StringSubstr(
+      envelope, request_end + 1, deadline_end - request_end - 1);
+   long deadline_msc = 0;
+   string command = StringSubstr(envelope, deadline_end + 1);
+   if(!IsRequestId(request_id) ||
+      !ParseCanonicalUnsignedLong(deadline_text, deadline_msc) ||
+      deadline_msc <= 0 || command == "")
+   {
+      if(!recovered_claim)
+         ClearCommand();
+      // Preserve an invalid durable claim for explicit reconciliation.
+      return;
+   }
+   // TimeGMT() has one-second resolution while the publisher deadline is in
+   // milliseconds.  Compare against the floored deadline second so an
+   // unclaimed command can expire up to 999 ms early, never execute after its
+   // precise publisher deadline.
+   bool request_expired = deadline_msc <= 0 ||
+      ((long)TimeGMT()) >= deadline_msc / 1000;
+   bool recovered_mutation = recovered_claim &&
+      (StringFind(command, "OPEN|") == 0 || StringFind(command, "CLOSE|") == 0);
+   if(recovered_claim && ReadCommand() == envelope)
+   {
+      ClearCommand();
+      if(FileIsExist(InpCommandFile))
+      {
+         WriteResponse("RES|RID|" + request_id + "|ERR|COMMAND_CLEAR_FAILED|ENDRES");
+         return;
+      }
+   }
+   if(recovered_mutation)
+   {
+      if(WriteResponse("RES|RID|" + request_id + "|ERR|MUTATION_RESULT_UNRESOLVED|ENDRES"))
+         ClearClaim();
+      return;
+   }
+   if(request_expired && !recovered_claim)
+   {
+      // REQUEST_EXPIRED is a definitive no-mutation receipt only when the
+      // command is gone.  If deletion fails, stay silent: a later backward
+      // wall-clock adjustment must not make a residual command executable
+      // after the caller has already cleared its durable receipt.
+      ClearCommand();
+      if(FileIsExist(InpCommandFile))
+         return;
+      WriteResponse("RES|RID|" + request_id + "|ERR|REQUEST_EXPIRED|ENDRES");
+      return;
+   }
+   if(!recovered_claim)
+   {
+      if(!WriteClaim(envelope) || ReadClaim() != envelope)
+      {
+         // Neither the command nor a partial claim may remain executable after
+         // CLAIM_FAILED becomes observable by the caller.  If either deletion
+         // cannot be proven, stay silent so the caller retains an unresolved
+         // receipt and later inventory reconciliation remains mandatory.
+         ClearCommand();
+         if(FileIsExist(InpCommandFile))
+            return;
+         ClearClaim();
+         if(FileIsExist(InpClaimFile))
+            return;
+         WriteResponse("RES|RID|" + request_id + "|ERR|CLAIM_FAILED|ENDRES");
+         return;
+      }
+      ClearCommand();
+      if(FileIsExist(InpCommandFile))
+      {
+         WriteResponse("RES|RID|" + request_id + "|ERR|COMMAND_CLEAR_FAILED|ENDRES");
+         return;
+      }
+   }
+   if(WriteResponse("RES|RID|" + request_id + "|" + HandleCommand(command) + "|ENDRES"))
+      ClearClaim();
 }

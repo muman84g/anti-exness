@@ -1,0 +1,13 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "status": "failed",
+  "manifest": "C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_v3.json",
+  "manifest_id": "bot25_full_reaudit_20260904",
+  "manifest_version": 3,
+  "errors": [
+    "previous_manifest[C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_v2.json]:candidate_file_hash_mismatch:$.implementation.candidate_manifest.bot/bot25/LOG_SCHEMA.md",
+    "previous_manifest[C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_v2.json]:candidate_file_hash_mismatch:$.implementation.candidate_manifest.bot/bot25/README.md",
+    "previous_manifest[C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_v2.json]:candidate_file_hash_mismatch:$.implementation.candidate_manifest.bot/bot25/live_s25_bot.py",
+    "previous_manifest[C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_v2.json]:candidate_file_hash_mismatch:$.implementation.candidate_manifest.bot/bot25/test_s25_execution_boundary.py"
+  ]
+}

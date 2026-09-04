@@ -700,9 +700,6 @@ services:
       - WINEPREFIX=/root/.wine
       - BOT_MODULE_DIR=/app/bot24
       - BOT_RUNNER_FILE=live_s24_bot.py
-      - BOT24_MT5_LOGIN=${BOT24_MT5_LOGIN:-0}
-      - BOT24_MT5_PASSWORD=${BOT24_MT5_PASSWORD:-}
-      - BOT24_MT5_SERVER=${BOT24_MT5_SERVER:-UNCONFIGURED}
       - EA_BRIDGE_EXPERT_NAME=BotBridge_s24
       - EA_BRIDGE_SOURCE_FILE=/app/bot24/BotBridge_s24.mq5
       - EA_BRIDGE_COMMAND_FILE=cmd_s24.txt
@@ -718,7 +715,7 @@ services:
       - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 
-  # ---- Bot 25 (S25 man_231 XAUUSD bilateral book; live authorized) ----
+  # ---- Bot 25 (S25 V24 virtual bilateral core; live authorized 2026-09-04) ----
   exness-bot-25:
     image: exness-bot:latest
     container_name: exness-bot-25
@@ -769,7 +766,7 @@ services:
       - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
       - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
-      - BOT25_ENABLE_REAL_TRADING=MAN231_LIVE_ACK
+      - BOT25_ENABLE_REAL_TRADING=${BOT25_ENABLE_REAL_TRADING:-V24_VIRTUAL_CORE_LIVE_ACK}
 
   # ---- Bot 22 (S22 EURUSD squeeze-pullback shadow-first) ----
   exness-bot-22:

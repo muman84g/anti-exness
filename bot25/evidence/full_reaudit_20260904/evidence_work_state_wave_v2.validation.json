@@ -1,0 +1,8 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "status": "passed",
+  "manifest": "C:\\botter\\bot\\bot25\\evidence\\full_reaudit_20260904\\evidence_work_state_wave_v2.json",
+  "manifest_id": "bot25_full_reaudit_20260904",
+  "manifest_version": 2,
+  "errors": []
+}

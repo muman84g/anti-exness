@@ -37,19 +37,45 @@ def dt_text(value: Any) -> str:
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory_fd = os.open(path.parent, os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0)))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _strict_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"nonfinite JSON constant: {value}")
 
 
 def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
         return dict(default)
     with path.open("r", encoding="utf-8-sig") as handle:
-        value = json.load(handle)
+        value = json.load(handle, object_pairs_hook=_strict_json_pairs, parse_constant=_reject_json_constant)
     if not isinstance(value, dict):
         raise ValueError(f"JSON root must be an object: {path}")
     return value
@@ -58,9 +84,15 @@ def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 def _archive_schema_mismatch(path: Path, fields: list[str]) -> str | None:
     if not path.exists() or path.stat().st_size == 0:
         return None
+    raw = path.read_bytes()
+    if raw and not raw.endswith((b"\n", b"\r")):
+        raise RuntimeError(f"unterminated CSV row: {path}")
     with path.open("r", newline="", encoding="utf-8") as handle:
-        observed = next(csv.reader(handle), [])
+        rows = list(csv.reader(handle))
+    observed = rows[0] if rows else []
     if observed == fields:
+        if any(len(row) != len(fields) for row in rows[1:]):
+            raise RuntimeError(f"malformed CSV row width: {path}")
         return None
     old_dir = path.parent / "old"
     old_dir.mkdir(parents=True, exist_ok=True)

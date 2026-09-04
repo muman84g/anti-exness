@@ -1,5 +1,14 @@
 # Source Backtest
 
+## 2026-09-04 close-ledger replay durability
+
+Existing confirmed-deal replay now re-establishes file and parent-directory
+durability before state progression. This changes only crash recovery safety;
+signal, fill, exit, lot and timing parameters are unchanged. Local no-order
+evidence is separate from broker/runtime or deployment verification.
+The repeated audit adds strict CSV quote parsing: physical newline termination
+alone does not prove that a quoted close row is complete.
+
 ## 2026-09-04 Q01 variance-ratio release integration
 
 - Signal/policy: `Q01_variance_ratio_release` / `q01_k4_w48_t135_b12_hold30_cap1_v001`
@@ -10,7 +19,7 @@
 - Feed gap: a quote interval over 300 seconds closes at the first arrival quote. Feed-gap and fixed-hold exits do not defer for wide spread. Exact market-closed no-fill retains a durable close intent and retries from fresh broker quote time.
 - Ownership: independent lane 22, magic 230044, comment `s23_q01_l1`; Q01 does not reuse any existing basket or signal identity.
 - Evidence status: fixed DEV/Leakcheck/Forward tick evidence is inherited from the frozen research package. This local port verifies implementation parity and lifecycle safety; it does not create a fresh holdout or live-runtime result.
-- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`; bridge `2026-09-04-s23-strict-ipc-q01-v31`.
+- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`; bridge `2026-09-04-s23-strict-ipc-q01-v31`.
 - Runtime boundary: no CentOS/MT5 placement, restart, attachment, account access, state repair, or order execution was performed.
 
 ## 2026-08-31 t0530 edge-break best integration
@@ -21,7 +30,7 @@
 - Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
 - Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
 - Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
-- Runtime boundary: the later local candidate is `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`; Q01, t0530 edge, and session-VWAP are locally enabled; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+- Runtime boundary: the later local candidate is `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`; Q01, t0530 edge, and session-VWAP are locally enabled; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
 
 ## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate
 

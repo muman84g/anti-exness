@@ -1,0 +1,956 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "manifest_id": "bot25_full_reaudit_20260904",
+  "manifest_version": 2,
+  "active": true,
+  "previous_manifest": {
+    "path": "bot/bot25/evidence/full_reaudit_20260904/evidence_work_state_v1.json",
+    "sha256": "c6f7828e5a8f685dc91aadd4c9f9bf1bacc1c249b91f2f4fa0316293f37730a2",
+    "manifest_version": 1
+  },
+  "work_definition": {
+    "objective_id": "bot25_full_local_reaudit",
+    "user_request": "bot25を隅々まで精査し、修正や追加がなくなるまで反復する",
+    "normal_success_path": [
+      "freeze local scope",
+      "audit and correct",
+      "run regression and boundary validation",
+      "repeat until no new finding"
+    ],
+    "normal_success_contract": {
+      "supported_entry": "C:/botter/bot/bot25 local canonical V24 source",
+      "normal_input": "bot25 source, configuration, bridge, persistence, tests, and documentation",
+      "preconditions": [
+        "local-only authority",
+        "preserve canonical runtime state",
+        "no broker or CentOS action"
+      ],
+      "main_processing": [
+        "static review",
+        "failure-path review",
+        "targeted corrections",
+        "independent validation pass"
+      ],
+      "required_effect": "A fail-closed local V24 candidate with no known in-scope defect",
+      "minimum_result": "All local tests and structural checks pass without changing canonical runtime state"
+    },
+    "minimum_required_outcome": "Converge the bot25 local implementation audit and preserve existing position recovery and ownership safety.",
+    "design_constraints": [
+      "physical_seed_orders remains zero",
+      "existing broker positions are never closed",
+      "state is not reset or overwritten",
+      "no CentOS, deployment, restart, real activation, or Git push"
+    ],
+    "permitted_stop_conditions": [
+      "user_decision_required",
+      "technical_blocker",
+      "completion_no_go"
+    ],
+    "prohibited_substitutes": [
+      "stub",
+      "status_only_success",
+      "old_artifact_as_new",
+      "shadow_result_as_runtime_proof"
+    ],
+    "acceptance": [
+      {
+        "id": "AC_LOCAL_SAFETY",
+        "criterion": "Execution, ownership, restart, state, CSV, and bridge boundaries fail closed.",
+        "required_evidence": [
+          "tests and static audit"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "AC_V24_BEHAVIOR",
+        "criterion": "Episode start creates logical Long and Short only, while frontier add is the sole real entry path.",
+        "required_evidence": [
+          "V24 regression tests"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      },
+      {
+        "id": "AC_CONVERGENCE",
+        "criterion": "A post-correction audit pass finds no further in-scope defect.",
+        "required_evidence": [
+          "final audit report"
+        ],
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "status": "passed",
+        "waiver": null
+      }
+    ],
+    "authorized_scope": [
+      "local bot25 source, tests, docs, and bot25-specific shared compose/map entries"
+    ],
+    "excluded_scope": [
+      "CentOS",
+      "MT5 runtime",
+      "broker orders",
+      "deployment",
+      "restart",
+      "real trading activation",
+      "Git push"
+    ],
+    "no_change_boundaries": [
+      "bot23 and all other bots",
+      "live_config.py secret values",
+      "startup.ini secret values",
+      "canonical lifecycle state",
+      "broker positions"
+    ],
+    "authority": "User authorized local bot25 audit and corrections only.",
+    "required_confirmations": [],
+    "comparison_baseline_id": "BASELINE_BOT25_V24_EVIDENCE_V3",
+    "evidence_manifest_id": "bot25_full_reaudit_20260904",
+    "evidence_manifest_completeness": "complete",
+    "audit_scope_ids": [
+      "SCOPE_EXECUTION",
+      "SCOPE_STATE",
+      "SCOPE_EVIDENCE",
+      "SCOPE_RELEASE"
+    ],
+    "audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_FAILURE_PATH",
+      "AUDIT_RELEASE"
+    ],
+    "history": [
+      {
+        "version": 1,
+        "changed_at": "2026-09-04T06:09:39Z",
+        "reason": "Initial trust anchor before the final convergence and validation pass."
+      },
+      {
+        "version": 2,
+        "changed_at": "2026-09-04T09:46:00Z",
+        "reason": "Submission-boundary release branch from immutable v1. Preserve prior branches; add quote and reservation match repair."
+      }
+    ]
+  },
+  "risk": {
+    "class": "high",
+    "rationale": "The local files can later control real XAUUSD orders and existing-position lifecycle.",
+    "dimensions": [
+      "financial_safety",
+      "state_integrity",
+      "execution_idempotency",
+      "release_identity"
+    ],
+    "lowering_evidence": []
+  },
+  "execution_budget": {
+    "execution_mode": "direct_serial",
+    "rationale": "One owner must preserve local runtime state while auditing order boundaries.",
+    "max_delegated_jobs": 0,
+    "planned_audit_angle_ids": [
+      "AUDIT_STRUCTURAL",
+      "AUDIT_FAILURE_PATH",
+      "AUDIT_RELEASE"
+    ],
+    "same_root_cause_local_batch_limit": 2,
+    "evidence_budget": "Source hashes, state hashes, unit and failure-injection tests, MQL compile, JSON and Compose validation.",
+    "approximate_cost": "Several bounded local audit and correction passes.",
+    "delegation_plan": [],
+    "replan_triggers": [
+      "two_nonprogress_correction_batches",
+      "material_scope_or_identity_change"
+    ]
+  },
+  "time_estimate": {
+    "range": "30-90 minutes",
+    "confidence": "medium",
+    "critical_path": [
+      "execution audit",
+      "state migration audit",
+      "final regression",
+      "convergence pass"
+    ],
+    "high_cost_steps": [
+      "MQL compile and full regression"
+    ],
+    "external_waits": [],
+    "next_checkpoint": "After final regression and second static pass.",
+    "user_deadline": null,
+    "history": [
+      {
+        "version": 1,
+        "estimated_at": "2026-09-04T06:09:39Z",
+        "range": "30-90 minutes",
+        "confidence": "medium",
+        "critical_path": [
+          "execution audit",
+          "state migration audit",
+          "final regression",
+          "convergence pass"
+        ],
+        "reason": "High-risk local live-bot audit.",
+        "next_checkpoint": "After final regression and second static pass."
+      }
+    ]
+  },
+  "plan": {
+    "task_class": "defect_repair",
+    "implementation_completeness_gate": "passed",
+    "packages": [
+      {
+        "id": "WP_BOT25_AUDIT",
+        "task_class": "defect_repair",
+        "objective_ids": [
+          "bot25_full_local_reaudit"
+        ],
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "purpose": "Audit, correct, and converge the local bot25 V24 candidate.",
+        "owner": "parent",
+        "inputs": [
+          "bot/bot25",
+          "bot/docker-compose.yml",
+          "bot/BOT_BACKTEST_MAP_ja.md"
+        ],
+        "outputs": [
+          "bot/bot25/evidence/full_reaudit_20260904/final_audit_v1.md"
+        ],
+        "risk": "high",
+        "dependencies": [
+          "Python",
+          "MetaEditor",
+          "Docker Compose parser"
+        ],
+        "completion_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "state": "completed",
+        "blocker": null,
+        "next_check": "Separate user-authorized runtime audit before deployment."
+      }
+    ]
+  },
+  "baseline": {
+    "id": "BASELINE_BOT25_V24_EVIDENCE_V3",
+    "captured_at": "2026-09-04T06:09:39Z",
+    "fingerprint": "5a7c27a18de2223d0687067f1a9d089e0b23d8b3b565dc4467e79784c1bf79c5",
+    "layers": {
+      "source": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior V24 candidate source hashes are captured in the parent evidence."
+      },
+      "artifacts": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior V24 artifacts are captured."
+      },
+      "configuration": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior params and Compose identity are captured."
+      },
+      "dependencies": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior local dependency boundary is captured."
+      },
+      "toolchain": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior Python and Compose checks are captured."
+      },
+      "runtime": {
+        "status": "not_applicable",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "CentOS and MT5 runtime are excluded."
+      },
+      "persistence": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior state hash and migration tests are captured."
+      },
+      "gui_or_external": {
+        "status": "not_applicable",
+        "required_for_release": false,
+        "evidence": [],
+        "reason": "No external action is authorized."
+      },
+      "behavior": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior V24 seed removal and migration behavior is captured."
+      },
+      "tests": {
+        "status": "captured",
+        "required_for_release": true,
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v3.json",
+            "sha256": "b9ca87d07381052376e47fa71bb901d61f80308d0e3236f3740bd2b25f102a45"
+          }
+        ],
+        "reason": "Prior V24 local tests are captured."
+      }
+    },
+    "supplements": []
+  },
+  "implementation": {
+    "snapshot_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+    "frozen_at": "2026-09-04T09:46:00Z",
+    "candidate_manifest": {
+      "bot/BOT_BACKTEST_MAP_ja.md": "afba25684bc52ef9324c6150263054a00c781d8a041789f90eb3e6f9262b3779",
+      "bot/bot25/BotBridge_s25.mq5": "0dc2b950b1b0ce1afa790a331604b69b18860e53f51939ba589c319c415b3340",
+      "bot/bot25/LOG_SCHEMA.md": "273c5a6e15e8ec45bdf3c9664edface6027c572edbdd549e4ee21d5c2d30f3a1",
+      "bot/bot25/PORTING_AUDIT.md": "763d9d61f68dc7d5575322a883513b8ab6bf483c965fb6d1a26eafe8ca488504",
+      "bot/bot25/README.md": "fae2e611eddf367f3b084498caedd25d416da6543c69a1dad92ec3e4a349be57",
+      "bot/bot25/SOURCE_BACKTEST.md": "be20d41513d3b9181c5dcf4bb81d38a8fb3d8f36dfa1c805a00d12ecc891e873",
+      "bot/bot25/V24_VIRTUAL_CORE_SPEC.md": "836e4e39074cfe534c67d3d9d5c9f66d4b3a29c8d12cd71a471254cfa4c85073",
+      "bot/bot25/ea_bridge.py": "5cc3ac51b4a5e769652a2afc9a03b0660ef65f9addae14a00931aac5b44a1c56",
+      "bot/bot25/live_data_fetcher.py": "3d5c1bc2e359995497dd2b02b0929e36ba561ca8a3689db4549610067db42275",
+      "bot/bot25/live_executor.py": "9aa03c04378c525ace412b9089064b2b5113b3527109891dde0ffe3e777fd188",
+      "bot/bot25/live_manual_alerts.py": "8ededa670f67c42cddd81987cc9181dbd3e0357a420ff3a31a71b64a250abf53",
+      "bot/bot25/live_s25_bot.py": "39019af19ffe2a25480b62fb0f6f5001be5012a5dec353b650cdeec2f15caab1",
+      "bot/bot25/live_safety.py": "625fa309771e5e08d55ca768c87b46e39b4a135d5b31390698f8398c193550e9",
+      "bot/bot25/passive_evidence_io.py": "eeba36087b996de4662777ddf21501572f222d2e05afc4a497f0c21f250f034b",
+      "bot/bot25/s25_params.json": "30519f175d5b110884879b78fc27111028a8298bf56e226ad44bdf29721f7a85",
+      "bot/bot25/shadow_opportunity_observer.py": "ba3830d337fbaeec0ad3eba585a84ca2d94c5587e507a3d5b13365c549da514a",
+      "bot/bot25/shadow_state_tagger.py": "ed42f4483c0a17a3e4d4d758d853870cbd7caf673752d3a432c79f7073acaf7d",
+      "bot/bot25/test_s25_execution_boundary.py": "f6e094fffc13ff1d987fcae8836bafe3dae873fb5c4cb88ef86a82da83c43fbd",
+      "bot/bot25/test_s25_passive_evidence.py": "88d83095c3d1f7dc31a41729ca2b901d0f7a89195f9dca297e1f87dacea9848f",
+      "bot/bot25/test_s25_v24_virtual_core.py": "eb08bcf6fc2c2369fa6308162d83824d6b9fafd56a2ccfb417bed0992b0c16a5",
+      "bot/docker-compose.yml": "aebed58bd716c426ca22ea95c558d7bffede32a9f9ba3ada911e2f9b65c2a1e5"
+    },
+    "known_omissions": [
+      "CentOS and broker runtime validation excluded; not deployment approval."
+    ],
+    "unproven_layers": [
+      "runtime"
+    ]
+  },
+  "audits": {
+    "early": {
+      "status": "passed",
+      "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+      "angle_ids": [
+        "AUDIT_STRUCTURAL",
+        "AUDIT_FAILURE_PATH"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+          "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+        }
+      ],
+      "limitations": [
+        "Local static and simulated execution only."
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "allowed",
+      "scope_redetermination": null
+    },
+    "final": {
+      "status": "passed",
+      "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+      "angle_ids": [
+        "AUDIT_RELEASE"
+      ],
+      "evidence": [
+        {
+          "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+          "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+        }
+      ],
+      "limitations": [
+        "Local static and simulated execution only."
+      ],
+      "later_evidence_state": "complete",
+      "test_transition_permission": "not_applicable",
+      "scope_redetermination": null
+    },
+    "low_risk_omission": null
+  },
+  "tests": {
+    "target_snapshot_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+    "identity_gate": "passed",
+    "partitions": [
+      {
+        "id": "TEST_static",
+        "kind": "static",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_unit",
+        "kind": "unit",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_boundary",
+        "kind": "boundary",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_failure_injection",
+        "kind": "failure_injection",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_regression",
+        "kind": "regression",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_integration",
+        "kind": "integration",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_persistence",
+        "kind": "persistence",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_concurrency",
+        "kind": "concurrency",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_package",
+        "kind": "package",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_performance",
+        "kind": "performance",
+        "requirement": "not_applicable",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Not part of local safety audit; runtime and benchmark approval excluded.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_gui",
+        "kind": "gui",
+        "requirement": "not_applicable",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Not part of local safety audit; runtime and benchmark approval excluded.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_real_environment",
+        "kind": "real_environment",
+        "requirement": "not_applicable",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Not part of local safety audit; runtime and benchmark approval excluded.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "not_run",
+        "evidence": [],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      },
+      {
+        "id": "TEST_recovery",
+        "kind": "recovery",
+        "requirement": "required",
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "applicability_basis": "Local safety boundary and V24 behavior validation.",
+        "cost": "bounded local checks",
+        "evidence_owner": "parent",
+        "freshness": "Submission audit 2026-09-04",
+        "target_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "environment": "Windows local Python fake broker; Compose parse; unchanged MQL not rebuilt",
+        "result": "passed",
+        "evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "limitations": [
+          "Does not establish CentOS or MT5 runtime safety."
+        ]
+      }
+    ],
+    "evidence_bridges": []
+  },
+  "findings": [],
+  "correction_ledger": {
+    "batches": [
+      {
+        "id": "LOCAL_BOUNDARY_REPAIR",
+        "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
+        "snapshot_before": "BASELINE_BOT25_V24_EVIDENCE_V3",
+        "snapshot_after": "sha256:7ccaaeb20fabfb6969d79d082d9eb76a2768e17a43eeb10af1abf8a108bf02a2",
+        "root_cause_or_failure_id": "INCOMPLETE_EXECUTION_AND_RECOVERY_CONTRACT",
+        "responsibility_boundary_changed": true,
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "change": "Harden request correlation, atomic ownership, durable mutation markers, quote and state validation, restart and CSV boundaries.",
+        "causal_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/final_audit_v1.md",
+            "sha256": "76c8abd633fbd58fc9bee8cdedb9e2f9dfb1761418a02ef57d08374e26eef857"
+          }
+        ],
+        "regression_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/final_audit_v1.md",
+            "sha256": "76c8abd633fbd58fc9bee8cdedb9e2f9dfb1761418a02ef57d08374e26eef857"
+          }
+        ],
+        "cumulative_cost": "Multiple local audit passes",
+        "objective_progress": true,
+        "root_cause_scope_reduced": true,
+        "decision_changing_evidence": true,
+        "next_expected_result": "No new finding in final local pass; runtime audit separately required.",
+        "outcome": "corrected"
+      },
+      {
+        "id": "CLOSE_PERSISTENCE_TRANSACTION",
+        "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
+        "snapshot_before": "sha256:7ccaaeb20fabfb6969d79d082d9eb76a2768e17a43eeb10af1abf8a108bf02a2",
+        "snapshot_after": "sha256:bbcdcacc3005357dc1947510949fd572b3c441d7645e4e00469ad2bd18dee66b",
+        "root_cause_or_failure_id": "CLOSE_CONSUMPTION_BEFORE_DURABLE_EVIDENCE",
+        "responsibility_boundary_changed": true,
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "change": "One close-state commit, rollback/late-commit recovery, owned accounting dedupe, reason-aware reconciliation.",
+        "causal_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/final_audit_v2.md",
+            "sha256": "29095e1098a7d460e8920cfbf62092753a839045a9ed03a40abde62fc13536d0"
+          }
+        ],
+        "regression_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/final_audit_v2.md",
+            "sha256": "29095e1098a7d460e8920cfbf62092753a839045a9ed03a40abde62fc13536d0"
+          }
+        ],
+        "cumulative_cost": "One bounded repeat audit and focused correction cycle",
+        "objective_progress": true,
+        "root_cause_scope_reduced": true,
+        "decision_changing_evidence": true,
+        "next_expected_result": "No further local finding; runtime excluded.",
+        "outcome": "corrected"
+      },
+      {
+        "id": "SUBMISSION_QUOTE_RESERVATION_MATCH",
+        "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
+        "snapshot_before": "sha256:bbcdcacc3005357dc1947510949fd572b3c441d7645e4e00469ad2bd18dee66b",
+        "snapshot_after": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+        "root_cause_or_failure_id": "SUBMISSION_ADMISSION_AND_RESULT_IDENTITY_GAP",
+        "responsibility_boundary_changed": true,
+        "acceptance_ids": [
+          "AC_LOCAL_SAFETY",
+          "AC_V24_BEHAVIOR",
+          "AC_CONVERGENCE"
+        ],
+        "change": "Recheck quote after reservation I/O; require returned fill side/comment/lot match.",
+        "causal_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "regression_evidence": [
+          {
+            "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+            "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+          }
+        ],
+        "cumulative_cost": "One focused serial correction pass",
+        "objective_progress": true,
+        "root_cause_scope_reduced": true,
+        "decision_changing_evidence": true,
+        "next_expected_result": "Post-correction local review complete; runtime excluded.",
+        "outcome": "corrected"
+      }
+    ],
+    "convergence_state": "converged"
+  },
+  "external_action": {
+    "applicable": false,
+    "target": null,
+    "authority": null,
+    "approval_evidence": [],
+    "action": null,
+    "expected_effects": [],
+    "side_effects": [],
+    "idempotency": null,
+    "pre_action_audit": "not_applicable",
+    "pre_action_evidence": [],
+    "fresh_state": null,
+    "guard_or_cas": null,
+    "planned_execution": null,
+    "maximum_attempts": 0,
+    "attempts": 0,
+    "original_action_result": "not_run",
+    "post_action_verification": null,
+    "recovery": null
+  },
+  "release": {
+    "candidate_id": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+    "candidate_manifest": {
+      "bot/BOT_BACKTEST_MAP_ja.md": "afba25684bc52ef9324c6150263054a00c781d8a041789f90eb3e6f9262b3779",
+      "bot/bot25/BotBridge_s25.mq5": "0dc2b950b1b0ce1afa790a331604b69b18860e53f51939ba589c319c415b3340",
+      "bot/bot25/LOG_SCHEMA.md": "273c5a6e15e8ec45bdf3c9664edface6027c572edbdd549e4ee21d5c2d30f3a1",
+      "bot/bot25/PORTING_AUDIT.md": "763d9d61f68dc7d5575322a883513b8ab6bf483c965fb6d1a26eafe8ca488504",
+      "bot/bot25/README.md": "fae2e611eddf367f3b084498caedd25d416da6543c69a1dad92ec3e4a349be57",
+      "bot/bot25/SOURCE_BACKTEST.md": "be20d41513d3b9181c5dcf4bb81d38a8fb3d8f36dfa1c805a00d12ecc891e873",
+      "bot/bot25/V24_VIRTUAL_CORE_SPEC.md": "836e4e39074cfe534c67d3d9d5c9f66d4b3a29c8d12cd71a471254cfa4c85073",
+      "bot/bot25/ea_bridge.py": "5cc3ac51b4a5e769652a2afc9a03b0660ef65f9addae14a00931aac5b44a1c56",
+      "bot/bot25/live_data_fetcher.py": "3d5c1bc2e359995497dd2b02b0929e36ba561ca8a3689db4549610067db42275",
+      "bot/bot25/live_executor.py": "9aa03c04378c525ace412b9089064b2b5113b3527109891dde0ffe3e777fd188",
+      "bot/bot25/live_manual_alerts.py": "8ededa670f67c42cddd81987cc9181dbd3e0357a420ff3a31a71b64a250abf53",
+      "bot/bot25/live_s25_bot.py": "39019af19ffe2a25480b62fb0f6f5001be5012a5dec353b650cdeec2f15caab1",
+      "bot/bot25/live_safety.py": "625fa309771e5e08d55ca768c87b46e39b4a135d5b31390698f8398c193550e9",
+      "bot/bot25/passive_evidence_io.py": "eeba36087b996de4662777ddf21501572f222d2e05afc4a497f0c21f250f034b",
+      "bot/bot25/s25_params.json": "30519f175d5b110884879b78fc27111028a8298bf56e226ad44bdf29721f7a85",
+      "bot/bot25/shadow_opportunity_observer.py": "ba3830d337fbaeec0ad3eba585a84ca2d94c5587e507a3d5b13365c549da514a",
+      "bot/bot25/shadow_state_tagger.py": "ed42f4483c0a17a3e4d4d758d853870cbd7caf673752d3a432c79f7073acaf7d",
+      "bot/bot25/test_s25_execution_boundary.py": "f6e094fffc13ff1d987fcae8836bafe3dae873fb5c4cb88ef86a82da83c43fbd",
+      "bot/bot25/test_s25_passive_evidence.py": "88d83095c3d1f7dc31a41729ca2b901d0f7a89195f9dca297e1f87dacea9848f",
+      "bot/bot25/test_s25_v24_virtual_core.py": "eb08bcf6fc2c2369fa6308162d83824d6b9fafd56a2ccfb417bed0992b0c16a5",
+      "bot/docker-compose.yml": "aebed58bd716c426ca22ea95c558d7bffede32a9f9ba3ada911e2f9b65c2a1e5"
+    },
+    "decision": "go",
+    "decision_target": "LOCAL CANONICAL CANDIDATE ONLY; deployment and real activation NO-GO",
+    "reasons": [
+      "Local regression and final static audit passed."
+    ],
+    "residual_risks": [
+      "Current remote executable, inventory and broker behavior remain unverified."
+    ]
+  },
+  "final_report": {
+    "status": "complete",
+    "objective_result": "Local audit converged; no new in-scope finding in final pass.",
+    "acceptance_disposition": {
+      "AC_LOCAL_SAFETY": "passed",
+      "AC_V24_BEHAVIOR": "passed",
+      "AC_CONVERGENCE": "passed"
+    },
+    "identity_summary": "sha256:a1fcdd5afcbf08cfa486421f60b03b9180d5c830a1e858ac01aa2f2313ce20ed",
+    "budget_time_variance": "Additional safety and restart findings required further local passes.",
+    "implementation_summary": "Submission-clock revalidation and exact reservation match, preserving prior safety repairs.",
+    "validation_summary": "28 tests plus V24/passive/safety self-tests and Compose passed; MQL unchanged.",
+    "correction_convergence": "converged",
+    "external_action_summary": "No external action authorized.",
+    "final_audit_summary": "Structural, failure-path and release identity reviewed.",
+    "residual_risk_disposition": "Runtime deployment and activation remain NO-GO pending separate proof and authorization.",
+    "evidence_summary": [
+      "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md sha256 a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+    ],
+    "limitations": [
+      "CentOS and MT5 runtime are outside this audit.",
+      "evidence_work_state_v3.json failed because predecessor v2 candidate paths are mutable. This repeat v2 branches from immutable baseline v1; failed v3 is retained and not release evidence."
+    ],
+    "removed_behavior": [
+      "No strategy behavior, state field or file removed this pass."
+    ],
+    "preservation_evidence": [
+      {
+        "path": "bot/bot25/evidence/full_reaudit_20260904/submission_audit_final.md",
+        "sha256": "a99b323d4bc3666baf5999c46e95a7772f4817101cfcffbc20a1071790301464"
+      }
+    ]
+  }
+}

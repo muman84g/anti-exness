@@ -528,3 +528,24 @@ but the canonical evidence-work-state validator rejects its custom schema. It
 must not be used as a release manifest. The correction disposition and exact
 candidate hashes are recorded in
 `CLOCK_SEPARATION_CORRECTION_AUDIT_20260828.json`.
+
+## 2026-08-28 JST13:00-pre-EU30 three-lane adoption
+
+The earlier diagnostic-only `routing_enabled=false` statement above is
+superseded only for the first shared-clock block. `routing_enabled=true` now
+admits the frozen pre-EU30 signal from fixed JST13:00 until the London-derived
+JST15:30 (summer) / JST16:30 (standard) boundary. The later European and US
+blocks still have no entry strategy.
+
+Three disjoint lanes were added with magics 230031-230033, comments
+`s23_pe_l1`-`s23_pe_l3`, 0.01 lot, capacity one each, and confirmed-fill holds
+of 45/60/45 minutes. Their state is migrated empty without changing existing
+ZA, JST09-11, or JST11-13 state. Entry admission is session/DST dependent;
+position reconciliation and close deadlines are not.
+
+The exact live M5 implementation was compared with the frozen backtest event
+stream across 4,590 DEV signal/time cells. All 158 expected events matched and
+there were zero missing, extra, or direction-mismatched events. The complete
+120-test suite, self-test, Python compilation, and JSON validation passed. No
+deployment, restart, EA attachment, state deletion, CSV replacement, or broker
+order was performed by this adoption audit.

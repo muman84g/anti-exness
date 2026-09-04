@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -419,7 +420,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(persisted["basket"][0]["ticket"], 9401)
         self.assertIsNone(persisted["pending_open_opportunity_id"])
 
-    def test_confirmed_core_close_persists_identity_before_mandatory_trade_csv(self):
+    def test_confirmed_core_close_retains_identity_when_mandatory_trade_csv_fails(self):
         params = params_copy()
         runner = s24.S24NoAdverseRunner(params)
         runner.state = runner._default_state()
@@ -441,14 +442,100 @@ class S24SafetyRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "mandatory trade CSV failure"):
             runner._sync_strategy(strategy)
 
+        self.assertEqual(saved_states, [])
+        retained = runner._st(strategy)
+        self.assertEqual(len(retained["basket"]), 1)
+        self.assertEqual(retained["basket"][0]["position_identifier"], 7001)
+        self.assertEqual(retained["pending_close_reason"], "basket_target")
+        self.assertIsNone(retained["last_closed_side"])
+
+    def test_confirmed_core_close_restores_identity_when_state_save_fails(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        state["basket"] = [persisted_position()]
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-01-01T13:01:00+00:00"
+        runner.executor = RecordingExecutor(positions=[], orders=[])
+        rows = []
+        runner._trade_row = lambda event, *_args, **kwargs: rows.append((event, kwargs))
+        runner._save_state = lambda: (_ for _ in ()).throw(OSError("simulated state save failure"))
+        runner._state_commit_is_visible = lambda: False
+
+        with self.assertRaisesRegex(OSError, "state save failure"):
+            runner._sync_strategy(strategy)
+
+        retained = runner._st(strategy)
+        self.assertEqual(len(retained["basket"]), 1)
+        self.assertEqual(retained["pending_close_reason"], "basket_target")
+        self.assertEqual(
+            [event for event, _kwargs in rows],
+            ["position_close_deal", "position_close_confirmed"],
+        )
+
+    def test_confirmed_core_partial_close_ledgers_before_persisting_remaining_basket(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        first = persisted_position()
+        second = {**persisted_position(), "ticket": 7002, "position_identifier": 7002,
+                  "entry_price": 2065.0, "open_time_epoch": 1767272460}
+        state = runner._st(strategy)
+        state["basket"] = [first, second]
+        state["last_add_price"] = 2065.0
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-01-01T13:01:00+00:00"
+        runner.executor = RecordingExecutor(positions=[live_position()], orders=[])
+        saved_states = []
+        rows = []
+        runner._save_state = lambda: saved_states.append(json.loads(json.dumps(runner.state)))
+        runner._trade_row = lambda event, *_args, **kwargs: rows.append((event, kwargs))
+
+        self.assertTrue(runner._sync_strategy(strategy))
+
+        self.assertEqual([event for event, _kwargs in rows], ["position_close_deal", "position_close_confirmed"])
         self.assertTrue(saved_states)
         persisted = saved_states[-1]["strategies"][strategy["id"]]
-        self.assertEqual(persisted["basket"], [])
-        self.assertEqual(persisted["last_closed_side"], "LONG")
-        self.assertEqual(
-            persisted["last_closed_entry_signal_bars"],
-            ["2026-01-01T12:59:00+00:00"],
-        )
+        self.assertEqual([row["position_identifier"] for row in persisted["basket"]], [7001])
+        self.assertEqual(persisted["last_add_price"], 2064.0)
+        self.assertEqual(rows[0][1]["position_identifier"], 7002)
+        self.assertEqual(rows[1][1]["deal_id"], 15002)
+
+    def test_operational_close_ledger_is_idempotent_and_rejects_conflict(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        with tempfile.TemporaryDirectory() as root:
+            trade_path = str(Path(root) / "s24_trades.csv")
+            path_key = os.path.normcase(os.path.abspath(trade_path))
+            s24._CSV_SCHEMAS_VALIDATED.discard(path_key)
+            with mock.patch.object(s24, "TRADE_LOG_FILE", trade_path):
+                kwargs = {
+                    "ticket": 7001,
+                    "position_identifier": 7001,
+                    "deal_id": 99001,
+                    "side": "LONG",
+                    "lot": 0.01,
+                    "entry_price": 2064.0,
+                    "exit_price": 2065.0,
+                    "price": 2065.0,
+                    "profit": 1.0,
+                    "reason": "basket_target",
+                    "signal_bar_time": "2026-01-01T13:01:00+00:00",
+                }
+                runner._trade_row("position_close_deal", strategy, **kwargs)
+                runner._trade_row("position_close_deal", strategy, **kwargs)
+                with self.assertRaisesRegex(RuntimeError, "conflicting operational close replay"):
+                    runner._trade_row("position_close_deal", strategy, **{**kwargs, "profit": 2.0})
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["deal_id"], "99001")
+            s24._CSV_SCHEMAS_VALIDATED.discard(path_key)
 
     def test_core_history_outage_records_one_durable_not_evaluated_receipt(self):
         params = params_copy()
@@ -2319,6 +2406,95 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(st["last_closed_side"], "LONG")
         self.assertEqual(st["last_closed_reason"], "server_sl_tp_or_external_close")
         self.assertEqual(st["last_closed_signal_bar"], "2026-01-01T12:59:00+00:00")
+
+    def test_v206_confirmed_close_retains_basket_when_mandatory_ledger_fails(self):
+        params = params_copy()
+        params["live_trading_enabled"] = True
+        params["shadow_forward_enabled"] = False
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        lane = runner.v206_lane
+        st = lane.state
+        st["migration_pending"] = False
+        st["migration_flat_confirmations"] = 3
+        st["blocked_reason"] = None
+        st["blocked_details"] = {}
+        st["basket"] = [{
+            "ticket": 8206, "position_identifier": 9206, "side": "LONG", "lot": 0.01,
+            "entry_price": 2000.0, "entry_time_utc": "2026-01-01T13:00:00+00:00",
+            "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": 240206,
+            "owner_comment": "s24_v206", "signal_bar_time": "2026-01-01T12:59:00+00:00",
+            "timeout_at_utc": "2026-01-01T13:30:00+00:00", "fixed_stop": 1999.5, "target": 2000.5,
+        }]
+
+        class ConfirmedCloseExecutor(RecordingExecutor):
+            def get_position_close_deal(self, position_id, _opened_at_epoch):
+                return SimpleNamespace(
+                    deal=99206, position_id=position_id, symbol="XAUUSD", magic=0,
+                    reason="DEAL_REASON_CLIENT", price=2001.0, profit=1.2,
+                    commission=-0.1, swap=0.0, fee=0.0, deal_time=1767272520,
+                    exit_volume=0.01, net_profit=1.1,
+                )
+
+        runner.executor = ConfirmedCloseExecutor(positions=[], orders=[])
+        runner._save_state = lambda: None
+
+        def fail_close_ledger(event, *_args, **_kwargs):
+            if event == "v206_close_confirmed":
+                raise OSError("simulated v206 close ledger failure")
+
+        runner._trade_row = fail_close_ledger
+        with self.assertRaisesRegex(OSError, "v206 close ledger failure"):
+            lane._sync(pd.Timestamp("2026-01-01T13:31:00Z"), SimpleNamespace(bid=2000.0, ask=2000.2))
+
+        self.assertEqual(len(lane.state["basket"]), 1)
+        self.assertEqual(lane.state["basket"][0]["position_identifier"], 9206)
+
+    def test_v206_confirmed_close_restores_basket_when_state_save_fails(self):
+        params = params_copy()
+        params["live_trading_enabled"] = True
+        params["shadow_forward_enabled"] = False
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        lane = runner.v206_lane
+        st = lane.state
+        st["migration_pending"] = False
+        st["migration_flat_confirmations"] = 3
+        st["blocked_reason"] = None
+        st["blocked_details"] = {}
+        st["basket"] = [{
+            "ticket": 8206, "position_identifier": 9206, "side": "LONG", "lot": 0.01,
+            "entry_price": 2000.0, "entry_time_utc": "2026-01-01T13:00:00+00:00",
+            "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": 240206,
+            "owner_comment": "s24_v206", "signal_bar_time": "2026-01-01T12:59:00+00:00",
+            "timeout_at_utc": "2026-01-01T13:30:00+00:00", "fixed_stop": 1999.5, "target": 2000.5,
+        }]
+
+        class ConfirmedCloseExecutor(RecordingExecutor):
+            def get_position_close_deal(self, position_id, _opened_at_epoch):
+                return SimpleNamespace(
+                    deal=99206, position_id=position_id, symbol="XAUUSD", magic=0,
+                    reason="DEAL_REASON_CLIENT", price=2001.0, profit=1.2,
+                    commission=-0.1, swap=0.0, fee=0.0, deal_time=1767272520,
+                    exit_volume=0.01, net_profit=1.1,
+                )
+
+        runner.executor = ConfirmedCloseExecutor(positions=[], orders=[])
+        rows = []
+        runner._trade_row = lambda event, *_args, **kwargs: rows.append((event, kwargs))
+
+        def fail_consumed_state_save():
+            if not runner.state["v206"]["basket"]:
+                raise OSError("simulated v206 state save failure")
+
+        runner._save_state = fail_consumed_state_save
+        runner._state_commit_is_visible = lambda: False
+        with self.assertRaisesRegex(OSError, "v206 state save failure"):
+            lane._sync(pd.Timestamp("2026-01-01T13:31:00Z"), SimpleNamespace(bid=2000.0, ask=2000.2))
+
+        self.assertEqual([event for event, _kwargs in rows], ["v206_close_confirmed"])
+        self.assertEqual(len(lane.state["basket"]), 1)
+        self.assertEqual(lane.state["basket"][0]["position_identifier"], 9206)
 
     def test_state_validators_reject_unhashable_close_reason_without_exception(self):
         params = params_copy()

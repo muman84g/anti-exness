@@ -1,5 +1,13 @@
 # Source Backtest
 
+## 2026-09-04 close-transaction durability re-audit
+
+Core/v206 derived close-state mutations now run under one rollback boundary,
+defer helper-level saves and commit only the completed transition. Existing close
+rows are re-synced before replay; incomplete tails and duplicate/conflicting
+deal ownership fail validation. None-valued optional cells retain CSV replay
+equivalence. No signal, lot, timing or exit parameter was changed.
+
 ## Bot24 execution evidence and bounded logging (2026-09-03 local correction)
 
 - The mandatory execution ledger now uses a bot24-specific 29-column schema
@@ -71,6 +79,7 @@
 - Bridge v13 applies exact zero-argument arity to `ECHO`, `CAPS` and `ACCOUNT`, so extra payload fields cannot be silently ignored. Python bridge command/response/lock filenames and suffixes are local ASCII basenames, and the three IPC artifacts must remain distinct under case-insensitive filesystem semantics. No command behavior, signal, routing, lot or exit parameter changed.
 - Passive observer/tagger artifact names are constrained to their configured log/state directories. Observer horizons and retention require strict positive integers; contract size and lot require positive finite numbers. The state tagger rejects non-finite or inverted historical OHLC before writing a row. These are no-order evidence-integrity guards only and do not alter trading decisions.
 - Passive observer state now requires the complete version/symbol/pending/completed schema, valid UTC timestamps, strict non-boolean finite financial fields and JSON-safe metadata before any evidence reconciliation. Observer/tagger CSVs reject over-wide or truncated existing rows both at initialization and immediately before a later append, so post-start evidence corruption is preserved rather than extended. The live wrapper no longer coerces a boolean passive lot into a numeric value; an invalid observer configuration disables only that no-order component with inert fallback sizing. These are passive evidence-integrity corrections only; core/v206 signal, routing, lot, order and exit behavior remain unchanged.
+- Broker-confirmed core and v206 closes now durably append an idempotent deal-identity ledger row before consuming owned basket state. An exact replay is skipped, conflicting financial or ownership evidence fails closed, mandatory ledger failure retains the position identity, and an uncommitted state-save failure restores the complete pre-consumption snapshot. This is a crash/restart accounting correction only; signal, routing, lot and exit decisions are unchanged.
 
 - Bot: `bot24` / S24
 - Candidate: `visual_no_adverse_c:target16`

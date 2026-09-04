@@ -89,7 +89,7 @@ EXPECTED_Q01_MAGICS = (230044,)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007"
+EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
 EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-strict-ipc-q01-v31"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
@@ -830,6 +830,13 @@ def confirmed_close_audit_exists(
         raise RuntimeError(
             f"confirmed close deal identity conflict for deal {deal_id}"
         )
+    # Readability does not prove durability after an earlier append/fsync
+    # failure. Re-sync the existing ledger and its directory before replay
+    # can consume the broker-confirmed position state.
+    with open(path, "r+", newline="", encoding="utf-8") as durable_file:
+        durable_file.flush()
+        os.fsync(durable_file.fileno())
+    _fsync_parent_directory(path)
     return True
 
 
@@ -864,7 +871,9 @@ def validate_csv_schema(
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return {}
     with open(path, "r", newline="", encoding="utf-8") as existing_file:
-        reader = csv.reader(existing_file)
+        # A newline-terminated physical tail can still contain an unfinished
+        # quoted field. Never let CSV's permissive recovery authorize a close.
+        reader = csv.reader(existing_file, strict=True)
         observed_fields = next(reader, [])
         if observed_fields != fields:
             raise RuntimeError(

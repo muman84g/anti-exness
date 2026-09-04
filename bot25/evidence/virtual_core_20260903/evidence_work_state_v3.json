@@ -1,0 +1,78 @@
+{
+  "schema_version": "bot25-v24-nonflat-takeover-v1",
+  "manifest_id": "bot25_v24_nonflat_takeover_20260904_v3",
+  "created_at_utc": "2026-09-04T05:06:24Z",
+  "parent_manifest": {
+    "path": "bot25/evidence/virtual_core_20260903/evidence_work_state_v2.json",
+    "sha256": "f374112ebc8b7e3869906db0f09eee5f7d9750736c8179a437dc0947e40aa246"
+  },
+  "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
+  "scope": "local canonical only; no CentOS, broker, restart, deployment, or Git push action",
+  "change": {
+    "reason": "Allow exact existing bot25 state-v5/man231 or state-v6/V23 positions to continue under V24 without creating replacement seed orders.",
+    "migration_guards": [
+      "exact state and broker position identifier set",
+      "exact side, lot, magic, comment, and symbol ownership",
+      "zero broker-owned orders",
+      "zero pending open, close, post-close, productive-close, and close-defer lifecycle",
+      "no retained sync block",
+      "single expected legacy strategy key only",
+      "no duplicate state or broker position identifier",
+      "logical side cap and 3:1 ratio remain valid",
+      "unchanged-file SHA-256 compare-and-swap"
+    ],
+    "transitional_core": "One best-price existing physical position per side substitutes for that side's virtual core until the existing exit path closes it.",
+    "shadow_canary": "Exact read-only state/broker verification and status only while migrated real positions exist; no reconciliation, add, close, or simulated lifecycle mutation."
+  },
+  "files": {
+    "bot25/live_s25_bot.py": "4b4b7ad3e74fa86f5149be21d654067e1ec5bb15349257f6c8197ad689941b59",
+    "bot25/s25_params.json": "9e6c8f7690a320849f877c7f9b3691720f4ea232cfae3fe4451cb0e76117b5f0",
+    "bot25/README.md": "8dc6d0e40613a562b66d53e64e97212eb71fcc0936105091b2f427f8691a8500",
+    "bot25/PORTING_AUDIT.md": "15085d35b973624bad2c1d78ab8ab084d9a39dbf46e3768305740163f70e53a3",
+    "bot25/SOURCE_BACKTEST.md": "b103b5133eee80b8a79a54051e8ee0954b95f1dbdeef78b006812aa3def5da6b",
+    "bot25/V24_VIRTUAL_CORE_SPEC.md": "e136a8cbc0df7ba8817e6be56ff1b6e2504d073740eb2903d3c519634a141244",
+    "bot25/LOG_SCHEMA.md": "2f2a0392599953648a5a7a9a8cfc33746b160daa59e15ebaaa1cf346340a85e9",
+    "bot25/test_s25_v24_virtual_core.py": "f0a8ed4b548ffc95b7e82fc3c5178fe604f8ab144238eb8e7e291e5eb20c0f83"
+  },
+  "compose_scope": {
+    "reason": "The local canonical Compose contains unrelated user changes; only the two bot25 lines are selected for Git.",
+    "canonical_sha256": "4996ad16aeff1fb305d188a101d52a6fc0f3a883463743db6492fff30050b6cc",
+    "push_candidate_sha256_on_origin_a749784": "e3d3a4ca4cfaa50b0262d02f7f7062831cf3ec91b1618f996c28eb8ecc8725d0",
+    "selected_changes": [
+      "bot25 service comment identifies V24 shadow-only canary",
+      "BOT25_ENABLE_REAL_TRADING defaults empty instead of embedding the retired MAN231 acknowledgement"
+    ]
+  },
+  "tests": {
+    "python_compile": "passed",
+    "v24_self_test": "passed",
+    "passive_evidence_test": "passed",
+    "nonflat_migration_regressions": {
+      "result": "passed",
+      "test_count": 5,
+      "covers": [
+        "new episode and restart create zero seed orders",
+        "frontier add creates exactly one broker order",
+        "exact nonflat state-v5 inventory migrates without double core",
+        "a broker-confirmed close of a migrated physical core uses the existing sync path and activates only that side's virtual core",
+        "pending lifecycle, lot mismatch, pending order, duplicate ID, malformed value, and extra strategy key preserve the old state and fail closed",
+        "shadow-only canary with matching or mismatching real inventory leaves the canonical position lifecycle unchanged",
+        "a transitional physical-core mapping suppresses a virtual core only on the same side"
+      ]
+    },
+    "compose_config": "passed"
+  },
+  "canonical_state": {
+    "sha256_before": "a8d97856495c30ad0370c0e78ccd7e236fd8eca59e8b4f89d13bddfe1ff2c15c",
+    "sha256_after": "a8d97856495c30ad0370c0e78ccd7e236fd8eca59e8b4f89d13bddfe1ff2c15c",
+    "unchanged": true
+  },
+  "external_actions": {
+    "centos_files_changed": false,
+    "centos_restart": false,
+    "state_changed": false,
+    "broker_positions_closed": false,
+    "real_trading_enabled": false,
+    "git_push": false
+  }
+}

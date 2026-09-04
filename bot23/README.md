@@ -1,10 +1,17 @@
 # Bot23 integrated inventory and independent session overlays
 
+Close-ledger durability re-audit (2026-09-04): an existing confirmed-deal row is
+filesystem-synced again, including its parent directory, before replay can consume
+position state. A readable row from an interrupted fsync is not durability proof.
+Strategy parameters, credentials and runtime state are unchanged.
+The repeated audit also rejects malformed CSV quoting before close replay,
+while preserving valid quoted multiline fields.
+
 ## Q01 completed-M5 variance-ratio release（採用・ローカル有効）
 
 固定済み`Q01_variance_ratio_release`を、既存21レーンと分離したlane 22
 （magic 230044、comment `s23_q01_l1`）へ実装しています。ローカル候補は
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`です。Q01の判定は有効ですが、
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`です。Q01の判定は有効ですが、
 既存bot23の共通live設定とは別に`q01_live_trading_enabled=false`を固定し、Q01の実注文だけを
 停止しています。配置・再起動・bridge attach・実口座照合・注文実行は行っていません。
 
@@ -27,7 +34,7 @@ opportunity ID、group receipt、固定expiryを完全一致で検証し、破�
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
 （magic 230040-230043）へ移植しています。現在のローカル候補
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`では
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`では
 `t0530_edge_enabled=true`かつ`session_vwap_enabled=true`です。CentOS/MT5への配置、
 再起動、live/forward確認はこのローカル候補の範囲外です。
 

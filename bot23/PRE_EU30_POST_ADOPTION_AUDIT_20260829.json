@@ -1,0 +1,54 @@
+{
+  "schema_version": "bot23_pre_eu30_post_adoption_audit_v1",
+  "status": "PASS_WITH_LEDGER_TRACEABILITY_FIX",
+  "audited_at_jst": "2026-08-29",
+  "scope": {
+    "policy_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+    "signals": [
+      ["c4_bollinger_squeeze_release_direction_control", 45],
+      ["c4_double_sweep_resolution_primary", 60],
+      ["c4_rsi_extreme_reversal_direction_control", 45]
+    ],
+    "lane_ids": [9, 10, 11],
+    "magics": [230031, 230032, 230033],
+    "max_positions": 3
+  },
+  "trade_ledger": {
+    "path": "logs/s23_trades.csv",
+    "schema_changed": false,
+    "columns": 29,
+    "schema_match": true,
+    "data_rows_at_audit": 0,
+    "file_replaced": false,
+    "entry_trace_test": "PASS",
+    "close_trace_test": "PASS",
+    "fix": "position_close_confirmed now copies opportunity_id from the owned position state without changing the CSV header"
+  },
+  "validation": {
+    "unit_tests": {"status": "PASS", "tests": 122},
+    "targeted_trade_ledger_tests": {"status": "PASS", "tests": 2},
+    "self_test": "PASS",
+    "python_compile": "PASS",
+    "params_json": "PASS",
+    "live_csv_schema": "PASS",
+    "entry_clock_dst_boundaries": "PASS",
+    "position_lifecycle_independent_of_entry_clock": "PASS",
+    "three_independent_lanes": "PASS",
+    "state_migration_preserves_existing_inventory": "PASS"
+  },
+  "hashes": {
+    "live_s23_bot.py": "7CBE2ABA5BE61F9C8CA76F82628A226509C0571E39C1117131DAF6A713DEDC9F",
+    "jst1300_pre_eu30_strategy.py": "FCC181BF0A7F3204D306F06E303F20C70D0E41EEE182AE7ACF3020490E460D99",
+    "s23_params.json": "8CE788CFB88B2E4D8A01455C7C2A73B1903CAD1B90014E184BB74056FA376039",
+    "test_s23_regressions.py": "5890BC2997FE6B2247432F00CECCC5BC6508CC4107D1A546003265C0D62B3C39",
+    "logs/s23_trades.csv": "D93AD1D02503F55581C67DB1D53124A60463A7E4B9F93A63BA6B8795C20B9AAE",
+    "docker-compose.yml": "05FF700E09B28C0518962BCF564F92CBC3D207B78DD4A1E2BF4622B348AA87DB"
+  },
+  "runtime_actions": {
+    "service_restarted": false,
+    "order_submitted": false,
+    "state_reset": false,
+    "trade_csv_modified": false,
+    "deployed": false
+  }
+}

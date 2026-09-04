@@ -18,7 +18,7 @@ from passive_evidence_io import (
 )
 
 UTC = timezone.utc
-OBSERVER_VERSION = "s25_v23_shadow_opportunity_observer_v1"
+OBSERVER_VERSION = "s25_v24_virtual_core_shadow_opportunity_observer_v2"
 STATE_VERSION = 1
 
 OPPORTUNITY_FIELDS = [
@@ -78,6 +78,9 @@ class S25ShadowOpportunityObserver:
         completed = raw.get("completed", {})
         if not isinstance(pending, dict) or not isinstance(completed, dict):
             raise ValueError("invalid s25 shadow observer state")
+        stored_observer_version = str(raw.get("observer_version") or "")
+        if stored_observer_version not in {"", OBSERVER_VERSION} and (pending or completed):
+            raise ValueError("nonempty shadow observer state belongs to a different strategy version")
         self.pending: dict[str, dict[str, Any]] = pending
         self.completed: dict[str, str] = {str(key): str(value) for key, value in completed.items()}
         opportunity_rows = csv_rows(self.opportunity_path, OPPORTUNITY_FIELDS)

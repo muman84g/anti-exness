@@ -1,0 +1,76 @@
+{
+  "schema_version": "bot23_pre_eu30_adoption_audit_v1",
+  "status": "implemented_locally_not_deployed",
+  "decision": "incumbent_adopted_after_five_challenger_cycles_failed",
+  "incumbent": {
+    "candidate_id": "jst1330_c4_final10_010_squeeze_double_rsi",
+    "lanes": [
+      ["c4_bollinger_squeeze_release_direction_control", 45],
+      ["c4_double_sweep_resolution_primary", 60],
+      ["c4_rsi_extreme_reversal_direction_control", 45]
+    ],
+    "dev_stress": {"trades": 120, "pnl": 142.16, "pf": 1.4080800774, "mtm_dd": 112.424},
+    "leak_stress": {"trades": 47, "pnl": 65.3745, "pf": 1.476835, "mtm_dd": 41.173},
+    "forward_stress": {"trades": 8, "pnl": 26.711, "pf": 5.415771, "mtm_dd": 12.172}
+  },
+  "challenger_protocol": {
+    "dev_only_candidates_frozen_before_new_leakcheck": 50,
+    "cycles": 5,
+    "candidates_per_cycle": 10,
+    "leakcheck_passes": 0,
+    "forward_candidates": 0,
+    "post_result_tuning": false
+  },
+  "cycle_best_stress": [
+    {"cycle": 1, "candidate_id": "jst1330_challenger_c1_04_jst1316_00025", "trades": 208, "pnl": -95.2505, "pf": 0.847044, "mtm_dd": 203.2905},
+    {"cycle": 2, "candidate_id": "jst1330_challenger_c2_08_jst1316_00712", "trades": 221, "pnl": -27.1235, "pf": 0.956704, "mtm_dd": 118.324},
+    {"cycle": 3, "candidate_id": "jst1330_challenger_c3_10_jst1316_01360", "trades": 195, "pnl": -121.795, "pf": 0.811689, "mtm_dd": 251.8135},
+    {"cycle": 4, "candidate_id": "jst1330_challenger_c4_08_jst1316_00582", "trades": 183, "pnl": -42.879, "pf": 0.912917, "mtm_dd": 145.198},
+    {"cycle": 5, "candidate_id": "jst1330_challenger_c5_08_jst1316_00580", "trades": 178, "pnl": -104.7745, "pf": 0.798041, "mtm_dd": 191.9085}
+  ],
+  "live_translation": {
+    "policy_id": "jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001",
+    "policy_params_hash": "71722f0f90a34f7c265007cc8522f12b6b8769c7c81a1f3bf9988497956c9f0c",
+    "magics": [230031, 230032, 230033],
+    "lane_ids": [9, 10, 11],
+    "lots": [0.01, 0.01, 0.01],
+    "holds_minutes": [45, 60, 45],
+    "entry_clock": "fixed JST13:00 to Europe/London pre-open minus 30 minutes",
+    "summer_end_jst": "15:30",
+    "standard_end_jst": "16:30",
+    "position_lifecycle": "confirmed fill UTC plus fixed elapsed hold; independent of session and DST",
+    "m1_bars": 420,
+    "passive_shadow_files": [
+      "s23_pre_eu30_shadow_opportunities.csv",
+      "s23_pre_eu30_shadow_markouts.csv",
+      "s23_pre_eu30_shadow_state_tags.csv",
+      "s23_pre_eu30_shadow_observer_state.json"
+    ]
+  },
+  "validation": {
+    "signal_parity": {"status": "PASS", "checks": 4590, "expected_events": 158, "mismatches": 0},
+    "unit_tests": {"status": "PASS", "tests": 120},
+    "self_test": "PASS",
+    "python_compile": "PASS",
+    "params_json": "PASS",
+    "compose_config": "PASS"
+  },
+  "hashes": {
+    "live_s23_bot.py": "908868A45A66AEDBD704647557CB0EB240CB2C3567A1BF84374188C4300C9C8D",
+    "jst1300_pre_eu30_strategy.py": "FCC181BF0A7F3204D306F06E303F20C70D0E41EEE182AE7ACF3020490E460D99",
+    "s23_params.json": "8CE788CFB88B2E4D8A01455C7C2A73B1903CAD1B90014E184BB74056FA376039",
+    "docker-compose.yml": "05FF700E09B28C0518962BCF564F92CBC3D207B78DD4A1E2BF4622B348AA87DB",
+    "incumbent_registry": "DDE6091B34F157CDD7990D19478F82CC212C248C9478EA30230BA846A99FC2F5",
+    "frozen50_manifest": "ED5ABDACD95C5B5BEC64576C828D7939551D4ED492B3A1DF238F2C0A6505F728",
+    "signal_parity_report": "477B26E07C57B2A6E4C5F04A7421A3B4BF5749DDB9CE5FE797D820720D12B125"
+  },
+  "runtime_actions": {
+    "deployed": false,
+    "service_restarted": false,
+    "state_deleted_or_reset": false,
+    "csv_replaced": false,
+    "ea_recompiled_or_attached": false,
+    "order_submitted": false,
+    "git_commit_or_push": false
+  }
+}

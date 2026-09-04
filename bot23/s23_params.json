@@ -6,7 +6,7 @@
   "bot_number": "23",
   "bot_suffix": "s23",
   "strategy_id": "bot23_za_horizontal_inventory_v001",
-  "candidate_id": "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007",
+  "candidate_id": "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008",
   "routing_mode": "first_consuming_lane_preserve_primary_v1",
   "entry_policy_id": "reverse_d60",
   "entry_policy_params_hash": "40475d07b84eabc1b1290bee6787113903f374ca90cf2ca271c82b825b313572",

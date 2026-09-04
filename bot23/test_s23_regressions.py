@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -1009,6 +1010,11 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
 
     def test_q01_topology_is_independent_lane_22(self):
         params = json.loads(json.dumps(load_params()))
+        self.assertEqual(
+            params["candidate_id"],
+            "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008",
+        )
+        self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])
         q01 = params["q01_variance_release_strategies"]
         self.assertEqual([row["lane_id"] for row in q01], [22])
@@ -4523,6 +4529,31 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
             "./bot23/BotBridge_s23.mq5:/app/bot23/BotBridge_s23.mq5:ro",
             compose,
         )
+
+    def test_bot23_uses_fixed_local_credentials_without_unused_environment_wiring(self):
+        bot23 = Path(__file__).resolve().parent
+        config = (bot23 / "live_config.py").read_text(encoding="utf-8")
+        startup = (bot23 / "startup.ini").read_text(encoding="utf-8")
+        compose = (bot23.parent / "docker-compose.yml").read_text(encoding="utf-8")
+        violations = []
+        for name in ("BOT23_MT5_LOGIN", "BOT23_MT5_PASSWORD", "BOT23_MT5_SERVER"):
+            if name in config or name in compose:
+                violations.append(f"unused_environment_wiring:{name}")
+        for field, pattern in {
+            "login": r"(?m)^MT5_LOGIN\s*=\s*[1-9][0-9]*\s*$",
+            "password": r"(?m)^MT5_PASSWORD\s*=\s*[\"'][^\"']+[\"']\s*$",
+            "server": r"(?m)^MT5_SERVER\s*=\s*[\"'][^\"']+[\"'](?:\s*#.*)?$",
+        }.items():
+            if re.search(pattern, config) is None:
+                violations.append(f"live_config_fixed_{field}_missing")
+        for field, pattern in {
+            "login": r"(?m)^Login=[1-9][0-9]*\s*$",
+            "password": r"(?m)^Password=[^\r\n]+$",
+            "server": r"(?m)^Server=[^\r\n]+$",
+        }.items():
+            if re.search(pattern, startup) is None:
+                violations.append(f"startup_fixed_{field}_missing")
+        self.assertEqual([], violations, "fixed credential contract violations")
 
     def test_disabled_session_vwap_overlay_never_fetches_or_evaluates(self):
         runner, _za, _state = make_runner(live=False)

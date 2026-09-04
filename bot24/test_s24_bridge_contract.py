@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -475,19 +476,33 @@ class S24BridgeContractTests(unittest.TestCase):
         for name in (*expected, "v206_live_lane.py"):
             self.assertIn(f"./bot24/{name}:/app/bot24/{name}:ro", compose)
 
-    def test_bot24_credentials_are_host_only_and_compose_wires_fail_closed_defaults(self):
+    def test_bot24_uses_fixed_local_credentials_without_unused_environment_wiring(self):
         bot24 = Path(__file__).resolve().parent
         config = (bot24 / "live_config.py").read_text(encoding="utf-8")
         startup = (bot24 / "startup.ini").read_text(encoding="utf-8")
         compose = (bot24.parent / "docker-compose.yml").read_text(encoding="utf-8")
 
+        violations = []
         for name in ("BOT24_MT5_LOGIN", "BOT24_MT5_PASSWORD", "BOT24_MT5_SERVER"):
-            self.assertIn(f'os.environ.get("{name}"', config)
-            self.assertIn(name, compose)
-        self.assertNotRegex(config, r'MT5_PASSWORD\s*=\s*["\'][^"\']+["\']')
-        self.assertIn("Login=0", startup)
-        self.assertIn("Password=\n", startup)
-        self.assertIn("Server=\n", startup)
+            if name in config or name in compose:
+                violations.append(f"unused_environment_wiring:{name}")
+        fixed_config_patterns = {
+            "login": r"(?m)^MT5_LOGIN\s*=\s*[1-9][0-9]*\s*$",
+            "password": r"(?m)^MT5_PASSWORD\s*=\s*[\"'][^\"']+[\"']\s*$",
+            "server": r"(?m)^MT5_SERVER\s*=\s*[\"'][^\"']+[\"'](?:\s*#.*)?$",
+        }
+        fixed_startup_patterns = {
+            "login": r"(?m)^Login=[1-9][0-9]*\s*$",
+            "password": r"(?m)^Password=[^\r\n]+$",
+            "server": r"(?m)^Server=[^\r\n]+$",
+        }
+        for field, pattern in fixed_config_patterns.items():
+            if re.search(pattern, config) is None:
+                violations.append(f"live_config_fixed_{field}_missing")
+        for field, pattern in fixed_startup_patterns.items():
+            if re.search(pattern, startup) is None:
+                violations.append(f"startup_fixed_{field}_missing")
+        self.assertEqual([], violations, "fixed credential contract violations")
 
 
 if __name__ == "__main__":

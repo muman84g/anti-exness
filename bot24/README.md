@@ -1,5 +1,11 @@
 # Bot24 Visual No-Adverse C
 
+Close-ledger re-audit (2026-09-04): replay re-syncs readable evidence before
+consuming state; preflight rejects incomplete tails and duplicate/conflicting
+deal ownership. Core and v206 derived close-state changes share one rollback
+boundary with deferred helper saves and one complete atomic commit. Optional
+empty CSV fields normalize identically on replay. No trading parameter changed.
+
 Live/shadow port of frozen XAUUSD M1 candidate
 `visual_no_adverse_c:target16`.
 
@@ -87,14 +93,11 @@ py -m unittest discover -v
 ```
 
 The Compose service and live mode are defined. Compose automatically prepares
-the bridge and starts a retrying runner; chart attachment remains manual. See
-`../BOT20_25_CENTOS_STARTUP.md` for host-only login files.
-The repository `startup.ini` is deliberately credential-free and cannot log in.
-Replace it only on the authorized runtime host with a protected host-local file;
-do not copy account credentials back into this source directory.
-Python-side account identity is supplied by the host-only `BOT24_MT5_LOGIN`,
-`BOT24_MT5_PASSWORD` and `BOT24_MT5_SERVER` environment variables. Their local
-defaults are intentionally unusable, so omitted credentials fail preflight.
+the bridge and starts a retrying runner; chart attachment remains manual.
+This installation deliberately uses the fixed local credentials in
+`live_config.py` and `startup.ini`; Compose does not provide an unused second
+credential channel. Keep both files private and synchronized when the account
+connection is intentionally changed.
 
 The local `2026-09-02-s24-core-atomic-v13` bridge requires atomic account,
 hedging-mode, permission, inventory and exact ownership guards for both the
@@ -275,12 +278,15 @@ The same bridge emits HIST bar timestamps as explicit Unix seconds interpreted
 as UTC. Formatted broker-server wall time is no longer accepted by the bot24
 parser, so signal and stale checks do not depend on an assumed server timezone.
 
-Confirmed core OPEN/CLOSE lifecycle state is atomically persisted before the
-mandatory execution CSV is written.  A CSV failure therefore stops the runner
-without leaving durable ownership behind the already-confirmed broker fact.
-Full-close reconciliation also preserves every originating entry signal-bar
-identity before clearing the basket, preventing a completed signal from being
-reused after restart.
+Confirmed core OPEN ownership state is atomically persisted before its
+mandatory execution CSV is written. Broker-confirmed core/v206 CLOSEDEAL rows
+use the opposite safe ordering: the immutable realized-PnL ledger is durably
+written before the owned basket is consumed. A ledger failure retains the
+basket for retry; a state-save failure restores it unless the complete new
+state is already visible. Deal-based exact replay is idempotent, while a
+conflicting replay fails closed. Full-close reconciliation also preserves every
+originating entry signal-bar identity before clearing the basket, preventing a
+completed signal from being reused after restart.
 The same state-first rule applies when atomic inventory proof establishes that
 an OPEN was not filled, and when a CLOSE is retryably rejected as market-closed
 or trade-permission-disabled.  Pending submission receipts are cleared and the

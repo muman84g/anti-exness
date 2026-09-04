@@ -410,7 +410,7 @@ class V206LiveLane:
     def _save(self) -> None:
         self.runner._save_state()
 
-    def _log(self, event: str, **kwargs: Any) -> None:
+    def _log(self, event: str, *, required: bool = False, **kwargs: Any) -> None:
         st = self.state
         pending = st.get("pending_open") or st.get("pending_signal") or {}
         if isinstance(pending, dict) and pending.get("opportunity_id"):
@@ -425,6 +425,8 @@ class V206LiveLane:
             self.runner._trade_row(event, self.cfg, **kwargs)
         except Exception:
             logging.exception("v206 audit row failed")
+            if required:
+                raise
 
     def _block(self, reason: str, *, replace_resolved: bool = False, **details: Any) -> None:
         st = self.state
@@ -962,33 +964,38 @@ class V206LiveLane:
             self._block("v206_close_deal_invalid", ticket=identifier)
             return False
         reason = str((st.get("pending_close") or {}).get("reason") or "server_sl_tp_or_external_close")
-        self._log("v206_close_confirmed", ticket=int(state_pos.get("ticket") or 0), position_identifier=identifier,
+        self._log("v206_close_confirmed", required=True,
+                  ticket=int(state_pos.get("ticket") or 0), position_identifier=identifier,
                   deal_id=int(deal.deal), side=state_pos.get("side"), lot=state_pos.get("lot"),
                   entry_price=float(state_pos.get("entry_price") or 0.0), exit_price=float(deal.price),
                   price=float(deal.price), profit=float(deal.net_profit), reason=reason,
                   signal_bar_time=state_pos.get("signal_bar_time"), note=f"deal={int(deal.deal)}")
-        st["basket"] = []
-        st["pending_close"] = None
-        st["close_retry_after_utc"] = None
-        st["close_permission_reject_count"] = 0
-        self._reset_time_close_state()
-        close_time = pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
-        st["last_closed_at_utc"] = close_time.isoformat()
-        st["last_closed_side"] = state_pos.get("side")
-        st["last_closed_reason"] = reason
-        st["last_closed_signal_bar"] = state_pos.get("signal_bar_time")
-        evaluated_bar = _utc(st.get("last_evaluated_bar"))
-        st["last_consumed_signal_bar"] = (
-            evaluated_bar.isoformat()
-            if evaluated_bar is not None and evaluated_bar + pd.Timedelta(minutes=1) <= close_time
-            else None
-        )
-        st["cooldown_until_utc"] = (close_time + pd.Timedelta(minutes=int(self.cfg.get("cooldown", 5)))).isoformat()
-        if orders_available:
-            self._clear_block()
-        else:
-            self._block("v206_orders_unavailable_after_confirmed_close", replace_resolved=True)
-        self._save()
+        with self.runner._confirmed_close_state_transaction():
+            st["basket"] = []
+            st["pending_close"] = None
+            st["close_retry_after_utc"] = None
+            st["close_permission_reject_count"] = 0
+            self._reset_time_close_state()
+            close_time = pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
+            st["last_closed_at_utc"] = close_time.isoformat()
+            st["last_closed_side"] = state_pos.get("side")
+            st["last_closed_reason"] = reason
+            st["last_closed_signal_bar"] = state_pos.get("signal_bar_time")
+            evaluated_bar = _utc(st.get("last_evaluated_bar"))
+            st["last_consumed_signal_bar"] = (
+                evaluated_bar.isoformat()
+                if evaluated_bar is not None and evaluated_bar + pd.Timedelta(minutes=1) <= close_time
+                else None
+            )
+            st["cooldown_until_utc"] = (close_time + pd.Timedelta(minutes=int(self.cfg.get("cooldown", 5)))).isoformat()
+            if orders_available:
+                st["blocked_reason"] = None
+                st["blocked_details"] = {}
+                st["manual_alert_last_signature"] = None
+            else:
+                st["blocked_reason"] = "v206_orders_unavailable_after_confirmed_close"
+                st["blocked_details"] = {}
+                logging.error("v206 entry block: %s", st["blocked_reason"])
         return bool(orders_available)
 
     def reconcile_without_quote(self, cause: str = "symbol_info_unavailable") -> None:

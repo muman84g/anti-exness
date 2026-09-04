@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 import csv
 import hashlib
 import json
@@ -125,6 +126,38 @@ TRADE_FIELDS = [
     "note",
 ]
 _CSV_SCHEMAS_VALIDATED: set[str] = set()
+OPERATIONAL_CLOSE_EVENTS = frozenset({
+    "position_close_deal",
+    "position_close_confirmed",
+    "v206_close_confirmed",
+})
+OPERATIONAL_CLOSE_IDENTITY_FIELDS = (
+    "event",
+    "lane_id",
+    "position_identifier",
+    "deal_id",
+)
+OPERATIONAL_CLOSE_COMPARE_FIELDS = (
+    "event",
+    "strategy_id",
+    "lane_id",
+    "magic",
+    "symbol",
+    "mt5_symbol",
+    "basket_id",
+    "ticket",
+    "position_identifier",
+    "deal_id",
+    "side",
+    "lot",
+    "entry_price",
+    "exit_price",
+    "price",
+    "profit",
+    "reason",
+    "signal_bar_time",
+    "note",
+)
 REPEATABLE_DIAGNOSTIC_REASONS = {
     "symbol_info_failed",
     "runtime_quote_clock_invalid",
@@ -331,10 +364,17 @@ def _execution_csv_row_error(row: dict[str, Any]) -> str | None:
 def _validate_csv_stream(existing_file: Any, path: str, fields: list[str]) -> None:
     try:
         existing_file.seek(0)
-        reader = csv.reader(existing_file, strict=True)
+        def terminated_lines():
+            for line in existing_file:
+                if not line.endswith("\n"):
+                    raise RuntimeError(f"unterminated CSV tail for {path}; refusing partial evidence")
+                yield line
+        reader = csv.reader(terminated_lines(), strict=True)
         observed_fields = next(reader, [])
         if observed_fields != fields:
             raise RuntimeError(f"CSV schema mismatch for {path}; archive/reset the old bot24 CSV before starting")
+        seen_close_rows: set[tuple[str, int]] = set()
+        seen_position_deals: set[int] = set()
         for row_number, observed_row in enumerate(reader, start=2):
             if len(observed_row) != len(fields):
                 raise RuntimeError(
@@ -343,12 +383,31 @@ def _validate_csv_stream(existing_file: Any, path: str, fields: list[str]) -> No
                     "archive/reset the old bot24 CSV before starting"
                 )
             if fields == TRADE_FIELDS:
-                row_error = _execution_csv_row_error(dict(zip(fields, observed_row)))
+                observed = dict(zip(fields, observed_row))
+                row_error = _execution_csv_row_error(observed)
                 if row_error is not None:
                     raise RuntimeError(
                         f"CSV execution row invalid for {path} at row {row_number}: {row_error}; "
                         "archive/reset the old bot24 CSV before starting"
                     )
+                event = observed["event"]
+                if event in OPERATIONAL_CLOSE_EVENTS:
+                    raw_deal = observed["deal_id"]
+                    # Legacy aggregate summaries had no deal ID. They are not
+                    # replay authorization; position-level closes always need it.
+                    if not raw_deal and event == "position_close_confirmed":
+                        continue
+                    if not raw_deal:
+                        raise RuntimeError(f"operational close deal identity missing for {path}")
+                    deal_id = int(raw_deal)
+                    key = (event, deal_id)
+                    if key in seen_close_rows:
+                        raise RuntimeError(f"duplicate or conflicting operational close deal={deal_id} for {path}")
+                    seen_close_rows.add(key)
+                    if event != "position_close_confirmed":
+                        if deal_id in seen_position_deals:
+                            raise RuntimeError(f"conflicting position close deal={deal_id} for {path}")
+                        seen_position_deals.add(deal_id)
     except csv.Error as exc:
         raise RuntimeError(
             f"CSV parse failure for {path}: {exc}; archive/reset the old bot24 CSV before starting"
@@ -424,6 +483,114 @@ def append_csv(path: str, row: dict[str, Any], fields: list[str]) -> None:
             f.flush()
             os.fsync(f.fileno())
     _CSV_SCHEMAS_VALIDATED.add(path_key)
+
+
+def append_operational_close_once(path: str, row: dict[str, Any], fields: list[str]) -> bool:
+    """Durably append one broker-close ledger row, or accept its exact replay."""
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path_key = os.path.normcase(os.path.abspath(path))
+    pending_row = {name: ("" if row.get(name) is None else row[name]) for name in fields}
+    event = str(pending_row.get("event") or "")
+    if event not in OPERATIONAL_CLOSE_EVENTS:
+        raise RuntimeError(f"unsupported operational close event: {event!r}")
+    raw_deal_id = pending_row.get("deal_id")
+    if isinstance(raw_deal_id, bool) or not isinstance(raw_deal_id, (int, str)):
+        raise RuntimeError(f"operational close deal identity is invalid for {event}")
+    try:
+        deal_id = int(pending_row.get("deal_id"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(f"operational close deal identity is invalid for {event}") from exc
+    if deal_id <= 0:
+        raise RuntimeError(f"operational close deal identity is invalid for {event}")
+    pending_row["deal_id"] = deal_id
+    row_error = _execution_csv_row_error(pending_row)
+    if row_error is not None:
+        raise RuntimeError(f"CSV execution row invalid before append for {path}: {row_error}")
+
+    exists = os.path.exists(path)
+    if not exists and path_key in _CSV_SCHEMAS_VALIDATED:
+        raise RuntimeError(
+            f"CSV disappeared after validation for {path}; archive/reset the old bot24 CSV before starting"
+        )
+    if not exists:
+        try:
+            output_file = open(path, "x", newline="", encoding="utf-8")
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"CSV path was created concurrently for {path}; refusing unvalidated append"
+            ) from exc
+        with output_file as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow(pending_row)
+            f.flush()
+            os.fsync(f.fileno())
+        _CSV_SCHEMAS_VALIDATED.add(path_key)
+        _fsync_parent_directory(path)
+        return True
+    if os.path.getsize(path) == 0:
+        raise RuntimeError(
+            f"CSV existing file is empty for {path}; archive/reset the old bot24 CSV before starting"
+        )
+    try:
+        output_file = open(path, "r+", newline="", encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"CSV disappeared during append for {path}; refusing recreation") from exc
+    with output_file as f:
+        before_stat = os.fstat(f.fileno())
+        _validate_csv_stream(f, path, fields)
+        after_stat = os.fstat(f.fileno())
+        if (before_stat.st_size, before_stat.st_mtime_ns) != (after_stat.st_size, after_stat.st_mtime_ns):
+            raise RuntimeError(f"CSV changed during validation for {path}; refusing append")
+        try:
+            path_stat = os.stat(path)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"CSV disappeared during validation for {path}; refusing append") from exc
+        if (before_stat.st_dev, before_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            raise RuntimeError(f"CSV was replaced during validation for {path}; refusing append")
+        f.seek(0)
+        for existing_row in csv.DictReader(f, strict=True):
+            same_deal = str(existing_row.get("deal_id", "")) == str(deal_id)
+            existing_event = existing_row.get("event")
+            same_event = existing_event == event
+            both_position_rows = (
+                existing_event in OPERATIONAL_CLOSE_EVENTS
+                and existing_event != "position_close_confirmed"
+                and event != "position_close_confirmed"
+            )
+            if same_deal and (same_event or both_position_rows) and any(
+                str(existing_row.get(name, "")) != str(pending_row.get(name, ""))
+                for name in OPERATIONAL_CLOSE_IDENTITY_FIELDS
+            ):
+                raise RuntimeError(f"conflicting operational close ownership for deal={deal_id}")
+            if all(
+                str(existing_row.get(name, "")) == str(pending_row.get(name, ""))
+                for name in OPERATIONAL_CLOSE_IDENTITY_FIELDS
+            ):
+                conflicts = [
+                    name
+                    for name in OPERATIONAL_CLOSE_COMPARE_FIELDS
+                    if str(existing_row.get(name, "")) != str(pending_row.get(name, ""))
+                ]
+                if conflicts:
+                    raise RuntimeError(
+                        f"conflicting operational close replay for {event} deal={deal_id}: "
+                        f"fields={','.join(conflicts)}"
+                    )
+                # A prior append may have become readable before its fsync
+                # failed. Re-establish durability before authorizing consumption.
+                f.flush()
+                os.fsync(f.fileno())
+                _fsync_parent_directory(path)
+                _CSV_SCHEMAS_VALIDATED.add(path_key)
+                return False
+        f.seek(0, os.SEEK_END)
+        csv.DictWriter(f, fieldnames=fields).writerow(pending_row)
+        f.flush()
+        os.fsync(f.fileno())
+    _CSV_SCHEMAS_VALIDATED.add(path_key)
+    return True
 
 
 def validate_csv_schema(path: str, fields: list[str]) -> None:
@@ -1334,8 +1501,39 @@ class S24NoAdverseRunner:
         return state
 
     def _save_state(self) -> None:
+        if getattr(self, "_close_state_transaction_active", False):
+            return
         self.state["last_saved_utc"] = dt_text(utc_now())
         atomic_write_json(STATE_FILE, self.state)
+
+    @contextmanager
+    def _confirmed_close_state_transaction(self):
+        """Rollback every derived step; publish only one complete final state."""
+        if getattr(self, "_close_state_transaction_active", False):
+            raise RuntimeError("nested confirmed-close state transaction")
+        before = copy.deepcopy(self.state)
+        final_commit = False
+        self._close_state_transaction_active = True
+        try:
+            yield
+            self._close_state_transaction_active = False
+            final_commit = True
+            self._save_state()
+        except BaseException:
+            if not (final_commit and self._state_commit_is_visible()):
+                self.state = before
+            raise
+        finally:
+            self._close_state_transaction_active = False
+
+    def _state_commit_is_visible(self) -> bool:
+        """Return whether the complete in-memory state is already durable."""
+
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as state_file:
+                return strict_json_load(state_file) == self.state
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return False
 
     def _st(self, strat: dict[str, Any]) -> dict[str, Any]:
         if strat.get("id") == "range_rotation_v206_lane_1":
@@ -1375,7 +1573,10 @@ class S24NoAdverseRunner:
         signature = (event, reason, str(row.get("note") or ""))
         if not coalesce:
             self._flush_diagnostic_repeat(lane_id, now)
-            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            if event in OPERATIONAL_CLOSE_EVENTS:
+                append_operational_close_once(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            else:
+                append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
             return
         if active is None or active["signature"] != signature:
             self._flush_diagnostic_repeat(lane_id, now)
@@ -2379,7 +2580,7 @@ class S24NoAdverseRunner:
                     )
                     return False
                 confirmed_deals.append(deal)
-            if remaining_state:
+            if remaining_state and not confirmed_deals:
                 newest = max(remaining_state, key=lambda row: int(row.get("open_time_epoch") or 0))
                 restored_last_add = float(newest.get("entry_price") or 0.0)
                 if not math.isclose(float(st.get("last_add_price") or 0.0), restored_last_add, rel_tol=0.0, abs_tol=1e-12):
@@ -2394,41 +2595,10 @@ class S24NoAdverseRunner:
                 )
                 reason = str(st.get("pending_close_reason") or "broker_or_external_close_confirmed")
                 signal_bar = st.get("pending_close_signal_bar")
-                # Keep the complete pre-close basket available until a full
-                # close identity has been derived.  _clear_basket_state uses
-                # it to persist every originating signal bar.
-                if remaining_state:
-                    st["basket"] = remaining_state
                 state_by_position_id = {
                     int(pos.get("position_identifier") or pos.get("ticket") or 0): pos for pos in state_basket
                 }
                 closed_basket_id = self._basket_id(strat, state_basket)
-                if not remaining_state:
-                    closed_sides = {
-                        str(state_by_position_id[int(deal.position_id)].get("side"))
-                        for deal in confirmed_deals
-                    }
-                    close_side = next(iter(closed_sides)) if len(closed_sides) == 1 else None
-                    close_time = max(
-                        pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
-                        for deal in confirmed_deals
-                    )
-                    self._clear_basket_state(
-                        strat,
-                        reason,
-                        signal_bar,
-                        close_side=close_side,
-                        close_time=close_time,
-                    )
-                    if orders_available:
-                        self._set_sync_block(strat, None)
-                    else:
-                        self._replace_with_recoverable_sync_block(
-                            strat,
-                            "orders_unavailable_after_confirmed_close",
-                            {"closed_position_ids": sorted(int(deal.position_id) for deal in confirmed_deals)},
-                        )
-                self._save_state()
                 for deal in confirmed_deals:
                     closed_state = state_by_position_id[int(deal.position_id)]
                     deal_time_utc = datetime.fromtimestamp(int(deal.deal_time), UTC).isoformat()
@@ -2457,22 +2627,57 @@ class S24NoAdverseRunner:
                     "position_close_confirmed",
                     strat,
                     basket_id=closed_basket_id,
+                    deal_id=max(int(deal.deal) for deal in confirmed_deals),
                     profit=sum(float(deal.net_profit) for deal in confirmed_deals),
                     reason=reason,
                     signal_bar_time=signal_bar,
                 )
+
+                # The immutable broker-close ledger must exist before any
+                # owned position is removed from durable state.  On replay the
+                # deal-based ledger writer accepts only an exact duplicate.
+                with self._confirmed_close_state_transaction():
+                    if remaining_state:
+                        st["basket"] = remaining_state
+                        newest = max(remaining_state, key=lambda row: int(row.get("open_time_epoch") or 0))
+                        st["last_add_price"] = float(newest.get("entry_price") or 0.0)
+                    else:
+                        closed_sides = {
+                            str(state_by_position_id[int(deal.position_id)].get("side"))
+                            for deal in confirmed_deals
+                        }
+                        close_side = next(iter(closed_sides)) if len(closed_sides) == 1 else None
+                        close_time = max(
+                            pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
+                            for deal in confirmed_deals
+                        )
+                        self._clear_basket_state(
+                            strat,
+                            reason,
+                            signal_bar,
+                            close_side=close_side,
+                            close_time=close_time,
+                        )
+                        if orders_available:
+                            self._set_sync_block(strat, None)
+                        else:
+                            self._replace_with_recoverable_sync_block(
+                                strat,
+                                "orders_unavailable_after_confirmed_close",
+                                {"closed_position_ids": sorted(int(deal.position_id) for deal in confirmed_deals)},
+                            )
+                    if unresolved_open:
+                        self._set_sync_block(
+                            strat,
+                            "unresolved_open_action",
+                            {
+                                "opportunity_id": str(st.get("pending_open_opportunity_id") or ""),
+                                "started_utc": st.get("pending_open_started_utc"),
+                                "live_tickets": [int(pos.ticket) for pos in positions],
+                            },
+                            recoverable=False,
+                        )
                 if unresolved_open:
-                    self._set_sync_block(
-                        strat,
-                        "unresolved_open_action",
-                        {
-                            "opportunity_id": str(st.get("pending_open_opportunity_id") or ""),
-                            "started_utc": st.get("pending_open_started_utc"),
-                            "live_tickets": [int(pos.ticket) for pos in positions],
-                        },
-                        recoverable=False,
-                    )
-                    self._save_state()
                     return bool(remaining_state)
                 return not bool(st.get("sync_block_new_entries"))
             if unresolved_open:

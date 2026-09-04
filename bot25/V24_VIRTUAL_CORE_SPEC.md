@@ -1,8 +1,11 @@
 # Bot25 V24 virtual bilateral core fixed specification
 
 Parent identity: `bot25_v23_xauusd_drought_minority_pause_v001`
+
 Parent hash: `12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10`
+
 Candidate identity: `bot25_v24_xauusd_virtual_bilateral_core_v001`
+
 Candidate parameter hash: `788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36`
 
 The hash is SHA-256 of this canonical UTF-8 JSON object:
@@ -24,13 +27,29 @@ The hash is SHA-256 of this canonical UTF-8 JSON object:
 - Opposite-break and EMA200-retouch releases close every profitable real ticket
   on the active side, newest first. There is no protected physical ticket.
 - Productive-close drought, pivot/EMA features, spread gates, feed-gap handling,
-  12-hour expiry, ownership, close confirmation, and retry rules are unchanged.
+  12-hour expiry, ownership, and close confirmation semantics are unchanged.
+  A close is retried only after broker evidence proves the prior attempt did not fill.
 - A virtual-only episode still expires or resets after a feed gap.
 
 ## Migration and release boundary
 
-- V23 state-v6 may become V24 state-v7 only when stored positions, pending open,
-  pending close, broker-owned positions, and broker-owned orders are all empty.
-- Non-flat V23 inventory is left untouched and startup fails closed.
-- The checked-in V24 params are shadow-only. Deployment and real activation
-  require a separate explicit decision.
+- Exact state-v5/man231 and state-v6/V23 may become V24 state-v7 while positions
+  remain only if stored and broker ticket, stable identity, open time, side, lot,
+  magic, and comment match,
+  broker orders and pending lifecycle actions are empty, cap/ratio remain valid,
+  and the persisted state passes unchanged-file CAS.
+- The best-price existing position per side is a transitional physical core and
+  suppresses that side's virtual core until the existing exit path closes it.
+  This preserves logical counts without opening a replacement seed.
+- Any ownership, lifecycle, order, cap, ratio, or CAS ambiguity leaves the old
+  state untouched and startup fails closed.
+- Shadow-only startup with migrated real inventory is a read-only canary. It
+  verifies exact state/broker ownership without reconciliation and cannot add,
+  close, or simulate positions in the canonical state; live lifecycle
+  processing requires explicit activation.
+- The checked-in V24 params are live-enabled by user authorization on 2026-09-04.
+  Compose supplies the V24 acknowledgement; all account, bridge and ownership
+  preflight gates remain mandatory. Remote deployment/restart is not performed.
+- Real OPEN/CLOSE also require a fresh broker quote, exact account and ownership
+  inventory, request-correlated bridge evidence, and durable lifecycle intent.
+  Ambiguous close submissions are reconciled but never automatically replayed.
