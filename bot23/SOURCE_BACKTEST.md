@@ -1,5 +1,18 @@
 # Source Backtest
 
+## 2026-09-04 Q01 variance-ratio release integration
+
+- Signal/policy: `Q01_variance_ratio_release` / `q01_k4_w48_t135_b12_hold30_cap1_v001`
+- Frozen params hash: `fdec1cecc71305877f280d3225fd17093f92a42708597202ba0bfad4eafacf67`
+- Frozen definition: `C:/Users/muuma/Documents/Codex/2026-09-02/bot/work/bot25_q01_lane_preimplementation_frozen_20260904.json`
+- Source math: completed Bid M5; `c.diff(4).shift(1).rolling(48).var() / (4 * c.diff().shift(1).rolling(48).var())`; threshold 1.35; prior 12-bar High/Low breakout; 110-M5-bar warm-up and positive ATR20 gate.
+- Entry/lifecycle: first fresh quote after completed signal M5, maximum delay 7 minutes, raw spread at most 0.30, one 0.01-lot position, confirmed-fill plus 30 minutes, confirmed-close plus 5-minute cooldown. The installed local config keeps the independent `q01_live_trading_enabled=false` gate closed, so Q01 signal decisions cannot submit real orders until a separately authorized candidate changes that gate.
+- Feed gap: a quote interval over 300 seconds closes at the first arrival quote. Feed-gap and fixed-hold exits do not defer for wide spread. Exact market-closed no-fill retains a durable close intent and retries from fresh broker quote time.
+- Ownership: independent lane 22, magic 230044, comment `s23_q01_l1`; Q01 does not reuse any existing basket or signal identity.
+- Evidence status: fixed DEV/Leakcheck/Forward tick evidence is inherited from the frozen research package. This local port verifies implementation parity and lifecycle safety; it does not create a fresh holdout or live-runtime result.
+- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`; bridge `2026-09-04-s23-strict-ipc-q01-v31`.
+- Runtime boundary: no CentOS/MT5 placement, restart, attachment, account access, state repair, or order execution was performed.
+
 ## 2026-08-31 t0530 edge-break best integration
 
 - Signal: `t0530_edge_break_fade`
@@ -8,7 +21,7 @@
 - Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
 - Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
 - Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
-- Runtime boundary: local candidate `bot23-integrated-session-vwap-off-t0530-edge-on-v003`; `t0530_edge_enabled=true`; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+- Runtime boundary: the later local candidate is `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`; Q01, t0530 edge, and session-VWAP are locally enabled; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
 
 ## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate
 
@@ -68,7 +81,42 @@
   Every bot-managed 10018 close uses a fresh-broker-quote 60-second cooldown without a reconciliation block. ZA FTP/max-hold
   and trend max-hold elapsed time use broker quote UTC rather than host poll UTC. Exact owned sync restores broker open time
   for ZA and fixed-hold positions before elapsed lifecycle checks.
-- Deployment state: local implementation only, `session_vwap_enabled=false`
+- Adoption state (2026-09-03): user authorized local bot23 integration after the
+  fixed parent was compared across DEV, known/reused Leakcheck, and retrospective
+  Forward. Current local config has `session_vwap_enabled=true`; no deployment,
+  restart, bridge attachment, account access, or live order was performed.
+- Updated portfolio evidence:
+  `backtest/output/backtest235/BOT23_SESSION_VWAP_FORWARD_PORTFOLIO_REPORT_20260903_ja.md`.
+  The Forward label remains retrospective/known rather than a fresh independent
+  holdout; no post-result parameter tuning was performed.
+- Evaluation identity: all 22 lanes retain explicit `spec_id` and `signal_id`.
+  A separate `s23_signal_evaluation.csv` records group/lane/spec/signal/variant,
+  raw/effective direction, transform, opportunity, ticket/deal, and confirmed PnL.
+  ZA variants are separately labeled as primary, late-SHORT reverse-LONG, and
+  inventory-range false-break fade. Post-adoption audit additionally splits
+  every shadow/DEV basket close into position-level evaluation rows so mixed ZA
+  variants retain exact individual PnL; legacy positions lacking an opportunity
+  identity are quarantined as `za_unattributed_legacy`, not assigned to primary.
+  Live realized outcomes remain broker-confirmed `position_close_confirmed`
+  rows; close-request rows must not be summed as realized PnL.
+  Passive evaluation schema/construction/write failures are isolated from the
+  owned-position lifecycle and disable that passive sink after the first
+  visible failure. A bad evaluation header disables that output for the process
+  while the operational trade ledger remains a startup gate. Broker-confirmed
+  close rows are deduplicated by deal/lane/position identity, and close state
+  plus daily realized PnL advance only after operational close evidence exists.
+  Operational and passive ledgers revalidate a same-path replacement header;
+  startup rejects malformed row widths, duplicate/conflicting confirmed deals,
+  and unterminated partial-write tails. Appended rows are flushed and fsynced.
+  After those close rows exist, realized-PnL, rearm/recovery, basket-clear,
+  sync-block, and final state-save processing is rollback-guarded; any exception
+  restores the complete pre-consumption in-memory state for an idempotent retry.
+  Helper-level state writes are deferred inside this transaction and only the
+  complete final state is committed, closing the process/power-loss window that
+  exception-only rollback cannot cover.
+  Each derived operational/passive row is independently keyed by the deterministic
+  broker-close transaction deal ID, allowing restart to skip durable counterparts
+  while repairing a missing passive row.
 - History admission: 20-calendar-day timestamp coverage plus latest completed M1,
   contiguous ATR60 tail and contiguous current NY-session M1; malformed or incomplete
   pages are not partially admitted and trigger retained-cache rebackfill.
@@ -201,8 +249,11 @@ does not change the independent admission contracts of the session overlays.
 
 A persisted ZA pullback may survive restart only when its positive target/ATR,
 opportunity ID, signal/event time, one-minute release time, and bounded expiry
-form one canonical identity. Incomplete, contradictory, or overlong pending
-state is cleared before it can create a basket. An exact market-closed `10018`
+form one canonical identity and the current evaluation clock is at or after
+that release. A pending identity observed before its own release is treated as
+contradictory clock state and cleared without exposure. Incomplete,
+contradictory, or overlong pending state is cleared before it can create a
+basket. An exact market-closed `10018`
 OPEN reject with a complete zero-owned-position reconciliation is definitive
 no-fill, not an ambiguous action: the local reservation is cleared and entry
 uses a 60-second bounded retry clock. Session-VWAP starts that clock from the

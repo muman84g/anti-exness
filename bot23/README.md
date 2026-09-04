@@ -1,11 +1,34 @@
 # Bot23 integrated inventory and independent session overlays
 
+## Q01 completed-M5 variance-ratio release（採用・ローカル有効）
+
+固定済み`Q01_variance_ratio_release`を、既存21レーンと分離したlane 22
+（magic 230044、comment `s23_q01_l1`）へ実装しています。ローカル候補は
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`です。Q01の判定は有効ですが、
+既存bot23の共通live設定とは別に`q01_live_trading_enabled=false`を固定し、Q01の実注文だけを
+停止しています。配置・再起動・bridge attach・実口座照合・注文実行は行っていません。
+
+broker UTCの確定Bid M5だけを使い、4本return variance / 1本return varianceの
+48本比率をsignal barから1本遅延して計算します。VR 1.35以上かつ直前12本High上抜けを
+LONG、Low下抜けをSHORTとし、研究runnerと同じ110本M5 warm-upとATR20正値条件を
+要求します。通常の既存M1利用量420本は変更せず、Q01有効時の共通HIST取得だけを
+600本へ拡張します。signal M5確定後の最初のfresh quoteから最大7分、raw spread
+0.30以下をentry条件として記録します。将来、別途承認された候補でQ01専用live gateを
+有効化した場合だけ0.01 lotを1件開き、broker-confirmed fillから30分でcloseします。
+
+保有中にfresh quote間隔が300秒を超えた場合は到着quoteで即closeします。gap closeと
+30分hold closeはwide spreadでも延期せず、market closed 10018ではclose意図を保存して
+fresh broker quote基準で再試行します。確認済みcloseから5分をcooldownとします。
+再試行stateはsource、raw/effective side、event/release/available/decision/executable、
+opportunity ID、group receipt、固定expiryを完全一致で検証し、破損・未来・矛盾stateから
+注文を再構成しません。
+
 ## NY 05:30 edge-break fade（研究best移植済み・有効候補）
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
 （magic 230040-230043）へ移植しています。現在のローカル候補
-`bot23-integrated-session-vwap-off-t0530-edge-on-v003`では
-`t0530_edge_enabled=true`です。CentOS/MT5への配置、設定切替、
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v007`では
+`t0530_edge_enabled=true`かつ`session_vwap_enabled=true`です。CentOS/MT5への配置、
 再起動、live/forward確認はこのローカル候補の範囲外です。
 
 確定M1の直前15本High/Lowを現在Closeが上抜けたときSHORT、下抜けたときLONGとし、
@@ -19,11 +42,11 @@ DEV全ティック再集計では研究mid、現行HIST相当Bid、新実装が1
 時刻・方向とも一致しました。この一致はDEV内の実装同一性証拠であり、独立holdoutや
 CentOS/MT5実稼働証拠への昇格ではありません。
 
-## NY 05:30-08:30 session-VWAP overlay（実装済み・初期無効）
+## NY 05:30-08:30 session-VWAP overlay（採用・ローカル有効）
 
 DEVで固定した`session_vwap_extension_fade`を、既存12レーンとは分離した
-lane 13-17（magic 230035-230039）へ実装しています。設定は
-`session_vwap_enabled=false`のため、ファイル更新だけでは新規注文を出しません。
+lane 13-17（magic 230035-230039）へ実装しています。ユーザーの採用判断により
+ローカル設定は`session_vwap_enabled=true`です。配置・再起動・MT5接続は別作業です。
 
 判定はbroker UTCのM1開始時刻に1分を加えた確定・利用可能時刻を
 `America/New_York`へ変換し、現地05:30以上08:30未満だけを対象にします。
@@ -66,7 +89,8 @@ ZAのpullback待機中も、signal生成時の判定だけには依存しませ�
 blocked UTC hour・日次loss/state gateを現在時刻で再評価し、待機中にgateが有効になった場合は未送信pendingを
 解除して新規basketを作りません。これはZA固有の新規basket gateであり、独立session overlayへは流用しません。
 再起動後のZA pendingは、正のtarget/ATR、opportunity ID、signal bar=event time、event+1分=release time、
-release以後かつentry wait+signal遅延上限以内のexpiryがすべて一致するときだけ再利用します。不完全・矛盾・
+release以後かつentry wait+signal遅延上限以内のexpiryがすべて一致し、現在の評価時刻がrelease以後のときだけ再利用します。
+現在時刻がpersist済みreleaseより前ならclock後退を含む矛盾stateとして未送信pendingを解除します。不完全・矛盾・
 異常延長stateは未送信pendingだけを解除し、保存値からbasketを作りません。
 OPENが正確な`10018`かつ照合後もowned positionが0件ならmarket closedの確定no-fillとして扱い、
 reconciliation blockにはせず60秒cooldownへ進みます。session-VWAPでは古いbroker quote時刻ではなく、
@@ -98,7 +122,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-08-31-s23-edge-policy-v28` です。v28はv27の全IPC/TICKS/ownership guardを継承し、edge lane 230040-230043と`s23_ed_l1`-`s23_ed_l4`だけをOPEN allowlistへ追加します。command tokenの空白・小文字・重複・不足・余分なmutationを拒否します。OPEN実行点で項目数、XAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-04-s23-strict-ipc-q01-v31` です。v31はv30の全IPC/TICKS/ownership guard、edge lane allowlist、deadline切り下げ比較を継承し、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`を所有allowlistへ追加します。さらにrequest ID、deadline、全execution数値、履歴・inventory queryの項目数と数値表現を厳密検査し、符号、指数表記、末尾文字、空値、余分なfieldを変換前に拒否します。INFO/HIST/HISTPAGE/TICKSはXAUUSDへ、履歴はM1へ、inventory queryはbot23の所有magicへ固定します。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
@@ -366,6 +390,41 @@ becomes available.
 - `s23_trades.csv` preserves economic actions, ownership/reconciliation state
   transitions, causal timestamps, tickets, position identifiers, deal IDs,
   entry/exit prices, lane/basket identity, and ticket-level confirmed net PnL.
+- `s23_signal_evaluation.csv` is a separate passive ledger with
+  `strategy_group`, lane, `spec_id`, configured `signal_id`, and a normalized
+  `signal_variant_id`. ZA is split into `za_horizontal_primary`,
+  `za_late_short_reverse_long`, and
+  `za_inventory_range_false_break_fade`; raw/effective side and transform are
+  retained. The shared opportunity/ticket/deal identities join this ledger to
+  `s23_trades.csv`, including ticket-level confirmed net PnL.
+- Shadow/DEV basket closes are emitted to the evaluation ledger as one
+  `position_close_attributed` row per position. This prevents a basket that
+  contains multiple ZA variants from collapsing to `mixed`, and the split PnL
+  sums to the unchanged aggregate `basket_close` PnL in `s23_trades.csv`.
+  Migrated/legacy ZA inventory without an `opportunity_id` is isolated as
+  `za_unattributed_legacy` and is never credited to the primary ZA signal.
+- Outcome aggregation must use `position_close_confirmed` for live fills and
+  `position_close_attributed` for shadow/DEV closes. Requested/deferred rows
+  are lifecycle evidence, not additional realized PnL.
+- Evaluation-ledger construction/I/O failures are logged once and disable that
+  passive sink for the process; they never interrupt an owned position close.
+  Its header is still checked at preflight so a stale schema is visible before
+  new operation begins. The operational `s23_trades.csv` remains a hard
+  preflight gate.
+- Broker-confirmed close rows are idempotent by immutable deal ID, lane, and
+  position identifier. A retry after state persistence failure does not append
+  duplicate operational or passive close rows. Basket state and daily realized
+  PnL advance only after every confirmed deal has a flushed and filesystem-
+  synchronized operational audit row. Duplicate/conflicting confirmed deal
+  identities are rejected during startup validation. The subsequent realized-
+  PnL, portfolio-rearm/recovery, basket-clear, sync-block, and state-save steps
+  are rollback-guarded as one retryable state transition; a failure restores the
+  same runner's pre-consumption state before poll containment. Helper-level state
+  saves are deferred and the completed transition is durably committed once, so
+  process termination cannot preserve a half-applied close transition. Derived operational
+  and passive rows carry the basket's deterministic broker-close deal identity and
+  deduplicate independently, so retry neither repeats durable rearm/recovery evidence
+  nor prevents repair of a missing passive counterpart.
 - Repeated operational `entry_skip` diagnostics write once on transition and
   then one `diagnostic_repeat_summary` every five minutes with
   `repeat_count` and `repeat_window_seconds`. A reason change flushes the prior
@@ -374,7 +433,9 @@ becomes available.
   five backups.
 - The runner refuses an old or incompatible trades-CSV header. Archive/reset
   the legacy CSV before the version-3 first start; it never silently appends a
-  new row shape under an old header.
+  new row shape under an old header. Header identity is rechecked on every
+  append so same-path replacement cannot bypass the gate. Startup also rejects
+  malformed row widths and an unterminated tail left by a partial write.
 
 ### Passive forward opportunity observer
 
@@ -512,6 +573,10 @@ The first start adds the portfolio-rearm and range-fade fields under `routing`
 while preserving all existing baskets, unresolved OPEN evidence, and pending
 ZA entries; it invents neither a historical rearm interval nor a historical
 range/breakout.
+The first start also adds one empty Q01 lane and its frozen policy identity
+while preserving all 21 pre-existing lane states. Q01 owns magic 230044 and
+comment `s23_q01_l1`; a current-generation Q01 state with a missing required
+receipt or quote-clock field fails closed instead of being silently repaired.
 On the first start with `reverse_d60`, the runner preserves existing baskets and
 unresolved OPEN reconciliation state but clears unsubmitted local pending
 entries created under the previous entry policy.
@@ -526,7 +591,7 @@ OPEN reservation is cleared only after three consecutive clean bot-scoped flat
 position/order confirmations.
 
 Before restart, MT5 must be reconciled for the retired bot23 magic 200023 and
-active magics 230023-230043, with no unexplained pending orders. The runner independently
+active magics 230023-230044, with no unexplained pending orders. The runner independently
 checks the retired namespace and refuses cutover if it is non-flat or cannot be
 queried. Preserve a compatible `state/s23_bot_state.json`; never reset state
 while any lane position or order exists. Because the close audit columns changed,
@@ -554,26 +619,35 @@ py test_shadow_state_tagger.py
 py test_eu_session_clock.py
 ```
 
+`test_ny0530_mtm_mdd_applies_explicit_lot_contract_multiplier` additionally
+checks the external backtest227 research source when it is available. In a
+standalone GitHub clone, set `BOTTER_RESEARCH_ROOT` to the separate research
+checkout root; otherwise that one external-artifact check is reported as
+skipped while the self-contained bot23 suite continues.
+
 Local release-candidate runner SHA-256:
-`ef0d25f449247da7afc2f00c66853e643d68d969b8298b48de4573241c1e1a53`.
+`c79284157a27a13bc16ea302278d4482395d53b6561d21487897a383bdea0911`.
 
 Local release-candidate params SHA-256:
-`d5fd2ecc10cc69b5c31b0731790265d9bba68515732474f4aa4cabfdcf2a61eb`.
+`67faa225d255d4b4bc88b7f3c11bcd483a3510c9c1f65e3337a70bb21b722af5`.
 Local release-candidate regression SHA-256:
-`32d701035d3701ba24daf5e49c0d40cb0d02d98d167f353ddfbca9aede87ba78`.
+`21472106c24cf5ad38bc678ab9a6b2154d3c5fe6b11b7a87be7957324db4cbfe`.
 Entry-admission clock SHA-256:
-`c45e52f49487df60fb3d7dfe0deaea09a1e9bf704df870e22732e4c7a0411abf`.
+`fbdecc7be7d64e457a151c05cbb8f0496986c7d6de18dcd37b15104f6b28318b`.
 Position-lifecycle clock SHA-256:
 `91e2feea92d986154dfce88171dd154daf6b80f842b42206a1a6d9c79631ee57`.
 Clock regression SHA-256:
-`14cbbc321f6bb952458cc75ca39a6a95d44ad2c4e62473f4f04431cbcd433089`.
+`8b6542452a6e3d0e9d0762997033654aff0df01597a995fa165a22d31ffbf8cb`.
 Installed shadow-observer SHA-256:
 `f25a003df49e801dce8f9e3a73fa1f5722f001c75a68d714295510628b49eeaa`.
 Installed shadow-observer regression SHA-256:
 `5dd72132c92de2aea1f43fe992cf738354529238d2cf503b4605c0c8a4c76f4d`.
 Installed executor SHA-256:
-`9aaed4bb447d9d0348b2c61912b61d561b420a0ffb91c311f15073f000fe9485`.
+`ea0c5f6d48f6fa36bccfd602e2ac4aaf4ea0f2245920af6e137a21c38cc41489`.
 Installed bridge-source SHA-256:
-`6e00c584cc4b25ae4e4257133f7f6d377f11b0b524c8fa6bf391463e8bc03703`.
-All hashes above identify the local, not-yet-deployed release candidate. They do
-not replace the canonical research identities in `SOURCE_BACKTEST.md`.
+`d40491d6b25eafd402ea3de7b94161da2bffa26347381dbc25387a45d6a165f5`.
+Installed bridge-binary SHA-256:
+`e9135ec12d9c8f2cc84591f3b1842942644b5db060c62cd82bf75408fb03234d`.
+All hashes above identify the local source candidate. Runtime deployment and
+process identity must be verified separately; these hashes do not replace the
+canonical research identities in `SOURCE_BACKTEST.md`.

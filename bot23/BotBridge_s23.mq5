@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-08-31-s23-edge-policy-v28"
+#define BRIDGE_VERSION "2026-09-04-s23-strict-ipc-q01-v31"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -166,6 +166,8 @@ string CanonicalCommentForMagic(const long magic)
       return StringFormat("s23_sv_l%d", (int)(magic - 230034));
    if(magic >= 230040 && magic <= 230043)
       return StringFormat("s23_ed_l%d", (int)(magic - 230039));
+   if(magic == 230044)
+      return "s23_q01_l1";
    return "";
 }
 
@@ -217,6 +219,88 @@ bool ParseCanonicalUnsignedLong(const string value, long &parsed)
    return parsed >= 0 && value == StringFormat("%I64d", parsed);
 }
 
+bool IsRequestId(const string value)
+{
+   if(StringLen(value) != 32)
+      return false;
+   for(int index = 0; index < 32; ++index)
+   {
+      ushort character = StringGetCharacter(value, index);
+      bool digit = character >= '0' && character <= '9';
+      bool lower_hex = character >= 'a' && character <= 'f';
+      if(!digit && !lower_hex)
+         return false;
+   }
+   return true;
+}
+
+bool IsUnsignedDecimalText(const string value)
+{
+   int length = StringLen(value);
+   if(length <= 0 || StringGetCharacter(value, 0) == '.' ||
+      StringGetCharacter(value, length - 1) == '.')
+      return false;
+   bool dot_seen = false;
+   for(int index = 0; index < length; ++index)
+   {
+      ushort character = StringGetCharacter(value, index);
+      if(character == '.')
+      {
+         if(dot_seen)
+            return false;
+         dot_seen = true;
+      }
+      else if(character < '0' || character > '9')
+         return false;
+   }
+   return true;
+}
+
+bool IsZeroArgCommand(string &parts[], const int count)
+{
+   return count == 1 || (count == 2 && parts[1] == "");
+}
+
+bool ValidOpenNumericFields(string &parts[])
+{
+   long parsed = 0;
+   return ParseCanonicalUnsignedLong(parts[2], parsed) &&
+      IsUnsignedDecimalText(parts[3]) && IsUnsignedDecimalText(parts[4]) &&
+      IsUnsignedDecimalText(parts[5]) &&
+      ParseCanonicalUnsignedLong(parts[6], parsed) &&
+      ParseCanonicalUnsignedLong(parts[8], parsed) &&
+      ParseCanonicalUnsignedLong(parts[9], parsed) &&
+      ParseCanonicalUnsignedLong(parts[11], parsed);
+}
+
+bool ValidCloseNumericFields(string &parts[])
+{
+   long parsed = 0;
+   return ParseCanonicalUnsignedLong(parts[1], parsed) &&
+      ParseCanonicalUnsignedLong(parts[2], parsed) &&
+      ParseCanonicalUnsignedLong(parts[3], parsed) &&
+      ParseCanonicalUnsignedLong(parts[6], parsed) &&
+      ParseCanonicalUnsignedLong(parts[8], parsed);
+}
+
+bool ValidHistoryNumericFields(string &parts[], const int count)
+{
+   long parsed = 0;
+   if(count == 4)
+      return ParseCanonicalUnsignedLong(parts[2], parsed) &&
+         ParseCanonicalUnsignedLong(parts[3], parsed);
+   if(count == 5)
+      return ParseCanonicalUnsignedLong(parts[2], parsed) &&
+         ParseCanonicalUnsignedLong(parts[3], parsed) &&
+         ParseCanonicalUnsignedLong(parts[4], parsed);
+   return false;
+}
+
+bool IsOwnedMagic(const long magic)
+{
+   return magic >= 230023 && magic <= 230044;
+}
+
 string HandleCommand(const string command)
 {
    string parts[];
@@ -228,13 +312,13 @@ string HandleCommand(const string command)
    if(op == "PENDING" || op == "MODIFY" || op == "CANCEL")
       return "ERR|COMMAND_DISABLED";
 
-   if(op == "ECHO")
+   if(op == "ECHO" && IsZeroArgCommand(parts, n))
       return "OK|Alive";
 
-   if(op == "CAPS")
+   if(op == "CAPS" && IsZeroArgCommand(parts, n))
       return "OK|CAPS|" + BRIDGE_NAME + "|" + BRIDGE_VERSION + "|" + BRIDGE_COMMANDS;
 
-   if(op == "ACCOUNT")
+   if(op == "ACCOUNT" && IsZeroArgCommand(parts, n))
    {
       long margin_mode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
       long account_trade_allowed = AccountInfoInteger(ACCOUNT_TRADE_ALLOWED);
@@ -256,9 +340,11 @@ string HandleCommand(const string command)
          account_currency);
    }
 
-   if(op == "INFO" && n >= 2)
+   if(op == "INFO" && n == 2)
    {
       string symbol = parts[1];
+      if(symbol != "XAUUSD")
+         return "ERR|INFO_POLICY_GUARD";
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick))
          return "ERR|INFO_TICK";
@@ -278,11 +364,15 @@ string HandleCommand(const string command)
            tick_value, tick_size, contract, digits, stops_level, tick.time_msc, trade_mode, order_mode);
    }
 
-   if(op == "HIST" && n >= 4)
+   if(op == "HIST" && n == 4)
    {
       string symbol = parts[1];
+      if(symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n))
+         return "ERR|BAD_HIST_GUARD";
       ENUM_TIMEFRAMES timeframe = (ENUM_TIMEFRAMES)((int)StringToInteger(parts[2]));
       int bars = (int)StringToInteger(parts[3]);
+      if(timeframe != PERIOD_M1)
+         return "ERR|HIST_POLICY_GUARD";
       if(bars <= 0 || bars > 5000)
          return "ERR|BAD_HIST_BARS";
       if(!SymbolSelect(symbol, true))
@@ -312,12 +402,16 @@ string HandleCommand(const string command)
 
    // Bounded backward page. Existing HIST semantics remain unchanged.
    // HISTPAGE|symbol|timeframe|start_pos|bars
-   if(op == "HISTPAGE" && n >= 5)
+   if(op == "HISTPAGE" && n == 5)
    {
       string symbol = parts[1];
+      if(symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n))
+         return "ERR|BAD_HISTPAGE_GUARD";
       ENUM_TIMEFRAMES timeframe = (ENUM_TIMEFRAMES)((int)StringToInteger(parts[2]));
       int start_pos = (int)StringToInteger(parts[3]);
       int bars = (int)StringToInteger(parts[4]);
+      if(timeframe != PERIOD_M1)
+         return "ERR|HISTPAGE_POLICY_GUARD";
       if(start_pos < 0 || start_pos > 200000 || bars <= 0 || bars > 5000)
          return "ERR|BAD_HISTPAGE_ARGS";
       if(!SymbolSelect(symbol, true))
@@ -356,7 +450,8 @@ string HandleCommand(const string command)
       long raw_to_msc = 0;
       long raw_max_rows = 0;
       long raw_skip_at_from = 0;
-      if(!ParseCanonicalUnsignedLong(parts[2], raw_from_msc) ||
+       if(symbol != "XAUUSD" ||
+          !ParseCanonicalUnsignedLong(parts[2], raw_from_msc) ||
          !ParseCanonicalUnsignedLong(parts[3], raw_to_msc) ||
          !ParseCanonicalUnsignedLong(parts[4], raw_max_rows) ||
          !ParseCanonicalUnsignedLong(parts[5], raw_skip_at_from) ||
@@ -414,7 +509,7 @@ string HandleCommand(const string command)
 
    if(op == "OPEN")
    {
-       if(n != 12)
+       if(n != 12 || !ValidOpenNumericFields(parts))
          return "ERR|BAD_OPEN_GUARD";
       string symbol = parts[1];
       int order_type = (int)StringToInteger(parts[2]);
@@ -531,9 +626,13 @@ string HandleCommand(const string command)
       return StringFormat("OK|%I64u|%.10f|%d", order, price, retcode);
    }
 
-   if(op == "POSITIONS" && n >= 3)
+   if(op == "POSITIONS" && n == 3)
    {
       string symbol = parts[1];
+      long parsed_magic = 0;
+      if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
+         !IsOwnedMagic(parsed_magic))
+         return "ERR|POSITIONS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";
       int matched = 0;
@@ -554,9 +653,12 @@ string HandleCommand(const string command)
       return response + "|" + StringFormat("END,%d", matched);
    }
 
-   if(op == "POSITION" && n >= 2)
+   if(op == "POSITION" && n == 2)
    {
-      ulong ticket = (ulong)StringToInteger(parts[1]);
+      long parsed_ticket = 0;
+      if(!ParseCanonicalUnsignedLong(parts[1], parsed_ticket) || parsed_ticket <= 0)
+         return "ERR|BAD_POSITION_GUARD";
+      ulong ticket = (ulong)parsed_ticket;
       ResetLastError();
       if(!PositionSelectByTicket(ticket))
       {
@@ -565,12 +667,21 @@ string HandleCommand(const string command)
             return "ERR|POSITION_NOT_FOUND";
          return StringFormat("ERR|POSITION_QUERY|%d", select_error);
       }
+      long selected_magic = PositionGetInteger(POSITION_MAGIC);
+      if(PositionGetString(POSITION_SYMBOL) != "XAUUSD" ||
+         !IsOwnedMagic(selected_magic) ||
+         PositionGetString(POSITION_COMMENT) != CanonicalCommentForMagic(selected_magic))
+         return "ERR|POSITION_POLICY_GUARD";
       return "OK|" + PositionRecord();
    }
 
-   if(op == "ORDERS" && n >= 3)
+   if(op == "ORDERS" && n == 3)
    {
       string symbol = parts[1];
+      long parsed_magic = 0;
+      if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
+         !IsOwnedMagic(parsed_magic))
+         return "ERR|ORDERS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";
       int matched = 0;
@@ -591,10 +702,15 @@ string HandleCommand(const string command)
       return response + "|" + StringFormat("END,%d", matched);
    }
 
-   if(op == "CLOSEDEAL" && n >= 3)
+   if(op == "CLOSEDEAL" && n == 3)
    {
-      ulong position_id = (ulong)StringToInteger(parts[1]);
-      datetime from_time = (datetime)StringToInteger(parts[2]);
+      long parsed_position_id = 0;
+      long parsed_from_time = 0;
+      if(!ParseCanonicalUnsignedLong(parts[1], parsed_position_id) ||
+         !ParseCanonicalUnsignedLong(parts[2], parsed_from_time))
+         return "ERR|BAD_CLOSEDEAL_GUARD";
+      ulong position_id = (ulong)parsed_position_id;
+      datetime from_time = (datetime)parsed_from_time;
       if(position_id == 0)
          return "ERR|BAD_POSITION_ID";
       if(from_time <= 0)
@@ -690,7 +806,7 @@ string HandleCommand(const string command)
 
    if(op == "CLOSE")
    {
-       if(n != 9)
+       if(n != 9 || !ValidCloseNumericFields(parts))
          return "ERR|BAD_CLOSE_GUARD";
       ulong ticket = (ulong)StringToInteger(parts[1]);
       int deviation = 20;
@@ -783,10 +899,25 @@ void OnTimer()
       return;
    }
    string request_id = StringSubstr(envelope, 4, request_end - 4);
-   long deadline_msc = StringToInteger(
-      StringSubstr(envelope, request_end + 1, deadline_end - request_end - 1));
+   string deadline_text = StringSubstr(
+      envelope, request_end + 1, deadline_end - request_end - 1);
+   long deadline_msc = 0;
    string command = StringSubstr(envelope, deadline_end + 1);
-   bool request_expired = deadline_msc <= 0 || ((long)TimeGMT()) * 1000 > deadline_msc;
+   if(!IsRequestId(request_id) ||
+      !ParseCanonicalUnsignedLong(deadline_text, deadline_msc) ||
+      deadline_msc <= 0 || command == "")
+   {
+      if(!recovered_claim)
+         ClearCommand();
+      // Preserve an invalid durable claim for explicit reconciliation.
+      return;
+   }
+   // TimeGMT() has one-second resolution while the publisher deadline is in
+   // milliseconds.  Compare against the floored deadline second so an
+   // unclaimed command can expire up to 999 ms early, never execute after its
+   // precise publisher deadline.
+   bool request_expired = deadline_msc <= 0 ||
+      ((long)TimeGMT()) >= deadline_msc / 1000;
    bool recovered_open = recovered_claim && StringFind(command, "OPEN|") == 0;
    if(recovered_claim && ReadCommand() == envelope)
    {

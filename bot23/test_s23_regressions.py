@@ -27,6 +27,9 @@ from live_s23_bot import (
     EXPECTED_MORNING_MAGICS,
     EXPECTED_MORNING_POLICY_ID,
     EXPECTED_PRE_EU30_MAGICS,
+    EXPECTED_Q01_MAGICS,
+    EXPECTED_Q01_POLICY_ID,
+    EXPECTED_Q01_POLICY_PARAMS_HASH,
     EXPECTED_S23_MAGIC,
     EXPECTED_S23_MAGICS,
     LEGACY_S23_MAGICS,
@@ -37,6 +40,48 @@ from live_s23_bot import (
     parse_ts,
     utc_now,
 )
+
+
+_CANONICAL_RUNTIME_FILES = {
+    name: Path(getattr(live_s23_bot, name)).resolve()
+    for name in (
+        "STATE_FILE",
+        "TRADE_LOG_FILE",
+        "SIGNAL_EVALUATION_LOG_FILE",
+        "RUNNER_LOCK_FILE",
+    )
+}
+_MODULE_RUNTIME_DIR = None
+_MODULE_RUNTIME_PATCHES = []
+
+
+def setUpModule():
+    """Keep the complete no-order module away from canonical runtime files."""
+    global _MODULE_RUNTIME_DIR, _MODULE_RUNTIME_PATCHES
+    _MODULE_RUNTIME_DIR = tempfile.TemporaryDirectory(prefix="bot23-regression-")
+    isolated = Path(_MODULE_RUNTIME_DIR.name)
+    targets = {
+        "STATE_FILE": isolated / "s23_bot_state.json",
+        "TRADE_LOG_FILE": isolated / "s23_trades.csv",
+        "SIGNAL_EVALUATION_LOG_FILE": isolated / "s23_signal_evaluation.csv",
+        "RUNNER_LOCK_FILE": isolated / "s23_runner.lock",
+    }
+    _MODULE_RUNTIME_PATCHES = [
+        patch.object(live_s23_bot, name, str(path))
+        for name, path in targets.items()
+    ]
+    for patcher in _MODULE_RUNTIME_PATCHES:
+        patcher.start()
+
+
+def tearDownModule():
+    global _MODULE_RUNTIME_DIR, _MODULE_RUNTIME_PATCHES
+    for patcher in reversed(_MODULE_RUNTIME_PATCHES):
+        patcher.stop()
+    _MODULE_RUNTIME_PATCHES = []
+    if _MODULE_RUNTIME_DIR is not None:
+        _MODULE_RUNTIME_DIR.cleanup()
+        _MODULE_RUNTIME_DIR = None
 
 
 class CountingExecutor:
@@ -90,6 +135,73 @@ class CountingExecutor:
 
 
 class BridgeHealthLoggingRegressionTests(unittest.TestCase):
+    def test_no_order_module_uses_only_isolated_runtime_files(self):
+        for name, canonical in _CANONICAL_RUNTIME_FILES.items():
+            self.assertNotEqual(Path(getattr(live_s23_bot, name)).resolve(), canonical)
+
+    def test_compiled_bridge_version_contract_matches_runner_and_params(self):
+        source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
+        version_line = next(
+            line.strip() for line in source.splitlines()
+            if line.strip().startswith("#define BRIDGE_VERSION ")
+        )
+        self.assertEqual(
+            version_line,
+            f'#define BRIDGE_VERSION "{live_s23_bot.EXPECTED_BRIDGE_VERSION}"',
+        )
+        params = load_params(str(Path(__file__).with_name("s23_params.json")))
+        self.assertEqual(params["expected_bridge_version"], live_s23_bot.EXPECTED_BRIDGE_VERSION)
+
+    def test_q01_lane_contract_is_configured_as_independent_lane_22(self):
+        params = load_params(str(Path(__file__).with_name("s23_params.json")))
+        self.assertEqual(params["q01_policy_id"], EXPECTED_Q01_POLICY_ID)
+        self.assertEqual(params["q01_params_hash"], EXPECTED_Q01_POLICY_PARAMS_HASH)
+        self.assertEqual(params["expected_q01_magics"], list(EXPECTED_Q01_MAGICS))
+        q01 = params["q01_variance_release_strategies"]
+        self.assertEqual(len(q01), 1)
+        self.assertEqual(q01[0]["lane_id"], 22)
+        self.assertEqual(q01[0]["magic"], 230044)
+        self.assertEqual(q01[0]["comment_prefix"], "s23_q01_l1")
+        self.assertEqual(q01[0]["max_positions"], 1)
+        self.assertEqual(q01[0]["hold_minutes"], 30)
+        self.assertEqual(q01[0]["cooldown"], 5)
+
+    def test_ea_rejects_noncanonical_execution_and_envelope_numbers_before_conversion(self):
+        source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
+        open_block = source.split('if(op == "OPEN"', 1)[1].split('if(op == "PENDING"', 1)[0]
+        close_block = source.split('if(op == "CLOSE"', 1)[1].split('return "ERR|UNKNOWN_COMMAND"', 1)[0]
+        timer = source.split("void OnTimer()", 1)[1]
+        self.assertIn("IsRequestId(request_id)", timer)
+        self.assertIn("ParseCanonicalUnsignedLong(deadline_text, deadline_msc)", timer)
+        self.assertLess(timer.index("IsRequestId(request_id)"), timer.index("HandleCommand(command)"))
+        self.assertIn("n != 12 || !ValidOpenNumericFields(parts)", open_block)
+        self.assertLess(open_block.index("ValidOpenNumericFields"), open_block.index("StringToDouble"))
+        self.assertIn("n != 9 || !ValidCloseNumericFields(parts)", close_block)
+        self.assertLess(close_block.index("ValidCloseNumericFields"), close_block.index("StringToInteger"))
+
+    def test_ea_query_surface_is_exactly_scoped_before_broker_reads(self):
+        source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
+        for exact_guard in (
+            'if(op == "INFO" && n == 2)',
+            'if(op == "HIST" && n == 4)',
+            'if(op == "HISTPAGE" && n == 5)',
+            'if(op == "TICKS" && n == 6)',
+            'if(op == "POSITIONS" && n == 3)',
+            'if(op == "POSITION" && n == 2)',
+            'if(op == "ORDERS" && n == 3)',
+            'if(op == "CLOSEDEAL" && n == 3)',
+        ):
+            self.assertIn(exact_guard, source)
+        self.assertIn('symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n)', source)
+        self.assertIn("timeframe != PERIOD_M1", source)
+        self.assertIn("!IsOwnedMagic(parsed_magic)", source)
+        position_block = source.split('if(op == "POSITION"', 1)[1].split(
+            'if(op == "ORDERS"', 1,
+        )[0]
+        self.assertIn('PositionGetString(POSITION_SYMBOL) != "XAUUSD"', position_block)
+        self.assertIn("!IsOwnedMagic(selected_magic)", position_block)
+        self.assertIn("CanonicalCommentForMagic(selected_magic)", position_block)
+
     def test_close_command_binds_account_identity_atomically(self):
         source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
         close_block = source.split('if(op == "CLOSE"', 1)[1].split('return "ERR|UNKNOWN_COMMAND"', 1)[0]
@@ -188,6 +300,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         mutations = (
             {"expected_symbol": "XAUUSD.a"}, {"expected_magic": 999999},
             {"expected_comment": "s23_sv_l2"}, {"expected_identifier": 0},
+            {"expected_server": "Expected-Server\rspoof"},
+            {"expected_server": "Expected-Server\nspoof"},
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation), patch.object(
@@ -246,6 +360,65 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 self.assertFalse(runner.connect_and_preflight())
         finally:
             os.unlink(path)
+
+    def test_trade_ledger_io_failure_is_a_controlled_preflight_reject(self):
+        runner, _strategy, _state = make_runner(live=True)
+        with patch.object(
+            live_s23_bot, "validate_csv_schema",
+            side_effect=OSError("trade ledger permission denied"),
+        ), self.assertLogs(level="CRITICAL") as captured:
+            self.assertFalse(runner.connect_and_preflight())
+        self.assertIn(
+            "trade audit schema preflight failed",
+            "\n".join(captured.output),
+        )
+
+    def test_passive_evaluation_schema_mismatch_does_not_stop_owned_close_only_startup(self):
+        runner, _strategy, state = make_runner(live=False)
+        runner.params["enabled"] = False
+        state["basket"] = [{"shadow": True}]
+        runner.dm.connect = lambda: True
+        runner.executor = live_s23_bot.FakeExecutor()
+        runner._legacy_inventory_error = lambda: None
+
+        def validate(path, _fields):
+            if path == live_s23_bot.SIGNAL_EVALUATION_LOG_FILE:
+                raise RuntimeError("legacy evaluation header")
+
+        with patch.object(
+            live_s23_bot, "validate_csv_schema", side_effect=validate,
+        ), self.assertLogs(level="ERROR") as captured:
+            self.assertTrue(runner.connect_and_preflight())
+        self.assertFalse(runner._signal_evaluation_enabled)
+        self.assertIn(
+            "passive signal evaluation disabled by schema mismatch",
+            "\n".join(captured.output),
+        )
+        with patch.object(live_s23_bot, "validate_csv_schema", return_value=None):
+            self.assertTrue(runner.connect_and_preflight())
+        self.assertTrue(runner._signal_evaluation_enabled)
+
+    def test_passive_evaluation_io_failure_does_not_stop_owned_close_only_startup(self):
+        runner, _strategy, state = make_runner(live=False)
+        runner.params["enabled"] = False
+        state["basket"] = [{"shadow": True}]
+        runner.dm.connect = lambda: True
+        runner.executor = live_s23_bot.FakeExecutor()
+        runner._legacy_inventory_error = lambda: None
+
+        def validate(path, _fields):
+            if path == live_s23_bot.SIGNAL_EVALUATION_LOG_FILE:
+                raise OSError("evaluation ledger permission denied")
+
+        with patch.object(
+            live_s23_bot, "validate_csv_schema", side_effect=validate,
+        ), self.assertLogs(level="ERROR") as captured:
+            self.assertTrue(runner.connect_and_preflight())
+        self.assertFalse(runner._signal_evaluation_enabled)
+        self.assertIn(
+            "passive signal evaluation disabled by schema mismatch",
+            "\n".join(captured.output),
+        )
 
     def test_executor_parses_bridge_order_record_shape(self):
         response = "OK|7701,XAUUSD,4,0.01,2000.500,1999.000,2002.000,230035,s23_sv_l1|END,1"
@@ -378,11 +551,19 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             self.assertFalse(Path(bridge.cmd_file).exists())
 
     def test_ny0530_mtm_mdd_applies_explicit_lot_contract_multiplier(self):
+        research_root = Path(
+            os.environ.get("BOTTER_RESEARCH_ROOT", str(Path(__file__).parents[2]))
+        )
         runner_path = (
-            Path(__file__).parents[2] / "backtest" / "output" / "backtest227" /
+            research_root / "backtest" / "output" / "backtest227" /
             "candidates" / "xau-ny0530-0830-structural-screen-v001" /
             "run_xau-ny0530-0830-structural-screen-v001.py"
         )
+        if not runner_path.is_file():
+            self.skipTest(
+                "external backtest227 source is unavailable; set BOTTER_RESEARCH_ROOT "
+                "to a checkout that contains the research artifact"
+            )
         source = runner_path.read_text(encoding="utf-8")
         function = source.split("def mtm_mdd_scan", 1)[1].split("def ", 1)[0]
         self.assertIn("value_multiplier", function)
@@ -424,7 +605,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         policy_block = source.split("bool IsCanonicalOpenPolicy", 1)[1].split("bool IsPendingPlaced", 1)[0]
         timer = source.split("void OnTimer()", 1)[1]
         self.assertIn("expected_owned_positions", open_block)
-        self.assertIn("if(n != 12)", open_block)
+        self.assertIn("if(n != 12 || !ValidOpenNumericFields(parts))", open_block)
         self.assertIn("sl == 0.0", policy_block)
         self.assertIn("tp == 0.0", policy_block)
         self.assertIn('POSITION_COMMENT) != comment', open_block)
@@ -432,6 +613,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         self.assertIn("recovered_open", timer)
         self.assertIn("if(recovered_open)", timer)
         self.assertIn("ERR|OPEN_RESULT_UNRESOLVED", timer)
+        self.assertIn("((long)TimeGMT()) >= deadline_msc / 1000", timer)
+        self.assertNotIn("((long)TimeGMT()) * 1000 > deadline_msc", timer)
         self.assertIn("FileIsExist(InpCommandFile)", timer)
         self.assertLess(timer.index("FileIsExist(InpCommandFile)"), timer.index("HandleCommand(command)"))
         write_response = source.split("bool WriteResponse", 1)[1].split("string PositionRecord", 1)[0]
@@ -776,8 +959,487 @@ def make_runner(*, live: bool = True) -> tuple[S23HorizontalInventoryRunner, dic
     return runner, strategy, runner._st(strategy)
 
 
-def arm_pending(state: dict, *, atr30: float | None = 1.5, target: float | None = 100.0) -> None:
-    now = pd.Timestamp(utc_now())
+class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
+    def test_pre_q01_state_migration_preserves_existing_lane_state(self):
+        seed, _strategy, _state = make_runner(live=True)
+        legacy = seed._default_state()
+        legacy["routing"].pop("q01_policy_id")
+        legacy["routing"].pop("q01_params_hash")
+        legacy["routing"].pop("q01_last_evaluated_m5_bar")
+        q01_id = seed._q01_strategies()[0]["id"]
+        legacy["strategies"].pop(q01_id)
+        preserved_id = seed.params["strategies"][0]["id"]
+        legacy["strategies"][preserved_id]["cooldown_until_bar"] = 12345
+        params = json.loads(json.dumps(seed.params))
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+            state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                migrated = S23HorizontalInventoryRunner(params)
+            self.assertTrue(migrated._q01_state_migrated)
+            self.assertEqual(migrated.state["strategies"][preserved_id]["cooldown_until_bar"], 12345)
+            self.assertIn(q01_id, migrated.state["strategies"])
+            self.assertEqual(migrated.state["strategies"][q01_id]["basket"], [])
+            self.assertIsNone(migrated.state["strategies"][q01_id]["q01_retry_opportunity"])
+        finally:
+            os.unlink(state_path)
+
+    def test_current_q01_state_missing_required_clock_fails_closed(self):
+        seed, _strategy, _state = make_runner(live=True)
+        malformed = seed._default_state()
+        q01_id = seed._q01_strategies()[0]["id"]
+        malformed["strategies"][q01_id].pop("q01_last_quote_msc")
+        params = json.loads(json.dumps(seed.params))
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(malformed, handle)
+            state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                rejected = S23HorizontalInventoryRunner(params)
+            self.assertTrue(
+                all(
+                    lane_state["sync_block_new_entries"]
+                    and lane_state["sync_block_reason"] == "state_identity_mismatch"
+                    for lane_state in rejected.state["strategies"].values()
+                )
+            )
+        finally:
+            os.unlink(state_path)
+
+    def test_q01_topology_is_independent_lane_22(self):
+        params = json.loads(json.dumps(load_params()))
+        self.assertFalse(params["q01_live_trading_enabled"])
+        q01 = params["q01_variance_release_strategies"]
+        self.assertEqual([row["lane_id"] for row in q01], [22])
+        self.assertEqual([row["magic"] for row in q01], [230044])
+        self.assertEqual([row["comment_prefix"] for row in q01], ["s23_q01_l1"])
+        previous_magics = set(
+            params["expected_magics"]
+            + params["expected_morning_magics"]
+            + params["expected_midday_magics"]
+            + params["expected_pre_eu30_magics"]
+            + params["expected_trend_recovery_magics"]
+            + params["expected_session_vwap_magics"]
+            + params["expected_t0530_edge_magics"]
+        )
+        self.assertTrue(previous_magics.isdisjoint(params["expected_q01_magics"]))
+
+    def test_q01_waits_for_completed_m5_release(self):
+        runner, _strategy, _state = make_runner(live=True)
+        executor = CountingExecutor()
+        runner.executor = executor
+        bars = pd.DataFrame(
+            {"Open": [2000.0] * 10, "High": [2001.0] * 10, "Low": [1999.0] * 10, "Close": [2000.5] * 10},
+            index=pd.date_range("2026-01-01T00:00:00Z", periods=10, freq="1min"),
+        )
+        runner._process_q01_entries(
+            bars.iloc[:4],
+            SimpleNamespace(
+                bid=2000.5,
+                ask=2000.6,
+                quote_time_msc=int(pd.Timestamp("2026-01-01T00:04:30Z").timestamp() * 1000),
+            ),
+            pd.Timestamp("2026-01-01T00:04:30Z"),
+            {22: True},
+        )
+        self.assertEqual(executor.open_calls, 0)
+
+    def test_q01_consumes_one_fresh_completed_m5_signal(self):
+        runner, _strategy, _state = make_runner(live=True)
+        rows = 65
+        bars = pd.DataFrame(
+            {
+                "Open": [2000.0] * rows,
+                "High": [2001.0] * rows,
+                "Low": [1999.0] * rows,
+                "Close": [2000.5] * rows,
+            },
+            index=pd.date_range("2026-01-01T00:00:00Z", periods=rows, freq="1min"),
+        )
+        q01_state = runner._st(runner._q01_strategies()[0])
+        def consume_open(*_args, **_kwargs):
+            q01_state["q01_retry_opportunity"] = None
+            return True
+        with patch.object(runner, "_q01_signal_side", return_value=("LONG", 1.5)), patch.object(runner, "_attempt_q01_open", side_effect=consume_open) as opened:
+            runner._process_q01_entries(
+                bars.iloc[:65],
+                SimpleNamespace(
+                    bid=2000.5,
+                    ask=2000.6,
+                    quote_time_msc=int(pd.Timestamp("2026-01-01T01:05:01Z").timestamp() * 1000),
+                ),
+                pd.Timestamp("2026-01-01T01:05:01Z"),
+                {22: True},
+            )
+            runner._process_q01_entries(
+                bars.iloc[:65],
+                SimpleNamespace(
+                    bid=2000.5,
+                    ask=2000.6,
+                    quote_time_msc=int(pd.Timestamp("2026-01-01T01:05:02Z").timestamp() * 1000),
+                ),
+                pd.Timestamp("2026-01-01T01:05:02Z"),
+                {22: True},
+            )
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(runner.state["routing"]["q01_last_evaluated_m5_bar"], "2026-01-01T01:00:00+00:00")
+
+    def test_q01_delayed_poll_processes_next_unseen_m5_in_order(self):
+        runner, _strategy, _state = make_runner(live=True)
+        rows = 72
+        bars = pd.DataFrame(
+            {"Open": [2000.0] * rows, "High": [2001.0] * rows, "Low": [1999.0] * rows, "Close": [2000.5] * rows},
+            index=pd.date_range("2026-01-01T00:00:00Z", periods=rows, freq="1min"),
+        )
+        runner.state["routing"]["q01_last_evaluated_m5_bar"] = "2026-01-01T00:55:00+00:00"
+        quote_time = pd.Timestamp("2026-01-01T01:11:30Z")
+        with patch.object(runner, "_q01_signal_side", return_value=(None, 1.0)) as signal:
+            runner._process_q01_entries(
+                bars,
+                SimpleNamespace(bid=2000.5, ask=2000.6, quote_time_msc=int(quote_time.timestamp() * 1000)),
+                quote_time,
+                {22: True},
+            )
+        self.assertEqual(signal.call_args.args[1], pd.Timestamp("2026-01-01T01:00:00Z"))
+        self.assertEqual(runner.state["routing"]["q01_last_evaluated_m5_bar"], "2026-01-01T01:00:00+00:00")
+
+    def test_q01_delayed_poll_skips_nonexistent_m5_intervals(self):
+        runner, _strategy, _state = make_runner(live=True)
+        index = pd.date_range("2026-01-01T00:00:00Z", periods=60, freq="1min").append(
+            pd.date_range("2026-01-01T02:00:00Z", periods=10, freq="1min")
+        )
+        bars = pd.DataFrame(
+            {"Open": 2000.0, "High": 2001.0, "Low": 1999.0, "Close": 2000.5},
+            index=index,
+        )
+        runner.state["routing"]["q01_last_evaluated_m5_bar"] = "2026-01-01T00:55:00+00:00"
+        quote_time = pd.Timestamp("2026-01-01T02:10:01Z")
+        with patch.object(runner, "_q01_signal_side", return_value=(None, 1.0)) as signal:
+            runner._process_q01_entries(
+                bars,
+                SimpleNamespace(bid=2000.5, ask=2000.6, quote_time_msc=int(quote_time.timestamp() * 1000)),
+                quote_time,
+                {22: True},
+            )
+        self.assertEqual(signal.call_args.args[1], pd.Timestamp("2026-01-01T02:00:00Z"))
+        self.assertEqual(runner.state["routing"]["q01_last_evaluated_m5_bar"], "2026-01-01T02:00:00+00:00")
+
+    def test_q01_signal_formula_matches_frozen_shifted_dev_definition(self):
+        index = pd.date_range("2026-01-01T00:00:00Z", periods=160, freq="5min")
+        close = pd.Series(
+            [2000.0 + index_value * 0.05 + math.sin(index_value * 0.7) * 2.0 for index_value in range(len(index))],
+            index=index,
+        )
+        m5 = pd.DataFrame(
+            {
+                "Open": close.shift(1).fillna(close.iloc[0]),
+                "High": close + 0.2,
+                "Low": close - 0.2,
+                "Close": close,
+            },
+            index=index,
+        )
+        one = close.diff()
+        expected_vr = close.diff(4).shift(1).rolling(48).var() / (4 * one.shift(1).rolling(48).var())
+        expected_high = m5["High"].shift(1).rolling(12).max()
+        expected_low = m5["Low"].shift(1).rolling(12).min()
+        for position in range(110, len(index)):
+            signal_bar = index[position]
+            side, vr_value = S23HorizontalInventoryRunner._q01_signal_side(
+                m5,
+                signal_bar,
+                horizon=4,
+                window=48,
+                threshold=-math.inf,
+                breakout=12,
+                warmup=110,
+                atr_period=20,
+            )
+            self.assertAlmostEqual(vr_value, float(expected_vr.iloc[position]), places=12)
+            expected_side = (
+                "LONG"
+                if close.iloc[position] > expected_high.iloc[position]
+                else "SHORT"
+                if close.iloc[position] < expected_low.iloc[position]
+                else None
+            )
+            self.assertEqual(side, expected_side)
+
+    def test_q01_signal_rejects_before_frozen_110_bar_warmup(self):
+        index = pd.date_range("2026-01-01T00:00:00Z", periods=110, freq="5min")
+        close = pd.Series([2000.0 + math.sin(value) for value in range(110)], index=index)
+        m5 = pd.DataFrame({"Open": close, "High": close + 0.1, "Low": close - 0.1, "Close": close})
+        side, vr_value = S23HorizontalInventoryRunner._q01_signal_side(
+            m5,
+            index[-1],
+            horizon=4,
+            window=48,
+            threshold=-math.inf,
+            breakout=12,
+            warmup=110,
+            atr_period=20,
+        )
+        self.assertIsNone(side)
+        self.assertIsNone(vr_value)
+
+    def test_q01_requests_enough_m1_history_without_changing_legacy_contract(self):
+        runner, _strategy, _state = make_runner(live=False)
+        requested = []
+        index = pd.date_range("2026-01-01T00:00:00Z", periods=600, freq="1min")
+        bars = pd.DataFrame(
+            {"Open": 2000.0, "High": 2000.2, "Low": 1999.8, "Close": 2000.0, "Volume": 1.0},
+            index=index,
+        )
+        runner.dm.get_historical_data = lambda _symbol, _timeframe, count, *_args, **_kwargs: (requested.append(count) or bars)
+        self.assertIsNotNone(runner._get_m1())
+        self.assertEqual(requested, [600])
+        self.assertEqual(runner.params["m1_bars"], 420)
+
+    @staticmethod
+    def _arm_q01_basket(runner, *, entry_time="2026-01-01T00:00:00+00:00"):
+        strat = runner._q01_strategies()[0]
+        state = runner._st(strat)
+        state["basket_sequence"] = 1
+        state["current_basket_id"] = "L22-B000001"
+        state["basket"] = [
+            {
+                "side": "LONG",
+                "lot": 0.01,
+                "entry_price": 2000.0,
+                "entry_time_utc": entry_time,
+                "basket_id": "L22-B000001",
+            }
+        ]
+        return strat, state
+
+    def test_q01_feed_gap_closes_on_first_arrival_quote_even_when_spread_is_wide(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner)
+        previous = pd.Timestamp("2026-01-01T00:10:00Z")
+        arrival = previous + pd.Timedelta(seconds=301)
+        state["q01_last_quote_msc"] = int(previous.timestamp() * 1000)
+        with patch.object(runner, "_close_basket", return_value="closed") as close:
+            blocked = runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(arrival.timestamp() * 1000)),
+                arrival,
+            )
+        self.assertTrue(blocked)
+        self.assertEqual(close.call_args.args[1], "q01_feed_gap")
+
+    def test_q01_feed_gap_market_closed_persists_intent_and_retries_on_fresh_quote(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner)
+        previous = pd.Timestamp("2026-01-01T00:10:00Z")
+        arrival = previous + pd.Timedelta(seconds=301)
+        retry = arrival + pd.Timedelta(seconds=61)
+        state["q01_last_quote_msc"] = int(previous.timestamp() * 1000)
+        with patch.object(runner, "_close_basket", side_effect=["market_closed", "requested"]) as close:
+            runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(arrival.timestamp() * 1000)),
+                arrival,
+            )
+            self.assertEqual(state["pending_close_reason"], "q01_feed_gap")
+            runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(retry.timestamp() * 1000)),
+                retry,
+            )
+        self.assertEqual(close.call_count, 2)
+        self.assertEqual([call.args[1] for call in close.call_args_list], ["q01_feed_gap", "q01_feed_gap"])
+
+    def test_q01_exact_300_second_interval_is_not_a_feed_gap(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner, entry_time="2026-01-01T00:20:00+00:00")
+        previous = pd.Timestamp("2026-01-01T00:20:00Z")
+        arrival = previous + pd.Timedelta(seconds=300)
+        state["q01_last_quote_msc"] = int(previous.timestamp() * 1000)
+        with patch.object(runner, "_close_basket", return_value="closed") as close:
+            blocked = runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(arrival.timestamp() * 1000)),
+                arrival,
+            )
+        self.assertFalse(blocked)
+        close.assert_not_called()
+
+    def test_q01_malformed_future_quote_clock_forces_owned_close(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner)
+        current = pd.Timestamp("2026-01-01T00:10:00Z")
+        state["q01_last_quote_msc"] = int((current + pd.Timedelta(seconds=1)).timestamp() * 1000)
+        with patch.object(runner, "_close_basket", return_value="requested") as close:
+            blocked = runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(current.timestamp() * 1000)),
+                current,
+            )
+        self.assertTrue(blocked)
+        self.assertEqual(close.call_args.args[1], "q01_quote_clock_invalid")
+
+    def test_q01_fixed_hold_does_not_defer_for_wide_spread(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner)
+        due_quote = pd.Timestamp("2026-01-01T00:30:01Z")
+        state["q01_last_quote_msc"] = int(pd.Timestamp("2026-01-01T00:29:59Z").timestamp() * 1000)
+        with patch.object(runner, "_close_basket", return_value="closed") as close:
+            blocked = runner._monitor_q01_position(
+                strat,
+                SimpleNamespace(bid=2000.0, ask=2100.0, quote_time_msc=int(due_quote.timestamp() * 1000)),
+                due_quote,
+            )
+        self.assertTrue(blocked)
+        self.assertEqual(close.call_args.args[1], "q01_fixed_hold")
+        self.assertFalse(state["time_close_wide_seen"])
+
+    def test_q01_retry_rejects_tampered_canonical_identity(self):
+        mutations = {
+            "source": lambda opportunity, retry: opportunity.__setitem__("source", "other"),
+            "raw_side": lambda opportunity, retry: opportunity.__setitem__("raw_side", "SHORT"),
+            "opportunity_id": lambda opportunity, retry: opportunity.__setitem__("opportunity_id", "wrong"),
+            "available_time": lambda opportunity, retry: opportunity.__setitem__("available_time", "2026-01-01T00:06:00+00:00"),
+            "expiry": lambda opportunity, retry: retry.__setitem__("expires_utc", "2026-01-01T00:13:00+00:00"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                runner, _strategy, _state = make_runner(live=True)
+                strat = runner._q01_strategies()[0]
+                state = runner._st(strat)
+                event = "2026-01-01T00:00:00+00:00"
+                release = "2026-01-01T00:05:00+00:00"
+                opportunity = {
+                    "opportunity_id": f"XAUUSD|{event}|q01_variance_ratio_release|LONG",
+                    "source": "q01_variance_ratio_release",
+                    "side": "LONG",
+                    "raw_side": "LONG",
+                    "effective_side": "LONG",
+                    "event_time": event,
+                    "release_time": release,
+                    "available_time": release,
+                    "decision_time": "2026-01-01T00:05:01+00:00",
+                    "executable_at": "2026-01-01T00:05:01+00:00",
+                }
+                retry = {"opportunity": opportunity, "expires_utc": "2026-01-01T00:12:00+00:00", "note": "q01"}
+                mutate(opportunity, retry)
+                state["q01_retry_opportunity"] = retry
+                runner.state["routing"]["q01_last_evaluated_m5_bar"] = event
+                with patch.object(runner, "_open_entry") as opened:
+                    runner._process_q01_retries(
+                        SimpleNamespace(
+                            bid=2000.0,
+                            ask=2000.1,
+                            quote_time_msc=int(pd.Timestamp("2026-01-01T00:05:02Z").timestamp() * 1000),
+                        ),
+                        pd.Timestamp("2026-01-01T00:05:02Z"),
+                        {22: True},
+                    )
+                opened.assert_not_called()
+                self.assertEqual(state["sync_block_reason"], "q01_retry_identity_invalid")
+
+    def test_q01_permanent_no_fill_clears_retry_but_preserves_retryable_state(self):
+        runner, _strategy, _state = make_runner(live=True)
+        runner.params["q01_live_trading_enabled"] = True
+        strat = runner._q01_strategies()[0]
+        state = runner._st(strat)
+        opportunity = {"opportunity_id": "q01-test", "side": "LONG"}
+        state["q01_retry_opportunity"] = {"opportunity": opportunity}
+        row = pd.Series({"Open": 2000.0, "Close": 2000.0, "AskOpen": 2000.1})
+        with patch.object(runner, "_open_entry", return_value=False):
+            self.assertFalse(runner._attempt_q01_open(strat, opportunity, row, SimpleNamespace(), pd.Timestamp("2026-01-01T00:00:00Z"), "q01"))
+        self.assertIsNone(state["q01_retry_opportunity"])
+        state["q01_retry_opportunity"] = {"opportunity": opportunity}
+        state["open_retry_after_utc"] = "2026-01-01T00:01:00+00:00"
+        with patch.object(runner, "_open_entry", return_value=False):
+            runner._attempt_q01_open(strat, opportunity, row, SimpleNamespace(), pd.Timestamp("2026-01-01T00:00:00Z"), "q01")
+        self.assertIsNotNone(state["q01_retry_opportunity"])
+
+    def test_q01_open_requests_broker_confirmed_fill_time(self):
+        runner, _strategy, _state = make_runner(live=True)
+        runner.params["q01_live_trading_enabled"] = True
+        strat = runner._q01_strategies()[0]
+        opportunity = {"opportunity_id": "q01-fill-clock", "side": "LONG"}
+        row = pd.Series({"Open": 2000.0, "Close": 2000.0, "AskOpen": 2000.1})
+        with patch.object(runner, "_open_entry", return_value=False) as opened:
+            runner._attempt_q01_open(
+                strat,
+                opportunity,
+                row,
+                SimpleNamespace(),
+                pd.Timestamp("2026-01-01T00:00:00Z"),
+                "q01",
+            )
+        self.assertTrue(opened.call_args.kwargs["use_confirmed_fill_time"])
+
+    def test_q01_confirmed_open_seeds_feed_gap_quote_clock(self):
+        runner, _strategy, _state = make_runner(live=True)
+        runner.params["q01_live_trading_enabled"] = True
+        strat = runner._q01_strategies()[0]
+        state = runner._st(strat)
+        opportunity = {"opportunity_id": "q01-feed-clock", "side": "LONG"}
+        row = pd.Series({"Open": 2000.0, "Close": 2000.0, "AskOpen": 2000.1})
+        quote_msc = int(pd.Timestamp("2026-01-01T00:05:01Z").timestamp() * 1000)
+
+        def confirmed_open(*_args, **_kwargs):
+            state["basket"] = [{"opportunity_id": "q01-feed-clock"}]
+            return True
+
+        with patch.object(runner, "_open_entry", side_effect=confirmed_open):
+            self.assertTrue(
+                runner._attempt_q01_open(
+                    strat,
+                    opportunity,
+                    row,
+                    SimpleNamespace(quote_time_msc=quote_msc),
+                    pd.Timestamp("2026-01-01T00:05:01Z"),
+                    "q01",
+                )
+            )
+        self.assertEqual(state["q01_last_quote_msc"], quote_msc)
+
+    def test_q01_default_live_gate_consumes_signal_without_order(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat = runner._q01_strategies()[0]
+        state = runner._st(strat)
+        opportunity = {"opportunity_id": "q01-gated", "side": "LONG"}
+        state["q01_retry_opportunity"] = {"opportunity": opportunity}
+        row = pd.Series({"Open": 2000.0, "Close": 2000.0, "AskOpen": 2000.1})
+        with patch.object(runner, "_open_entry") as opened:
+            self.assertFalse(
+                runner._attempt_q01_open(
+                    strat,
+                    opportunity,
+                    row,
+                    SimpleNamespace(quote_time_msc=1767225901000),
+                    pd.Timestamp("2026-01-01T00:05:01Z"),
+                    "q01",
+                )
+            )
+        opened.assert_not_called()
+        self.assertIsNone(state["q01_retry_opportunity"])
+
+    def test_q01_cooldown_is_anchored_to_confirmed_close_time(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat, state = self._arm_q01_basket(runner)
+        runner._clear_basket_state(
+            strat,
+            "q01_fixed_hold",
+            "2026-01-01T00:30:00+00:00",
+            closed_at_utc="2026-01-01T00:31:17+00:00",
+        )
+        self.assertEqual(state["cooldown_until_utc"], "2026-01-01T00:36:17+00:00")
+
+
+def arm_pending(
+    state: dict,
+    *,
+    atr30: float | None = 1.5,
+    target: float | None = 100.0,
+    now: datetime | pd.Timestamp | None = None,
+) -> None:
+    now = pd.Timestamp(now if now is not None else utc_now())
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
     event_time = now - pd.Timedelta(minutes=1)
     state.update(
         {
@@ -3517,7 +4179,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
             live_s23_bot,
             "append_csv",
             side_effect=lambda _path, row, _fields: rows.append(dict(row)),
-        ):
+        ), patch.object(live_s23_bot, "append_signal_evaluation_csv"):
             for _ in times:
                 runner._trade_row("entry_skip", strategy, reason="orders_unavailable", note="sync_block")
 
@@ -3544,7 +4206,9 @@ class Bot23ZARegressionTests(unittest.TestCase):
                 (base + pd.Timedelta(seconds=6)).to_pydatetime(),
                 (base + pd.Timedelta(seconds=12)).to_pydatetime(),
             ],
-        ), patch.object(live_s23_bot, "append_csv", side_effect=lambda _path, row, _fields: rows.append(dict(row))):
+        ), patch.object(live_s23_bot, "append_csv", side_effect=lambda _path, row, _fields: rows.append(dict(row))), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+        ):
             runner._trade_row("entry_skip", strategy, reason="symbol_info_failed", note="sync_block")
             runner._trade_row("entry_skip", strategy, reason="symbol_info_failed", note="sync_block")
             runner._trade_row("entry_skip", strategy, reason="orders_unavailable", note="sync_block")
@@ -3862,6 +4526,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_disabled_session_vwap_overlay_never_fetches_or_evaluates(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["session_vwap_enabled"] = False
         self.assertFalse(runner.params["session_vwap_enabled"])
         runner._session_vwap_snapshot = SimpleNamespace(reason="stale_test_value")
         runner.session_vwap_history.advance = lambda *_args, **_kwargs: self.fail(
@@ -4088,6 +4753,126 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
             self.assertEqual([row["strategy_id"] for row in entries], [row["id"] for row in strategies])
         finally:
             os.unlink(path)
+
+    def test_trade_ledger_revalidates_header_after_same_path_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            row = {"event": "entry", "lane_id": 9}
+            live_s23_bot.append_csv(path, row, live_s23_bot.TRADE_FIELDS)
+            Path(path).write_text("legacy,header\n1,2\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "CSV schema mismatch"):
+                live_s23_bot.append_csv(path, row, live_s23_bot.TRADE_FIELDS)
+
+    def test_trade_ledger_append_flushes_to_stable_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            with patch.object(live_s23_bot.os, "fsync") as fsync:
+                live_s23_bot.append_csv(
+                    path, {"event": "entry", "lane_id": 9},
+                    live_s23_bot.TRADE_FIELDS,
+                )
+            fsync.assert_called()
+
+    def test_trade_ledger_rejects_unterminated_tail_before_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            payload = (
+                ",".join(live_s23_bot.TRADE_FIELDS)
+                + "\n"
+                + ",".join("" for _ in live_s23_bot.TRADE_FIELDS)
+            )
+            Path(path).write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "unterminated CSV tail"):
+                live_s23_bot.append_csv(
+                    path, {"event": "entry", "lane_id": 9},
+                    live_s23_bot.TRADE_FIELDS,
+                )
+
+    def test_trade_ledger_preflight_rejects_malformed_row_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            Path(path).write_text(
+                ",".join(live_s23_bot.TRADE_FIELDS) + "\nonly,two\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "CSV row width mismatch"):
+                live_s23_bot.validate_csv_schema(
+                    path, live_s23_bot.TRADE_FIELDS,
+                )
+
+    def test_unterminated_matching_close_row_is_not_deduplication_proof(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            row = {
+                "timestamp_utc": "2026-08-24T23:59:58+00:00",
+                "event": "position_close_confirmed",
+                "strategy_id": strategy["id"],
+                "lane_id": strategy["lane_id"],
+                "magic": strategy["magic"],
+                "symbol": "XAUUSD",
+                "mt5_symbol": "XAUUSD",
+                "basket_id": "L1-B000001",
+                "ticket": 9401,
+                "position_identifier": 9401,
+                "deal_id": 77031,
+            }
+            live_s23_bot.append_csv(path, row, live_s23_bot.TRADE_FIELDS)
+            Path(path).write_bytes(Path(path).read_bytes().rstrip(b"\r\n"))
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", path):
+                with self.assertRaisesRegex(RuntimeError, "unterminated CSV tail"):
+                    runner._trade_row(
+                        "position_close_confirmed", strategy,
+                        basket_id="L1-B000001", ticket=9401,
+                        position_identifier=9401, deal_id=77031,
+                    )
+
+    def test_confirmed_close_deal_identity_conflict_fails_closed(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", path):
+                runner._trade_row(
+                    "position_close_confirmed", strategy,
+                    basket_id="L1-B000001", ticket=9401,
+                    position_identifier=9401, deal_id=77032,
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "confirmed close deal identity conflict",
+                ):
+                    runner._trade_row(
+                        "position_close_confirmed", strategy,
+                        basket_id="L1-B000001", ticket=9402,
+                        position_identifier=9402, deal_id=77032,
+                    )
+
+    def test_preflight_rejects_duplicate_confirmed_close_deal_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s23_trades.csv")
+            row = {
+                "event": "position_close_confirmed",
+                "lane_id": 1,
+                "position_identifier": 9401,
+                "deal_id": 77033,
+            }
+            live_s23_bot.append_csv(path, row, live_s23_bot.TRADE_FIELDS)
+            live_s23_bot.append_csv(path, row, live_s23_bot.TRADE_FIELDS)
+
+            with self.assertRaisesRegex(
+                RuntimeError, "duplicate confirmed close deal",
+            ):
+                live_s23_bot.validate_csv_schema(
+                    path, live_s23_bot.TRADE_FIELDS,
+                )
 
     def test_pre_eu30_entry_stops_at_summer_boundary_but_exit_clock_remains_independent(self):
         runner, _strategy, _state = make_runner(live=False)
@@ -7839,7 +8624,10 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         runner.executor = CountingExecutor()
         strategies = runner.params["strategies"]
         opportunity, row, poll_time, info = sample_opportunity()
-        arm_pending(runner._st(strategies[0]), atr30=2.5, target=100.03)
+        arm_pending(
+            runner._st(strategies[0]), atr30=2.5, target=100.03,
+            now=poll_time,
+        )
 
         readiness = {
             int(strategy["lane_id"]): runner._prepare_lane(strategy, row, info, poll_time)
@@ -8149,6 +8937,911 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(state["daily_realized_pnl_usd"], -4.25)
         self.assertEqual(parse_ts(state["last_closed_at_utc"]), deal_time)
         self.assertEqual(state["last_closed_side"], "LONG")
+
+    def test_confirmed_close_audit_failure_preserves_unaccounted_state(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401,
+            symbol="XAUUSD",
+            magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25,
+            price=99.5,
+            deal=77010,
+            exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+
+        def fail_confirmed_close_audit(event, _strategy, **_kwargs):
+            if event == "position_close_confirmed":
+                raise OSError("operational close audit unavailable")
+
+        runner._trade_row = fail_confirmed_close_audit
+        with self.assertRaisesRegex(OSError, "operational close audit unavailable"):
+            runner._sync_strategy(strategy)
+
+        self.assertEqual(len(state["basket"]), 1)
+        self.assertEqual(state["daily_realized_pnl_usd"], 0.0)
+
+    def test_confirmed_close_audit_is_idempotent_by_deal_and_position(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                for _ in range(2):
+                    runner._trade_row(
+                        "position_close_confirmed", strategy,
+                        opportunity_id=(
+                            "XAUUSD|2026-08-24T23:00:00+00:00|LONG|LONG|"
+                            "reverse_d60"
+                        ),
+                        basket_id="L1-B000001", ticket=9401,
+                        position_identifier=9401, deal_id=77011,
+                        side="LONG", profit=-4.25, reason="basket_stop",
+                    )
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+        self.assertEqual(
+            len([row for row in trade_rows if row["event"] == "position_close_confirmed"]),
+            1,
+        )
+        self.assertEqual(
+            len([row for row in evaluation_rows if row["event"] == "position_close_confirmed"]),
+            1,
+        )
+
+    def test_confirmed_close_retry_after_state_save_failure_is_exactly_once(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        persisted_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=77012, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = Mock(side_effect=OSError("state disk unavailable"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                with self.assertRaisesRegex(OSError, "state disk unavailable"):
+                    runner._sync_strategy(strategy)
+
+                retry_runner, retry_strategy, _retry_state = make_runner()
+                retry_runner.state = persisted_before
+                retry_runner.executor = executor
+                retry_runner._trade_row = (
+                    S23HorizontalInventoryRunner._trade_row.__get__(
+                        retry_runner, S23HorizontalInventoryRunner,
+                    )
+                )
+                retry_runner._save_state = lambda: None
+                self.assertTrue(retry_runner._sync_strategy(retry_strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+
+        retry_state = retry_runner._st(retry_strategy)
+        self.assertFalse(retry_state["basket"])
+        self.assertEqual(retry_state["daily_realized_pnl_usd"], -4.25)
+        self.assertEqual(
+            len([row for row in trade_rows if row["deal_id"] == "77012"]), 1,
+        )
+        self.assertEqual(
+            len([row for row in evaluation_rows if row["deal_id"] == "77012"]),
+            1,
+        )
+
+    def test_confirmed_close_state_save_failure_restores_same_runner_state(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=77013, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = Mock(side_effect=OSError("state disk unavailable"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                with self.assertRaisesRegex(OSError, "state disk unavailable"):
+                    runner._sync_strategy(strategy)
+
+        self.assertEqual(runner.state, state_before)
+
+    def test_confirmed_close_interrupt_restores_state_and_clears_save_deferral(self):
+        runner, strategy, state = make_runner()
+        state_before = json.loads(json.dumps(runner.state))
+        runner._post_close_audit_deal_id = 77019
+        runner._post_close_trade_keys.add(("stale",))
+        runner._post_close_evaluation_keys.add(("stale",))
+
+        def interrupt_after_consumption():
+            state["basket"] = []
+            raise KeyboardInterrupt("simulated service interrupt")
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "simulated service interrupt"):
+            runner._confirmed_close_state_step(
+                state_before, interrupt_after_consumption,
+            )
+
+        self.assertEqual(runner.state, state_before)
+        self.assertIsNone(runner._post_close_audit_deal_id)
+        self.assertFalse(runner._post_close_trade_keys)
+        self.assertFalse(runner._post_close_evaluation_keys)
+
+        writes = []
+        runner._save_state = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        with patch.object(
+            live_s23_bot, "atomic_write_json",
+            side_effect=lambda _path, payload: writes.append(
+                json.loads(json.dumps(payload))
+            ),
+        ):
+            runner._save_state()
+        self.assertEqual(len(writes), 1)
+
+    def test_confirmed_close_step_boundary_interrupt_rolls_back_entire_sync(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=77020, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:30:00Z").timestamp()),
+        )
+
+        # Simulate an interrupt after transaction begin and basket consumption,
+        # but before control enters the first individually guarded state step.
+        runner._confirmed_close_state_step = Mock(
+            side_effect=KeyboardInterrupt("simulated step-boundary interrupt")
+        )
+        with self.assertRaisesRegex(
+            KeyboardInterrupt, "simulated step-boundary interrupt",
+        ):
+            runner._sync_strategy(strategy)
+
+        self.assertEqual(runner.state, state_before)
+        self.assertIsNone(runner._post_close_audit_deal_id)
+        self.assertFalse(runner._post_close_trade_keys)
+        self.assertFalse(runner._post_close_evaluation_keys)
+
+    def test_confirmed_close_every_step_boundary_replays_exactly_once(self):
+        for fail_at in range(1, 7):
+            with self.subTest(fail_at=fail_at):
+                runner, strategy, state = make_runner()
+                executor = CountingExecutor()
+                runner.executor = executor
+                arm_owned_basket(strategy, state, executor)
+                state["pending_close_reason"] = "basket_stop"
+                state["pending_close_signal_bar"] = "2026-08-25T13:29:00+00:00"
+                state["reverse_used"] = True
+                state["frozen_basket_atr30"] = 1.5
+                state_before = json.loads(json.dumps(runner.state))
+                executor.positions = []
+                deal_id = 77100 + fail_at
+                executor.close_deal = SimpleNamespace(
+                    position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+                    net_profit=-4.25, price=99.5, deal=deal_id,
+                    exit_volume=0.01,
+                    deal_time=int(
+                        pd.Timestamp("2026-08-25T13:30:00Z").timestamp()
+                    ),
+                )
+                runner._trade_row = (
+                    S23HorizontalInventoryRunner._trade_row.__get__(
+                        runner, S23HorizontalInventoryRunner,
+                    )
+                )
+                original_step = runner._confirmed_close_state_step
+                step_count = 0
+
+                def interrupt_at_selected_boundary(
+                    snapshot, action, *, final_commit=False,
+                ):
+                    nonlocal step_count
+                    step_count += 1
+                    if step_count == fail_at:
+                        raise KeyboardInterrupt(
+                            f"simulated boundary interrupt {fail_at}"
+                        )
+                    return original_step(
+                        snapshot, action, final_commit=final_commit,
+                    )
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    trade_path = os.path.join(tmp, "s23_trades.csv")
+                    with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                        runner._confirmed_close_state_step = (
+                            interrupt_at_selected_boundary
+                        )
+                        with self.assertRaisesRegex(
+                            KeyboardInterrupt,
+                            f"simulated boundary interrupt {fail_at}",
+                        ):
+                            runner._sync_strategy(strategy)
+
+                        self.assertEqual(step_count, fail_at)
+                        self.assertEqual(runner.state, state_before)
+                        self.assertIsNone(runner._post_close_audit_deal_id)
+                        self.assertIsNone(runner._post_close_state_before)
+                        self.assertFalse(runner._post_close_trade_keys)
+                        self.assertFalse(runner._post_close_evaluation_keys)
+
+                        runner._confirmed_close_state_step = original_step
+                        self.assertTrue(runner._sync_strategy(strategy))
+
+                    with open(
+                        trade_path, newline="", encoding="utf-8",
+                    ) as handle:
+                        trade_rows = list(csv.DictReader(handle))
+
+                converged = runner._st(strategy)
+                self.assertFalse(converged["basket"])
+                self.assertEqual(converged["daily_realized_pnl_usd"], -4.25)
+                self.assertEqual(
+                    len([
+                        row for row in trade_rows
+                        if row["event"] == "position_close_confirmed"
+                        and row["deal_id"] == str(deal_id)
+                    ]),
+                    1,
+                )
+
+    def test_confirmed_close_interrupt_after_durable_commit_keeps_memory_converged(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_stop"
+        state["pending_close_signal_bar"] = "2026-08-25T13:29:00+00:00"
+        executor.positions = []
+        deal_id = 77107
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=deal_id, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:30:00Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        original_save = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        interrupted = False
+
+        def save_then_interrupt_after_commit():
+            nonlocal interrupted
+            original_save()
+            if runner._post_close_commit_in_progress and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("interrupt after durable state replace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            state_path = os.path.join(tmp, "s23_bot_state.json")
+            with (
+                patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path),
+                patch.object(live_s23_bot, "STATE_FILE", state_path),
+            ):
+                runner._save_state = save_then_interrupt_after_commit
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt, "interrupt after durable state replace",
+                ):
+                    runner._sync_strategy(strategy)
+
+                with open(state_path, encoding="utf-8") as handle:
+                    durable_state = json.load(handle)
+                self.assertEqual(runner.state, durable_state)
+                self.assertFalse(runner._st(strategy)["basket"])
+                self.assertEqual(
+                    runner._st(strategy)["daily_realized_pnl_usd"], -4.25,
+                )
+                self.assertIsNone(runner._post_close_audit_deal_id)
+                self.assertIsNone(runner._post_close_state_before)
+                self.assertFalse(runner._post_close_commit_in_progress)
+
+                runner._save_state = original_save
+                self.assertTrue(runner._sync_strategy(strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(
+            len([
+                row for row in trade_rows
+                if row["event"] == "position_close_confirmed"
+                and row["deal_id"] == str(deal_id)
+            ]),
+            1,
+        )
+
+    def test_confirmed_close_interrupt_during_commit_cleanup_keeps_memory_converged(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_stop"
+        state["pending_close_signal_bar"] = "2026-08-25T13:29:00+00:00"
+        executor.positions = []
+        deal_id = 77108
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=deal_id, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:30:00Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        original_end = (
+            S23HorizontalInventoryRunner._end_confirmed_close_state_transaction.__get__(
+                runner, S23HorizontalInventoryRunner,
+            )
+        )
+        interrupted = False
+
+        def interrupt_after_commit_marker_clear():
+            nonlocal interrupted
+            if runner._post_close_commit_in_progress and not interrupted:
+                interrupted = True
+                # Reproduce an asynchronous interrupt at the vulnerable v11
+                # cleanup boundary, after the durable replace and after the
+                # process-local marker was cleared but before cleanup returned.
+                runner._post_close_audit_deal_id = None
+                runner._post_close_state_before = None
+                runner._post_close_commit_in_progress = False
+                raise KeyboardInterrupt("interrupt during commit cleanup")
+            original_end()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            state_path = os.path.join(tmp, "s23_bot_state.json")
+            with (
+                patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path),
+                patch.object(live_s23_bot, "STATE_FILE", state_path),
+            ):
+                runner._end_confirmed_close_state_transaction = (
+                    interrupt_after_commit_marker_clear
+                )
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt, "interrupt during commit cleanup",
+                ):
+                    runner._sync_strategy(strategy)
+
+                with open(state_path, encoding="utf-8") as handle:
+                    durable_state = json.load(handle)
+                self.assertEqual(runner.state, durable_state)
+                self.assertFalse(runner._st(strategy)["basket"])
+                self.assertEqual(
+                    runner._st(strategy)["daily_realized_pnl_usd"], -4.25,
+                )
+                self.assertIsNone(runner._post_close_audit_deal_id)
+                self.assertIsNone(runner._post_close_state_before)
+                self.assertFalse(runner._post_close_commit_in_progress)
+
+                runner._end_confirmed_close_state_transaction = original_end
+                self.assertTrue(runner._sync_strategy(strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(
+            len([
+                row for row in trade_rows
+                if row["event"] == "position_close_confirmed"
+                and row["deal_id"] == str(deal_id)
+            ]),
+            1,
+        )
+
+    def test_confirmed_close_defers_intermediate_saves_until_atomic_final_commit(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_stop"
+        state["pending_close_signal_bar"] = "2026-08-25T13:29:00+00:00"
+        state["reverse_used"] = True
+        state["frozen_basket_atr30"] = 1.5
+        state_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=77018, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:30:00Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        attempted_states = []
+
+        def fail_final_commit(_path, payload):
+            attempted_states.append(json.loads(json.dumps(payload)))
+            raise OSError("simulated power loss at final commit")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            state_path = os.path.join(tmp, "s23_bot_state.json")
+            with (
+                patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path),
+                patch.object(live_s23_bot, "STATE_FILE", state_path),
+                patch.object(
+                    live_s23_bot, "atomic_write_json", side_effect=fail_final_commit,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated power loss at final commit",
+                ):
+                    runner._sync_strategy(strategy)
+
+        # The recovery helper normally saves when it arms.  During a confirmed
+        # close transaction that write must be deferred, leaving only the one
+        # complete final-state commit attempt.
+        self.assertEqual(len(attempted_states), 1)
+        attempted_strategy = attempted_states[0]["strategies"][strategy["id"]]
+        self.assertFalse(attempted_strategy["basket"])
+        self.assertTrue(attempted_states[0]["routing"]["trend_recovery"]["active"])
+        self.assertEqual(runner.state, state_before)
+
+    def test_confirmed_close_ambiguous_replace_replays_to_exactly_once_state(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-4.25, price=99.5, deal=77021, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:30:00Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        durable_state = {}
+        fail_after_first_replace = True
+
+        def replace_then_maybe_fail(_path, payload):
+            nonlocal fail_after_first_replace
+            durable_state.clear()
+            durable_state.update(json.loads(json.dumps(payload)))
+            if fail_after_first_replace:
+                fail_after_first_replace = False
+                raise OSError("simulated parent fsync failure after replace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            state_path = os.path.join(tmp, "s23_bot_state.json")
+            with (
+                patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path),
+                patch.object(live_s23_bot, "STATE_FILE", state_path),
+                patch.object(
+                    live_s23_bot, "atomic_write_json",
+                    side_effect=replace_then_maybe_fail,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated parent fsync failure after replace",
+                ) as raised:
+                    runner._sync_strategy(strategy)
+
+                # The replace itself may already have made the complete new
+                # state visible even though durability confirmation failed.
+                replaced_strategy = durable_state["strategies"][strategy["id"]]
+                self.assertFalse(replaced_strategy["basket"])
+                self.assertEqual(replaced_strategy["daily_realized_pnl_usd"], -4.25)
+                self.assertEqual(runner.state, state_before)
+
+                # Normal poll containment may rewrite the retryable old state.
+                # The next broker-confirmed replay must still converge without
+                # double-applying PnL or appending a duplicate deal audit row.
+                runner._contain_poll_exception(raised.exception)
+                retry_runner, retry_strategy, _retry_state = make_runner()
+                retry_runner.state = json.loads(json.dumps(durable_state))
+                retry_runner.executor = executor
+                retry_runner._trade_row = (
+                    S23HorizontalInventoryRunner._trade_row.__get__(
+                        retry_runner, S23HorizontalInventoryRunner,
+                    )
+                )
+                retry_runner._save_state = (
+                    S23HorizontalInventoryRunner._save_state.__get__(
+                        retry_runner, S23HorizontalInventoryRunner,
+                    )
+                )
+                self.assertTrue(retry_runner._sync_strategy(retry_strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+
+        converged = durable_state["strategies"][strategy["id"]]
+        self.assertFalse(converged["basket"])
+        self.assertEqual(converged["daily_realized_pnl_usd"], -4.25)
+        self.assertEqual(
+            len([row for row in trade_rows if row["deal_id"] == "77021"]), 1,
+        )
+
+    def test_partial_confirmed_close_attempts_one_complete_state_commit(self):
+        runner, strategy, state = make_runner(live=True)
+        executor = CountingExecutor()
+        runner.executor = executor
+        first = SimpleNamespace(
+            ticket=96201, identifier=96201, symbol="XAUUSD",
+            magic=EXPECTED_S23_MAGIC, comment=strategy["comment_prefix"],
+            type=ORDER_TYPE_BUY, volume=0.01, open_time=1,
+        )
+        second = SimpleNamespace(
+            ticket=96202, identifier=96202, symbol="XAUUSD",
+            magic=EXPECTED_S23_MAGIC, comment=strategy["comment_prefix"],
+            type=ORDER_TYPE_BUY, volume=0.01, open_time=2,
+        )
+        executor.positions = [second]
+        state["basket"] = [
+            {
+                "ticket": position.ticket,
+                "position_identifier": position.identifier,
+                "side": "LONG",
+                "lot": 0.01,
+                "entry_price": 100.0,
+                "entry_time_utc": "2026-08-25T13:00:00+00:00",
+                "open_time_epoch": position.open_time,
+                "owner_symbol": "XAUUSD",
+                "owner_magic": EXPECTED_S23_MAGIC,
+                "owner_comment": strategy["comment_prefix"],
+                "shadow": False,
+                "close_requested": position.ticket == 96201,
+            }
+            for position in (first, second)
+        ]
+        bind_owned_basket_identity(strategy, state)
+        state.update(
+            {
+                "pending_close_reason": "basket_stop",
+                "pending_close_signal_bar": "2026-08-25T13:10:00+00:00",
+                "sync_block_new_entries": True,
+                "sync_block_reason": "live_time_close_failed",
+                "sync_block_recoverable": True,
+            }
+        )
+        confirmed = SimpleNamespace(
+            position_id=96201, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=-1.25, price=99.5, deal=796201, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:10:02Z").timestamp()),
+        )
+        executor.get_position_close_deal = (
+            lambda position_id, _opened_at_epoch: confirmed
+            if int(position_id) == 96201 else False
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = S23HorizontalInventoryRunner._save_state.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        attempted_states = []
+        transaction_started = False
+        original_begin = runner._begin_confirmed_close_state_transaction
+
+        def begin_and_mark(deal_id):
+            nonlocal transaction_started
+            state_before = original_begin(deal_id)
+            transaction_started = True
+            return state_before
+
+        def capture_transaction_write(_path, payload):
+            if transaction_started:
+                attempted_states.append(json.loads(json.dumps(payload)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(
+                    live_s23_bot, "TRADE_LOG_FILE",
+                    os.path.join(tmp, "s23_trades.csv"),
+                ),
+                patch.object(
+                    live_s23_bot, "STATE_FILE",
+                    os.path.join(tmp, "s23_bot_state.json"),
+                ),
+                patch.object(
+                    live_s23_bot, "atomic_write_json",
+                    side_effect=capture_transaction_write,
+                ),
+                patch.object(
+                    runner, "_begin_confirmed_close_state_transaction",
+                    side_effect=begin_and_mark,
+                ),
+            ):
+                self.assertTrue(runner._sync_strategy(strategy))
+
+        self.assertEqual(len(attempted_states), 1)
+        committed = attempted_states[0]["strategies"][strategy["id"]]
+        self.assertEqual(
+            [position["ticket"] for position in committed["basket"]], [96202],
+        )
+        self.assertFalse(committed["basket"][0].get("close_requested"))
+        self.assertIsNone(committed["pending_close_reason"])
+        self.assertFalse(committed["sync_block_new_entries"])
+
+    def test_confirmed_close_derived_transition_failure_restores_state(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-08-24T23:59:00+00:00"
+        state_before = json.loads(json.dumps(runner.state))
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=4.25, price=100.5, deal=77014, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+
+        def fail_rearm(*_args, **_kwargs):
+            runner.state["routing"]["long_target_rearm_pending_confirmation"] = False
+            raise OSError("portfolio rearm audit unavailable")
+
+        runner._confirm_long_target_portfolio_rearm = fail_rearm
+        runner._trade_row = lambda *_args, **_kwargs: None
+
+        with self.assertRaisesRegex(OSError, "portfolio rearm audit unavailable"):
+            runner._sync_strategy(strategy)
+
+        self.assertEqual(runner.state, state_before)
+
+    def test_confirmed_close_retry_does_not_duplicate_derived_rearm_audit(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-08-24T23:59:00+00:00"
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=4.25, price=100.5, deal=77015, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._save_state = Mock(side_effect=OSError("state disk unavailable"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                with self.assertRaisesRegex(OSError, "state disk unavailable"):
+                    runner._sync_strategy(strategy)
+                runner._save_state = lambda: None
+                self.assertTrue(runner._sync_strategy(strategy))
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(
+            len([row for row in rows if row["event"] == "portfolio_rearm_started"]),
+            1,
+        )
+
+    def test_confirmed_close_retry_repairs_partial_derived_audit_exactly_once(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-08-24T23:59:00+00:00"
+        pending_strategy = runner.params["strategies"][1]
+        pending_state = runner._st(pending_strategy)
+        pending_state.update(
+            {
+                "pending_entry_side": "LONG",
+                "pending_entry_opportunity_id": "pending-long-retry-1",
+                "pending_entry_signal_bar": "2026-08-24T23:58:00+00:00",
+            }
+        )
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=4.25, price=100.5, deal=77016, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        original_append = live_s23_bot.append_csv
+        failed = False
+
+        def fail_rearm_once(path, row, fields):
+            nonlocal failed
+            if row.get("event") == "portfolio_rearm_started" and not failed:
+                failed = True
+                raise OSError("derived rearm row unavailable")
+            return original_append(path, row, fields)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path), patch.object(
+                live_s23_bot, "append_csv", side_effect=fail_rearm_once,
+            ):
+                with self.assertRaisesRegex(OSError, "derived rearm row unavailable"):
+                    runner._sync_strategy(strategy)
+                self.assertTrue(runner._sync_strategy(strategy))
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+
+        for rows in (trade_rows, evaluation_rows):
+            self.assertEqual(
+                len([row for row in rows if row["event"] == "pending_cancelled"]),
+                1,
+            )
+            self.assertEqual(
+                len([row for row in rows if row["event"] == "portfolio_rearm_started"]),
+                1,
+            )
+
+    def test_confirmed_close_restart_repairs_missing_passive_derived_audit(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor)
+        state["pending_close_reason"] = "basket_target"
+        state["pending_close_signal_bar"] = "2026-08-24T23:59:00+00:00"
+        executor.positions = []
+        executor.close_deal = SimpleNamespace(
+            position_id=9401, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+            net_profit=4.25, price=100.5, deal=77017, exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        runner._signal_evaluation_enabled = False
+        runner._save_state = Mock(side_effect=OSError("state disk unavailable"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                with self.assertRaisesRegex(OSError, "state disk unavailable"):
+                    runner._sync_strategy(strategy)
+
+                retry_runner, retry_strategy, _retry_state = make_runner()
+                retry_runner.state = json.loads(json.dumps(runner.state))
+                retry_runner.executor = executor
+                retry_runner._trade_row = (
+                    S23HorizontalInventoryRunner._trade_row.__get__(
+                        retry_runner, S23HorizontalInventoryRunner,
+                    )
+                )
+                retry_runner._save_state = lambda: None
+                self.assertTrue(retry_runner._sync_strategy(retry_strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+
+        for event in ("position_close_confirmed", "portfolio_rearm_started"):
+            self.assertEqual(
+                len([row for row in trade_rows if row["event"] == event]), 1,
+            )
+            self.assertEqual(
+                len([row for row in evaluation_rows if row["event"] == event]), 1,
+            )
+
+    def test_multi_ticket_close_audit_partial_failure_retries_without_duplicates(self):
+        runner, strategy, state = make_runner()
+        executor = CountingExecutor()
+        runner.executor = executor
+        arm_owned_basket(strategy, state, executor, ticket=9411)
+        second = dict(state["basket"][0])
+        second.update(
+            {
+                "ticket": 9412,
+                "position_identifier": 9412,
+                "entry_price": 100.5,
+                "open_time_epoch": 2,
+            }
+        )
+        state["basket"].append(second)
+        executor.positions = []
+        deals = {
+            9411: SimpleNamespace(
+                position_id=9411, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+                net_profit=-1.25, price=99.5, deal=77021, exit_volume=0.01,
+                deal_time=int(pd.Timestamp("2026-08-24T23:59:57Z").timestamp()),
+            ),
+            9412: SimpleNamespace(
+                position_id=9412, symbol="XAUUSD", magic=EXPECTED_S23_MAGIC,
+                net_profit=-2.75, price=99.4, deal=77022, exit_volume=0.01,
+                deal_time=int(pd.Timestamp("2026-08-24T23:59:58Z").timestamp()),
+            ),
+        }
+        executor.get_position_close_deal = (
+            lambda position_id, _opened_at_epoch: deals[int(position_id)]
+        )
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        original_append = live_s23_bot.append_csv
+        confirmed_attempts = 0
+
+        def fail_second_confirmed(path, row, fields):
+            nonlocal confirmed_attempts
+            if row.get("event") == "position_close_confirmed":
+                confirmed_attempts += 1
+                if confirmed_attempts == 2:
+                    raise OSError("second close row unavailable")
+            return original_append(path, row, fields)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path), patch.object(
+                live_s23_bot, "append_csv", side_effect=fail_second_confirmed,
+            ):
+                with self.assertRaisesRegex(OSError, "second close row unavailable"):
+                    runner._sync_strategy(strategy)
+                self.assertEqual(len(state["basket"]), 2)
+                self.assertEqual(state["daily_realized_pnl_usd"], 0.0)
+                self.assertTrue(runner._sync_strategy(strategy))
+
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+
+        self.assertFalse(state["basket"])
+        self.assertEqual(state["daily_realized_pnl_usd"], -4.0)
+        self.assertEqual(
+            sorted(row["deal_id"] for row in trade_rows), ["77021", "77022"],
+        )
+        self.assertEqual(
+            sorted(row["deal_id"] for row in evaluation_rows),
+            ["77021", "77022"],
+        )
 
     def test_confirmed_close_deal_resolves_unresolved_submission_block(self):
         runner, strategy, state = make_runner(live=True)
@@ -8917,6 +10610,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         )
 
     def test_malformed_sync_and_pending_open_flags_fail_closed_before_open(self):
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         corruptions = (
             ("sync_block_falsey_integer", {"sync_block_new_entries": 0}, "sync_block_state_invalid"),
             ("sync_block_falsey_text", {"sync_block_new_entries": ""}, "sync_block_state_invalid"),
@@ -8929,7 +10623,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                 state.update(mutation)
 
                 self.assertEqual(
-                    runner._entry_submission_block_reason(strategy, utc_now()),
+                    runner._entry_submission_block_reason(strategy, now),
                     expected,
                 )
 
@@ -8976,16 +10670,17 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(state["sync_block_reason"], "sync_block_state_invalid")
 
     def test_orders_unavailable_blocks_pending_and_final_open(self):
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         runner, strategy, state = make_runner()
         executor = CountingExecutor(orders_available=False)
         runner.executor = executor
-        arm_pending(state)
+        arm_pending(state, now=now)
 
         self.assertFalse(runner._sync_strategy(strategy))
         self.assertEqual(state["sync_block_reason"], "orders_unavailable")
         quote = SimpleNamespace(bid=99.99, ask=100.0)
-        self.assertTrue(runner._monitor_pending_entry(strategy, quote, utc_now()))
-        row = pd.Series({"Open": 99.99, "Close": 99.99, "AskOpen": 100.0}, name=pd.Timestamp(utc_now()))
+        self.assertTrue(runner._monitor_pending_entry(strategy, quote, now))
+        row = pd.Series({"Open": 99.99, "Close": 99.99, "AskOpen": 100.0}, name=now)
         runner._open_entry(strategy, "LONG", row, quote, basket_atr30=1.5)
         self.assertEqual(executor.open_calls, 0)
         self.assertFalse(state["basket"])
@@ -9016,6 +10711,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(executor.open_calls, 0)
 
     def test_same_magic_unexpected_order_blocks_pending(self):
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         foreign_order = SimpleNamespace(
             ticket=9301,
             identifier=9301,
@@ -9027,24 +10723,25 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         runner, strategy, state = make_runner()
         executor = CountingExecutor(orders=[foreign_order])
         runner.executor = executor
-        arm_pending(state)
+        arm_pending(state, now=now)
 
         self.assertFalse(runner._sync_strategy(strategy))
         self.assertEqual(state["sync_block_reason"], "same_magic_unexpected_order")
-        self.assertTrue(runner._monitor_pending_entry(strategy, SimpleNamespace(bid=99.99, ask=100.0), utc_now()))
+        self.assertTrue(runner._monitor_pending_entry(strategy, SimpleNamespace(bid=99.99, ask=100.0), now))
         self.assertEqual(executor.open_calls, 0)
 
     def test_retry_cooldown_blocks_pending_and_final_open(self):
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         runner, strategy, state = make_runner()
         executor = CountingExecutor()
         runner.executor = executor
-        arm_pending(state)
-        state["open_retry_after_utc"] = dt_text(utc_now() + pd.Timedelta(seconds=30))
+        arm_pending(state, now=now)
+        state["open_retry_after_utc"] = dt_text(now + pd.Timedelta(seconds=30))
         quote = SimpleNamespace(bid=99.99, ask=100.0)
 
-        self.assertTrue(runner._monitor_pending_entry(strategy, quote, utc_now() + pd.Timedelta(seconds=5)))
-        row = pd.Series({"Open": 99.99, "Close": 99.99, "AskOpen": 100.0}, name=pd.Timestamp(utc_now()))
-        runner._open_entry(strategy, "LONG", row, quote, basket_atr30=1.5, execution_time=utc_now() + pd.Timedelta(seconds=5))
+        self.assertTrue(runner._monitor_pending_entry(strategy, quote, now + pd.Timedelta(seconds=5)))
+        row = pd.Series({"Open": 99.99, "Close": 99.99, "AskOpen": 100.0}, name=now)
+        runner._open_entry(strategy, "LONG", row, quote, basket_atr30=1.5, execution_time=now + pd.Timedelta(seconds=5))
         self.assertEqual(executor.open_calls, 0)
         self.assertFalse(state["basket"])
 
@@ -9200,7 +10897,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                 self.assertFalse(state["basket"])
 
     def test_malformed_persisted_open_retry_time_fails_closed(self):
-        now = pd.Timestamp(utc_now())
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         for label, value in (
             ("bad_text", "not-a-timestamp"),
             ("falsey_integer", 0),
@@ -9218,21 +10915,36 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_high_vol_refreshed_pending_ignores_low_vol_spread_gate(self):
         runner, strategy, state = make_runner(live=False)
-        arm_pending(state, atr30=2.5, target=100.0)
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
+        arm_pending(state, atr30=2.5, target=100.0, now=now)
         quote = SimpleNamespace(bid=99.70, ask=100.0)
 
-        self.assertTrue(runner._monitor_pending_entry(strategy, quote, utc_now()))
+        self.assertTrue(runner._monitor_pending_entry(strategy, quote, now))
         self.assertEqual(len(state["basket"]), 1)
         self.assertTrue(math.isclose(float(state["frozen_basket_atr30"]), 2.5))
 
     def test_pending_za_entry_cannot_fill_after_blocked_hour_begins(self):
         runner, strategy, state = make_runner(live=False)
         poll_time = pd.Timestamp("2026-08-25T14:00:01Z")
-        arm_pending(state, atr30=2.5, target=100.0)
-        state["pending_entry_signal_bar"] = "2026-08-25T13:59:00+00:00"
-        state["pending_entry_event_time"] = "2026-08-25T13:59:00+00:00"
-        state["pending_entry_release_time"] = "2026-08-25T14:00:00+00:00"
-        state["pending_entry_expires_utc"] = "2026-08-25T14:05:00+00:00"
+        arm_pending(state, atr30=2.5, target=100.0, now=poll_time)
+
+        self.assertTrue(
+            runner._monitor_pending_entry(
+                strategy,
+                SimpleNamespace(bid=99.70, ask=100.0),
+                poll_time,
+            )
+        )
+        self.assertFalse(state["basket"])
+        self.assertIsNone(state["pending_entry_side"])
+
+    def test_pending_za_entry_cannot_fill_before_release_time(self):
+        runner, strategy, state = make_runner(live=False)
+        release_time = pd.Timestamp("2026-08-25T13:10:00Z")
+        arm_pending(
+            state, atr30=2.5, target=100.0, now=release_time,
+        )
+        poll_time = release_time - pd.Timedelta(seconds=1)
 
         self.assertTrue(
             runner._monitor_pending_entry(
@@ -9269,14 +10981,16 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_low_vol_pending_retains_spread_gate(self):
         runner, strategy, state = make_runner(live=False)
-        arm_pending(state, atr30=1.5, target=100.0)
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
+        arm_pending(state, atr30=1.5, target=100.0, now=now)
         quote = SimpleNamespace(bid=99.80, ask=100.0)
 
-        self.assertFalse(runner._monitor_pending_entry(strategy, quote, utc_now()))
+        self.assertFalse(runner._monitor_pending_entry(strategy, quote, now))
         self.assertFalse(state["basket"])
         self.assertEqual(state["pending_entry_side"], "LONG")
 
     def test_malformed_pending_state_is_cleared_without_open_or_crash(self):
+        now = pd.Timestamp("2026-08-25T13:10:00Z")
         malformed = {
             "null_target": {"pending_entry_target": None},
             "null_atr": {"pending_entry_atr30": None},
@@ -9293,10 +11007,10 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                 runner, strategy, state = make_runner()
                 executor = CountingExecutor()
                 runner.executor = executor
-                arm_pending(state)
+                arm_pending(state, now=now)
                 state.update(mutation)
 
-                self.assertTrue(runner._monitor_pending_entry(strategy, SimpleNamespace(bid=99.99, ask=100.0), utc_now()))
+                self.assertTrue(runner._monitor_pending_entry(strategy, SimpleNamespace(bid=99.99, ask=100.0), now))
                 self.assertIsNone(state["pending_entry_side"])
                 self.assertFalse(state["basket"])
                 self.assertEqual(executor.open_calls, 0)
@@ -9735,6 +11449,296 @@ class Bot23TrendRecoveryRegressionTests(unittest.TestCase):
         self.assertTrue(runner._sync_strategy(strategy))
         self.assertTrue(runner._trend_recovery_state()["active"])
         self.assertEqual(runner._trend_recovery_state()["started_utc"], dt_text(close_time))
+
+
+class SignalEvaluationAttributionTests(unittest.TestCase):
+    def test_every_lane_has_explicit_signal_identity(self):
+        runner, _strategy, _state = make_runner(live=False)
+        self.assertTrue(runner.params["session_vwap_enabled"])
+        self.assertEqual(len(runner._all_strategies()), 22)
+        for strategy in runner._all_strategies():
+            with self.subTest(strategy=strategy["id"]):
+                self.assertTrue(str(strategy.get("spec_id") or ""))
+                self.assertTrue(str(strategy.get("signal_id") or ""))
+                self.assertNotEqual(runner._strategy_group(strategy), "unknown")
+
+    def test_za_variants_are_independently_attributed(self):
+        runner, strategy, _state = make_runner(live=False)
+        cases = (
+            (
+                "XAUUSD|2026-07-01T10:00:00+00:00|LONG|LONG|reverse_d60",
+                "LONG", "za_horizontal_primary", "none", "LONG", "LONG",
+            ),
+            (
+                "XAUUSD|2026-07-01T10:00:00+00:00|SHORT|LONG|reverse_d60",
+                "LONG", "za_late_short_reverse_long", "reverse_long", "SHORT", "LONG",
+            ),
+            (
+                "XAUUSD|2026-07-01T10:00:00+00:00|INVENTORY_RANGE_FADE|SHORT|balanced",
+                "SHORT", "za_inventory_range_false_break_fade", "opposite_breakout", "", "SHORT",
+            ),
+        )
+        for opportunity_id, side, variant, transform, raw_side, effective_side in cases:
+            with self.subTest(variant=variant):
+                observed = runner._signal_attribution(strategy, opportunity_id, side)
+                self.assertEqual(observed["configured_signal_id"], "za_horizontal_impulse")
+                self.assertEqual(observed["signal_variant_id"], variant)
+                self.assertEqual(observed["signal_transform_id"], transform)
+                self.assertEqual(observed["raw_side"], raw_side)
+                self.assertEqual(observed["effective_side"], effective_side)
+
+    def test_za_position_without_opportunity_identity_is_not_counted_as_primary(self):
+        runner, strategy, _state = make_runner(live=False)
+        observed = runner._signal_attribution(strategy, "", "LONG")
+        self.assertEqual(observed["signal_variant_id"], "za_unattributed_legacy")
+        self.assertEqual(observed["signal_transform_id"], "unknown")
+
+    def test_shadow_mixed_za_basket_close_is_split_by_position_without_double_count(self):
+        runner, strategy, state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        basket_id = "L1-B000001"
+        state["current_basket_id"] = basket_id
+        state["basket_sequence"] = 1
+        state["basket"] = [
+            {
+                "ticket": "SHADOW-1", "position_identifier": "SHADOW-1",
+                "side": "LONG", "lot": 0.01, "entry_price": 100.0,
+                "shadow": True, "basket_id": basket_id,
+                "opportunity_id": "XAUUSD|2026-07-01T10:00:00+00:00|LONG|LONG|reverse_d60",
+            },
+            {
+                "ticket": "SHADOW-2", "position_identifier": "SHADOW-2",
+                "side": "LONG", "lot": 0.02, "entry_price": 101.0,
+                "shadow": True, "basket_id": basket_id,
+                "opportunity_id": "XAUUSD|2026-07-01T10:01:00+00:00|SHORT|LONG|reverse_d60",
+            },
+        ]
+        price_row = pd.Series(
+            {"Open": 102.0, "Close": 102.0, "AskOpen": 102.1},
+            name=pd.Timestamp("2026-07-01T10:10:00Z"),
+        )
+        expected_pnl = runner._basket_pnl(strategy, 102.0, 102.1)
+        operational_rows = []
+        evaluation_rows = []
+        with patch.object(
+            live_s23_bot, "append_csv",
+            side_effect=lambda _path, row, _fields: operational_rows.append(dict(row)),
+        ), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+            side_effect=lambda _path, row, _fields: evaluation_rows.append(dict(row)),
+        ):
+            self.assertEqual(
+                runner._close_basket(strategy, "basket_target", price_row, expected_pnl),
+                "closed",
+            )
+
+        close_rows = [row for row in operational_rows if row["event"] == "basket_close"]
+        self.assertEqual(len(close_rows), 1)
+        evaluation_rows = [
+            row for row in evaluation_rows
+            if row["event"] == "position_close_attributed"
+        ]
+        self.assertEqual(len(evaluation_rows), 2)
+        self.assertEqual(
+            {row["event"] for row in evaluation_rows},
+            {"position_close_attributed"},
+        )
+        self.assertEqual(
+            {row["signal_variant_id"] for row in evaluation_rows},
+            {"za_horizontal_primary", "za_late_short_reverse_long"},
+        )
+        self.assertAlmostEqual(
+            sum(float(row["profit"]) for row in evaluation_rows), expected_pnl,
+        )
+        self.assertTrue(all(row["basket_id"] == basket_id for row in evaluation_rows))
+        self.assertFalse(state["basket"])
+
+    def test_shadow_single_position_close_keeps_its_opportunity_identity(self):
+        runner, _strategy, _state = make_runner(live=False)
+        strategy = runner.params["trend_recovery_strategies"][0]
+        state = runner._st(strategy)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        basket_id = "L12-B000001"
+        opportunity_id = "TR-1-L1-B000001"
+        position = {
+            "ticket": "SHADOW-TR-1", "position_identifier": "SHADOW-TR-1",
+            "side": "LONG", "lot": 0.01, "entry_price": 100.0,
+            "shadow": True, "basket_id": basket_id,
+            "opportunity_id": opportunity_id,
+        }
+        state.update({
+            "current_basket_id": basket_id, "basket_sequence": 1,
+            "basket": [position],
+        })
+        price_row = pd.Series(
+            {"Open": 101.0, "Close": 101.0, "AskOpen": 101.1},
+            name=pd.Timestamp("2026-07-01T10:10:00Z"),
+        )
+        evaluation_rows = []
+        with patch.object(live_s23_bot, "append_csv"), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+            side_effect=lambda _path, row, _fields: evaluation_rows.append(dict(row)),
+        ):
+            self.assertEqual(
+                runner._close_trend_recovery_ticket(
+                    strategy, position, "trend_ticket_target", price_row, 1.0,
+                ),
+                "closed",
+            )
+        self.assertEqual(len(evaluation_rows), 1)
+        self.assertEqual(evaluation_rows[0]["event"], "position_close_attributed")
+        self.assertEqual(evaluation_rows[0]["opportunity_id"], opportunity_id)
+        self.assertEqual(evaluation_rows[0]["profit"], 1.0)
+
+    def test_malformed_evaluation_allocation_does_not_block_trade_audit(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        operational_rows = []
+        with patch.object(
+            live_s23_bot, "append_csv",
+            side_effect=lambda _path, row, _fields: operational_rows.append(dict(row)),
+        ), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+        ) as evaluation_write, self.assertLogs(level="ERROR") as captured:
+            runner._trade_row(
+                "basket_close", strategy, profit=1.0,
+                _evaluation_allocations="corrupt",
+            )
+        self.assertEqual(len(operational_rows), 1)
+        evaluation_write.assert_not_called()
+        self.assertIn("allocations invalid", "\n".join(captured.output))
+
+    def test_trade_and_signal_ledgers_are_separate_and_joinable(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        opportunity_id = (
+            "XAUUSD|2026-07-01T10:00:00+00:00|SHORT|LONG|reverse_d60"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            trade_path = os.path.join(tmp, "s23_trades.csv")
+            with patch.object(live_s23_bot, "TRADE_LOG_FILE", trade_path):
+                runner._trade_row(
+                    "entry", strategy, opportunity_id=opportunity_id,
+                    basket_id="L1-B000001", ticket=101, side="LONG", profit="",
+                )
+            evaluation_path = os.path.join(tmp, "s23_signal_evaluation.csv")
+            with open(trade_path, newline="", encoding="utf-8") as handle:
+                trade_rows = list(csv.DictReader(handle))
+            with open(evaluation_path, newline="", encoding="utf-8") as handle:
+                evaluation_rows = list(csv.DictReader(handle))
+        self.assertEqual(len(trade_rows), 1)
+        self.assertEqual(len(evaluation_rows), 1)
+        self.assertEqual(evaluation_rows[0]["opportunity_id"], opportunity_id)
+        self.assertEqual(evaluation_rows[0]["strategy_id"], strategy["id"])
+        self.assertEqual(evaluation_rows[0]["signal_variant_id"], "za_late_short_reverse_long")
+
+    def test_live_confirmed_close_keeps_exact_za_variant_and_broker_net_pnl(self):
+        runner, strategy, _state = make_runner(live=True)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        opportunity_id = (
+            "XAUUSD|2026-07-01T10:00:00+00:00|SHORT|LONG|reverse_d60"
+        )
+        evaluation_rows = []
+        with patch.object(live_s23_bot, "append_csv"), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+            side_effect=lambda _path, row, _fields: evaluation_rows.append(dict(row)),
+        ):
+            runner._trade_row(
+                "position_close_confirmed", strategy,
+                opportunity_id=opportunity_id, basket_id="L1-B000001",
+                ticket=101, position_identifier=201, deal_id=301,
+                side="LONG", profit=4.75, reason="basket_target",
+            )
+        self.assertEqual(len(evaluation_rows), 1)
+        row = evaluation_rows[0]
+        self.assertEqual(row["signal_variant_id"], "za_late_short_reverse_long")
+        self.assertEqual(row["ticket"], 101)
+        self.assertEqual(row["position_identifier"], 201)
+        self.assertEqual(row["deal_id"], 301)
+        self.assertEqual(row["profit"], 4.75)
+
+    def test_passive_evaluation_failure_does_not_suppress_trade_audit(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        rows = []
+        with patch.object(
+            live_s23_bot, "append_csv",
+            side_effect=lambda _path, row, _fields: rows.append(dict(row)),
+        ), patch.object(
+            live_s23_bot, "append_signal_evaluation_csv",
+            side_effect=OSError("evaluation disk unavailable"),
+        ), self.assertLogs(level="ERROR") as captured:
+            runner._trade_row("entry", strategy, side="LONG", ticket=101)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "entry")
+        self.assertFalse(runner._signal_evaluation_enabled)
+        self.assertIn("passive signal evaluation write failed", "\n".join(captured.output))
+
+    def test_passive_evaluation_construction_failure_does_not_escape_trade_audit(self):
+        runner, strategy, _state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        operational_rows = []
+        with patch.object(
+            live_s23_bot, "append_csv",
+            side_effect=lambda _path, row, _fields: operational_rows.append(dict(row)),
+        ), patch.object(
+            runner, "_append_signal_evaluation_row",
+            side_effect=RuntimeError("attribution construction failed"),
+        ), self.assertLogs(level="ERROR") as captured:
+            runner._trade_row("position_close_confirmed", strategy, profit=1.25)
+        self.assertEqual(len(operational_rows), 1)
+        self.assertEqual(operational_rows[0]["event"], "position_close_confirmed")
+        self.assertFalse(runner._signal_evaluation_enabled)
+        self.assertIn(
+            "passive signal evaluation processing failed",
+            "\n".join(captured.output),
+        )
+
+    def test_passive_evaluation_construction_failure_cannot_stop_shadow_close(self):
+        runner, strategy, state = make_runner(live=False)
+        runner._trade_row = S23HorizontalInventoryRunner._trade_row.__get__(
+            runner, S23HorizontalInventoryRunner,
+        )
+        basket_id = "L1-B000001"
+        state.update({
+            "current_basket_id": basket_id,
+            "basket_sequence": 1,
+            "basket": [{
+                "ticket": "SHADOW-1", "position_identifier": "SHADOW-1",
+                "side": "LONG", "lot": 0.01, "entry_price": 100.0,
+                "shadow": True, "basket_id": basket_id,
+                "opportunity_id": "XAUUSD|2026-07-01T10:00:00+00:00|LONG|LONG|reverse_d60",
+            }],
+        })
+        price_row = pd.Series(
+            {"Open": 101.0, "Close": 101.0, "AskOpen": 101.1},
+            name=pd.Timestamp("2026-07-01T10:10:00Z"),
+        )
+        with patch.object(live_s23_bot, "append_csv"), patch.object(
+            runner, "_append_signal_evaluation_row",
+            side_effect=RuntimeError("attribution construction failed"),
+        ), self.assertLogs(level="ERROR"):
+            self.assertEqual(
+                runner._close_basket(strategy, "basket_target", price_row, 1.0),
+                "closed",
+            )
+        self.assertFalse(state["basket"])
+        self.assertEqual(state["last_closed_reason"], "basket_target")
+        self.assertEqual(state["daily_realized_pnl_usd"], 1.0)
 
 
 if __name__ == "__main__":

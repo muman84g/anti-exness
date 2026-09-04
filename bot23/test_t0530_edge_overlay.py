@@ -19,6 +19,29 @@ from t0530_edge_overlay import (
 )
 
 
+_CANONICAL_STATE_FILE = Path(live_s23_bot.STATE_FILE).resolve()
+_MODULE_RUNTIME_DIR = None
+_MODULE_STATE_PATCH = None
+
+
+def setUpModule():
+    global _MODULE_RUNTIME_DIR, _MODULE_STATE_PATCH
+    _MODULE_RUNTIME_DIR = tempfile.TemporaryDirectory(prefix="bot23-t0530-")
+    state_path = Path(_MODULE_RUNTIME_DIR.name) / "s23_bot_state.json"
+    _MODULE_STATE_PATCH = patch.object(live_s23_bot, "STATE_FILE", str(state_path))
+    _MODULE_STATE_PATCH.start()
+
+
+def tearDownModule():
+    global _MODULE_RUNTIME_DIR, _MODULE_STATE_PATCH
+    if _MODULE_STATE_PATCH is not None:
+        _MODULE_STATE_PATCH.stop()
+        _MODULE_STATE_PATCH = None
+    if _MODULE_RUNTIME_DIR is not None:
+        _MODULE_RUNTIME_DIR.cleanup()
+        _MODULE_RUNTIME_DIR = None
+
+
 def bars_ending(at: str, closes: list[float]) -> pd.DataFrame:
     index = pd.date_range(end=pd.Timestamp(at), periods=len(closes), freq="min", tz="UTC")
     values = pd.Series(closes, index=index, dtype=float)
@@ -26,6 +49,9 @@ def bars_ending(at: str, closes: list[float]) -> pd.DataFrame:
 
 
 class T0530EdgeOverlayTests(unittest.TestCase):
+    def test_no_order_module_uses_only_isolated_state_file(self):
+        self.assertNotEqual(Path(live_s23_bot.STATE_FILE).resolve(), _CANONICAL_STATE_FILE)
+
     def test_policy_hash_is_frozen(self):
         self.assertEqual(
             POLICY_PARAMS_HASH,
@@ -121,13 +147,17 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
         runner.state["routing"]["t0530_edge_last_evaluated_bar"] = event_time.isoformat()
         return opportunity
 
-    def test_config_is_disabled_and_owns_four_new_namespaces(self):
+    def test_config_is_enabled_and_owns_four_new_namespaces(self):
         runner = self.make_runner()
-        self.assertFalse(runner.params["t0530_edge_enabled"])
+        self.assertEqual(
+            runner.params["candidate_id"],
+            live_s23_bot.EXPECTED_CANDIDATE_ID,
+        )
+        self.assertTrue(runner.params["t0530_edge_enabled"])
         lanes = runner._t0530_edge_strategies()
         self.assertEqual([row["lane_id"] for row in lanes], [18, 19, 20, 21])
         self.assertEqual([row["magic"] for row in lanes], [230040, 230041, 230042, 230043])
-        self.assertEqual(len(runner._all_strategies()), 21)
+        self.assertEqual(len(runner._all_strategies()), 22)
         live_s23_bot.validate_boolean_config(runner.params)
         live_s23_bot.validate_strategy_topology_config(runner.params)
         live_s23_bot.validate_execution_numeric_config(runner.params)

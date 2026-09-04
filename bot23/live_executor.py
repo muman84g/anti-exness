@@ -23,6 +23,7 @@ S23_OPEN_POLICY = {
     230034: "s23_tr_l1",
     **{230034 + lane: f"s23_sv_l{lane}" for lane in range(1, 6)},
     **{230039 + lane: f"s23_ed_l{lane}" for lane in range(1, 5)},
+    230044: "s23_q01_l1",
 }
 REQUIRED_SHARED_ACCOUNT_COMMANDS = {
     "ECHO", "CAPS", "ACCOUNT", "INFO", "HIST", "HISTPAGE", "TICKS",
@@ -452,6 +453,8 @@ class MT5Executor:
             or not expected_server_value
             or "|" in expected_server_value
             or "," in expected_server_value
+            or "\r" in expected_server_value
+            or "\n" in expected_server_value
             or expected_symbol_value != "XAUUSD"
             or "|" in expected_symbol_value
             or "," in expected_symbol_value

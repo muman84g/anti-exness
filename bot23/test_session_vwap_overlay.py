@@ -198,9 +198,9 @@ class SessionVwapOverlayTests(unittest.TestCase):
                         )
                     )
 
-    def test_new_overlay_is_preinstalled_disabled_with_private_namespace(self):
+    def test_adopted_overlay_is_enabled_with_private_namespace(self):
         params = json.loads((ROOT / "s23_params.json").read_text(encoding="utf-8"))
-        self.assertFalse(params["session_vwap_enabled"])
+        self.assertTrue(params["session_vwap_enabled"])
         lanes = params["session_vwap_strategies"]
         self.assertEqual([row["lane_id"] for row in lanes], [13, 14, 15, 16, 17])
         self.assertEqual([row["magic"] for row in lanes], [230035, 230036, 230037, 230038, 230039])
