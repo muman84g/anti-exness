@@ -28,6 +28,7 @@ import tempfile
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from types import SimpleNamespace
 from typing import Any
 
@@ -96,19 +97,43 @@ TRADE_FIELDS = [
     "timestamp_utc",
     "event",
     "strategy_id",
+    "lane_id",
+    "magic",
     "symbol",
     "mt5_symbol",
+    "opportunity_id",
+    "basket_id",
     "ticket",
+    "position_identifier",
+    "deal_id",
     "side",
     "lot",
+    "entry_price",
+    "exit_price",
     "price",
     "profit",
     "reason",
     "signal_bar_time",
+    "event_time",
+    "release_time",
+    "available_time",
+    "decision_time",
+    "executable_at",
     "live",
+    "repeat_count",
+    "repeat_window_seconds",
     "note",
 ]
 _CSV_SCHEMAS_VALIDATED: set[str] = set()
+REPEATABLE_DIAGNOSTIC_REASONS = {
+    "symbol_info_failed",
+    "runtime_quote_clock_invalid",
+    "positions_unavailable",
+    "orders_unavailable",
+    "m1_bars_unavailable",
+    "close_deal_query_unavailable",
+    "close_deal_not_confirmed",
+}
 
 SHADOW_RUNNER_FIELDS = [
     "timestamp_utc",
@@ -262,7 +287,21 @@ def _execution_csv_row_error(row: dict[str, Any]) -> str | None:
                 return "ticket_invalid"
         except (TypeError, ValueError, OverflowError):
             return "ticket_invalid"
-    for name in ("lot", "price", "profit"):
+    for name in ("lane_id", "magic", "ticket", "position_identifier", "deal_id", "repeat_count"):
+        text = str(row.get(name) or "").strip()
+        if not text:
+            if name in {"lane_id", "magic"}:
+                return f"{name}_missing"
+            continue
+        try:
+            value = int(text)
+        except (TypeError, ValueError, OverflowError):
+            return f"{name}_invalid"
+        if value <= 0 and name != "repeat_count":
+            return f"{name}_nonpositive"
+        if name == "repeat_count" and value < 0:
+            return "repeat_count_negative"
+    for name in ("lot", "entry_price", "exit_price", "price", "profit", "repeat_window_seconds"):
         text = str(row.get(name) or "").strip()
         if not text:
             continue
@@ -272,8 +311,20 @@ def _execution_csv_row_error(row: dict[str, Any]) -> str | None:
             return f"{name}_invalid"
         if not math.isfinite(value):
             return f"{name}_nonfinite"
-        if name in {"lot", "price"} and value <= 0.0:
+        if name in {"lot", "entry_price", "exit_price", "price"} and value <= 0.0:
             return f"{name}_nonpositive"
+        if name == "repeat_window_seconds" and value < 0.0:
+            return "repeat_window_seconds_negative"
+    for name in ("event_time", "release_time", "available_time", "decision_time", "executable_at"):
+        text = str(row.get(name) or "").strip()
+        if not text:
+            continue
+        try:
+            value = pd.Timestamp(text)
+        except Exception:
+            return f"{name}_invalid"
+        if value.tzinfo is None or value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+            return f"{name}_not_utc"
     return None
 
 
@@ -427,6 +478,7 @@ class S24NoAdverseRunner:
         self.entry_router, self.entry_wrapper = self._build_entry_wrapper()
         self.dm = MT5DataManager(self.safety)
         self.executor = MT5Executor()
+        self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
         self._fatal_state_identity_mismatch = False
         self.state = self._load_state()
         self.v206_lane = V206LiveLane(self)
@@ -519,6 +571,8 @@ class S24NoAdverseRunner:
             "symbol": "XAUUSD", "mt5_symbol": "XAUUSD", "require_hedging_account": True,
             "default_lot": 0.01, "contract_size": 100.0,
             "poll_interval_seconds": 5, "status_log_interval_seconds": 60,
+            "diagnostic_repeat_summary_seconds": 300,
+            "bot_log_max_bytes": 10 * 1024 * 1024, "bot_log_backup_count": 5,
             "broker_timezone": "UTC", "hist_timestamp_basis": "unix_seconds_utc",
             "m1_timeframe": 1, "m1_bars": 360, "drop_latest_m1_bar": True,
             "max_signal_delay_minutes": 2,
@@ -1289,16 +1343,100 @@ class S24NoAdverseRunner:
         return self.state["strategies"][strat["id"]]
 
     def _trade_row(self, event: str, strat: dict[str, Any], **kwargs: Any) -> None:
+        now = utc_now()
+        lane_id = int(strat.get("lane_id") or (206 if int(strat.get("magic", 0) or 0) == 240206 else 1))
+        signal_bar = parse_ts(kwargs.get("signal_bar_time"))
         row = {
-            "timestamp_utc": dt_text(utc_now()),
+            "timestamp_utc": dt_text(now),
             "event": event,
             "strategy_id": strat["id"],
+            "lane_id": lane_id,
+            "magic": int(strat["magic"]),
             "symbol": self.params["symbol"],
             "mt5_symbol": self.params.get("mt5_symbol", self.params["symbol"]),
+            "basket_id": self._basket_id(strat),
+            "event_time": dt_text(signal_bar) if signal_bar is not None else "",
+            "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)) if signal_bar is not None else "",
+            "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)) if signal_bar is not None else "",
+            "decision_time": dt_text(now),
             "live": self.live_enabled,
         }
         row.update(kwargs)
-        append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+        price = row.get("price")
+        if price not in (None, "") and event in {"entry", "v206_entry_confirmed"}:
+            row.setdefault("entry_price", price)
+        if price not in (None, "") and ("close_deal" in event or event == "v206_close_submitted"):
+            row.setdefault("exit_price", price)
+        reason = str(row.get("reason") or "")
+        coalesce = event in {"entry_skip", "v206_entry_skip"} and (
+            reason in REPEATABLE_DIAGNOSTIC_REASONS or str(row.get("note") or "") == "sync_block"
+        )
+        active = self._diagnostic_repeats.get(lane_id)
+        signature = (event, reason, str(row.get("note") or ""))
+        if not coalesce:
+            self._flush_diagnostic_repeat(lane_id, now)
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            return
+        if active is None or active["signature"] != signature:
+            self._flush_diagnostic_repeat(lane_id, now)
+            row["repeat_count"] = 1
+            row["repeat_window_seconds"] = 0
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+            self._diagnostic_repeats[lane_id] = {
+                "signature": signature,
+                "first": now,
+                "last": now,
+                "suppressed": 0,
+                "row": dict(row),
+            }
+            return
+        active["last"] = now
+        active["suppressed"] = int(active.get("suppressed", 0)) + 1
+        interval = float(self.params.get("diagnostic_repeat_summary_seconds", 300.0))
+        if (now - active["first"]).total_seconds() >= interval:
+            self._flush_diagnostic_repeat(lane_id, now, keep_signature=True)
+
+    def _basket_id(self, strat: dict[str, Any], basket: list[dict[str, Any]] | None = None) -> str:
+        rows = list(basket if basket is not None else (self._st(strat).get("basket") or []))
+        if not rows:
+            return ""
+        first = rows[0]
+        signal_bar = str(first.get("signal_bar_time") or "")
+        side = str(first.get("side") or "")
+        if not signal_bar or side not in {"LONG", "SHORT"}:
+            return ""
+        return f"s24-basket:{strat['id']}:{signal_bar}:{side}"
+
+    def _flush_diagnostic_repeat(
+        self,
+        lane_id: int,
+        now: datetime | None = None,
+        *,
+        keep_signature: bool = False,
+    ) -> None:
+        active = self._diagnostic_repeats.get(int(lane_id))
+        if active is None:
+            return
+        at = now or utc_now()
+        suppressed = int(active.get("suppressed", 0))
+        if suppressed > 0:
+            row = dict(active["row"])
+            original_note = str(row.get("note") or "")
+            row.update({
+                "timestamp_utc": dt_text(at),
+                "event": "diagnostic_repeat_summary",
+                "repeat_count": suppressed,
+                "repeat_window_seconds": round(max(0.0, (active["last"] - active["first"]).total_seconds()), 3),
+                "decision_time": dt_text(at),
+                "note": f"source_event={active['signature'][0]};source_note={original_note}",
+            })
+            append_csv(TRADE_LOG_FILE, row, TRADE_FIELDS)
+        if keep_signature:
+            active["first"] = at
+            active["last"] = at
+            active["suppressed"] = 0
+        else:
+            self._diagnostic_repeats.pop(int(lane_id), None)
 
     def _shadow_runner_row(self, event: str, strat: dict[str, Any], **kwargs: Any) -> None:
         runner = self._st(strat)["shadow_runner"]
@@ -2264,6 +2402,7 @@ class S24NoAdverseRunner:
                 state_by_position_id = {
                     int(pos.get("position_identifier") or pos.get("ticket") or 0): pos for pos in state_basket
                 }
+                closed_basket_id = self._basket_id(strat, state_basket)
                 if not remaining_state:
                     closed_sides = {
                         str(state_by_position_id[int(deal.position_id)].get("side"))
@@ -2296,9 +2435,14 @@ class S24NoAdverseRunner:
                     self._trade_row(
                         "position_close_deal",
                         strat,
-                        ticket=int(deal.position_id),
+                        basket_id=closed_basket_id,
+                        ticket=int(closed_state.get("ticket") or 0),
+                        position_identifier=int(deal.position_id),
+                        deal_id=int(deal.deal),
                         side=str(closed_state.get("side") or ""),
                         lot=float(closed_state.get("lot") or 0.0),
+                        entry_price=float(closed_state.get("entry_price") or 0.0),
+                        exit_price=float(deal.price),
                         price=float(deal.price),
                         profit=float(deal.net_profit),
                         reason=reason,
@@ -2309,7 +2453,14 @@ class S24NoAdverseRunner:
                             f"fee={float(deal.fee):.2f} broker_reason={deal.reason}"
                         ),
                     )
-                self._trade_row("position_close_confirmed", strat, profit=sum(float(deal.net_profit) for deal in confirmed_deals), reason=reason, signal_bar_time=signal_bar)
+                self._trade_row(
+                    "position_close_confirmed",
+                    strat,
+                    basket_id=closed_basket_id,
+                    profit=sum(float(deal.net_profit) for deal in confirmed_deals),
+                    reason=reason,
+                    signal_bar_time=signal_bar,
+                )
                 if unresolved_open:
                     self._set_sync_block(
                         strat,
@@ -2494,7 +2645,22 @@ class S24NoAdverseRunner:
                 pos["close_requested"] = True
                 submitted_any = True
                 self._save_state()
-                self._trade_row("position_close_requested", strat, ticket=ticket, profit=round(float(pnl), 2), reason=reason, signal_bar_time=str(price_row.name))
+                self._trade_row(
+                    "position_close_requested",
+                    strat,
+                    ticket=ticket,
+                    position_identifier=position_id,
+                    deal_id=int(getattr(close_result, "deal_id", 0) or 0),
+                    side=str(pos.get("side") or ""),
+                    lot=float(pos.get("lot") or 0.0),
+                    entry_price=float(pos.get("entry_price") or 0.0),
+                    exit_price=float(getattr(close_result, "close_price", 0.0) or 0.0),
+                    price=float(getattr(close_result, "close_price", 0.0) or 0.0),
+                    profit=round(float(pnl), 2),
+                    reason=reason,
+                    signal_bar_time=str(price_row.name),
+                    executable_at=dt_text(quote_time),
+                )
             if submitted_any:
                 st["close_permission_reject_count"] = 0
                 st["close_retry_after_utc"] = None
@@ -2566,6 +2732,7 @@ class S24NoAdverseRunner:
         ticket = None
         confirmed = None
         broker_entry_time: pd.Timestamp | None = None
+        entry_opportunity_id = f"s24-signal:{strat['id']}:{dt_text(parse_ts(price_row.name) or pd.Timestamp(utc_now()))}:{side}"
         if self.live_enabled:
             fresh_info = self.executor.get_symbol_info(symbol)
             quote_time, quote_error = self._validated_core_quote_time(strat, fresh_info)
@@ -2652,6 +2819,7 @@ class S24NoAdverseRunner:
                 return
             before_ids = set(before_position_ids)
             pending_open_id = f"s24-open:{strat['id']}:{dt_text(parse_ts(price_row.name) or pd.Timestamp(utc_now()))}:{side}:{len(st.get('basket') or []) + 1}"
+            entry_opportunity_id = pending_open_id
             order_comment = f"{strat['comment_prefix']}:{hashlib.sha256(pending_open_id.encode('utf-8')).hexdigest()[:10]}"
             st["pending_open_opportunity_id"] = pending_open_id
             st["pending_open_started_utc"] = dt_text(quote_time)
@@ -2847,7 +3015,21 @@ class S24NoAdverseRunner:
                     recoverable=True,
                 )
         self._save_state()
-        self._trade_row("entry", strat, ticket=ticket or "", side=side, lot=lot, price=entry_price, signal_bar_time=str(price_row.name), note=note)
+        self._trade_row(
+            "entry",
+            strat,
+            opportunity_id=entry_opportunity_id,
+            ticket=ticket or "",
+            position_identifier=int(getattr(confirmed, "identifier", 0) or ticket or 0) if confirmed is not None else "",
+            deal_id=int(getattr(self.executor, "last_open_deal", 0) or 0) if confirmed is not None else "",
+            side=side,
+            lot=lot,
+            entry_price=entry_price,
+            price=entry_price,
+            signal_bar_time=str(price_row.name),
+            executable_at=dt_text(broker_entry_time) if broker_entry_time is not None else dt_text(persisted_entry_time),
+            note=note,
+        )
 
     def _run_strategy(self, strat: dict[str, Any], bars: pd.DataFrame, info: Any) -> None:
         st = self._st(strat)
@@ -3336,7 +3518,13 @@ def _run_self_test() -> None:
     ]
     assert partial_runner._sync_strategy(confirmed_strategy), "partially completed basket close must reconcile owned tickets"
     assert [pos["position_identifier"] for pos in partial_state["basket"]] == [7002], "confirmed closed ticket must be removed without losing remaining owned state"
-    assert any(event == "position_close_deal" and row.get("ticket") == 7001 and row.get("price") == 2066.0 for event, row in partial_rows), "confirmed close audit must retain ticket and broker deal price"
+    assert any(
+        event == "position_close_deal"
+        and row.get("ticket") == 1
+        and row.get("position_identifier") == 7001
+        and row.get("price") == 2066.0
+        for event, row in partial_rows
+    ), "confirmed close audit must retain separate ticket, position identifier, and broker deal price"
 
     fail_runner = S24NoAdverseRunner(params)
     fail_runner.state = fail_runner._default_state()
@@ -3385,9 +3573,22 @@ def main() -> int:
         self_test()
         print("s24 self-test ok")
         return 0
-    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     params = load_params()
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=int(params.get("bot_log_max_bytes", 10 * 1024 * 1024)),
+        backupCount=int(params.get("bot_log_backup_count", 5)),
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
     runner_lock = acquire_runner_singleton_lock()
     if runner_lock is None:
         logging.critical("Another bot24 runner already owns the state/order namespace; refusing to start")

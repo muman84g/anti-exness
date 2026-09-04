@@ -1,0 +1,67 @@
+{
+  "schema_version": "evidence_work_state_v2",
+  "manifest_id": "bot25_virtual_core_20260903_v1",
+  "manifest_version": 1,
+  "active": true,
+  "previous_manifest": null,
+  "work_definition": {
+    "objective_id": "BOT25_VIRTUAL_CORE",
+    "user_request": "bot25は常時実ポジションを持つ必要がないため、両建てseedを疑似保有へ改善する",
+    "normal_success_path": ["freeze baseline", "implement flat-only V24 identity", "run local self-tests", "compare fixed DEV tick replay", "report no-deploy result"],
+    "normal_success_contract": {
+      "supported_entry": "a fresh flat bot25 V24 state",
+      "normal_input": "completed causal M5 decisions plus fresh XAUUSD Bid/Ask quotes",
+      "preconditions": ["owned broker inventory is flat before V23 to V24 state adoption", "entry gates pass"],
+      "main_processing": ["represent one logical core per side in state only", "open broker tickets only for frontier adds", "close every profitable real ticket on release"],
+      "required_effect": "no bilateral seed broker orders while preserving logical ratio and capacity semantics",
+      "minimum_result": "local tests pass and fixed DEV tick comparison is persisted"
+    },
+    "minimum_required_outcome": "local-only V24 candidate with fail-closed migration and DEV evidence",
+    "design_constraints": ["no CentOS deploy or restart", "no push", "no forward or reusable-evaluation tuning", "preserve lot, frontier, drought, episode, spread, and ownership safety"],
+    "permitted_stop_conditions": ["user_decision_required", "technical_blocker", "completion_no_go"],
+    "prohibited_substitutes": ["stub", "empty_or_status_only_success", "old_artifact_as_new", "bar-only profit claim"],
+    "acceptance": [
+      {"id": "ACCEPTANCE_1", "criterion": "episode start creates no real seed orders and exposes logical 1:1 core", "required_evidence": ["self-test event and broker position assertions"], "evidence": [], "status": "pending", "waiver": null},
+      {"id": "ACCEPTANCE_2", "criterion": "V23 state with real inventory cannot migrate automatically", "required_evidence": ["preflight migration test"], "evidence": [], "status": "pending", "waiver": null},
+      {"id": "ACCEPTANCE_3", "criterion": "ordered DEV comparison reports PnL PF MTM MDD and real trade counts", "required_evidence": ["fixed DEV result package"], "evidence": [], "status": "pending", "waiver": null}
+    ],
+    "authorized_scope": ["C:/botter/bot/bot25 local source, params, tests, docs", "C:/botter/backtest/dev_data/XAUUSD_tick_dev.csv read-only", "task-local work and outputs evidence"],
+    "excluded_scope": ["CentOS runtime", "deploy", "restart", "git push", "leakcheck", "forward", "broker state mutation"],
+    "no_change_boundaries": ["magic 200025", "lot 0.01", "frontier 0.50 ATR", "max logical side 6", "ratio 3:1", "12 hour episode", "120 minute drought"],
+    "authority": "user-authorized local behavior improvement only",
+    "required_confirmations": [{"id": "DEPLOY_APPROVAL", "status": "pending", "authority": "user", "evidence": []}],
+    "comparison_baseline_id": "BASELINE_1",
+    "evidence_manifest_id": "EVIDENCE_1",
+    "evidence_manifest_completeness": "unproven",
+    "audit_scope_ids": ["SCOPE_REQUIREMENTS", "SCOPE_RELEASE"],
+    "audit_angle_ids": ["AUDIT_STRUCTURAL", "AUDIT_RELEASE"],
+    "history": [{"version": 1, "changed_at": "2026-09-03T03:34:18Z", "reason": "initial freeze"}]
+  },
+  "risk": {"class": "high", "rationale": "changes live-order admission and inventory lifecycle even though deployment is excluded", "dimensions": ["live_order_behavior", "state_migration", "write_recoverability"], "lowering_evidence": []},
+  "execution_budget": {"execution_mode": "direct_serial", "rationale": "one stateful ordered tick recurrence must remain serial", "max_delegated_jobs": 0, "planned_audit_angle_ids": ["AUDIT_STRUCTURAL", "AUDIT_RELEASE"], "same_root_cause_local_batch_limit": 2, "evidence_budget": "baseline plus implementation snapshot plus self-test and one fixed DEV base/stress comparison", "approximate_cost": "one full 21.3M-row DEV load and two serial numba replays", "delegation_plan": [], "replan_triggers": ["two_nonprogress_correction_batches", "material_scope_or_identity_change"]},
+  "time_estimate": {"range": "45-120 minutes", "confidence": "medium", "critical_path": ["migration-safe implementation", "full DEV tick replay"], "high_cost_steps": ["DEV tick load and replay"], "external_waits": [], "next_checkpoint": "after self-test and sanity replay", "user_deadline": null, "history": [{"version": 1, "estimated_at": "2026-09-03T03:34:18Z", "range": "45-120 minutes", "confidence": "medium", "critical_path": ["migration-safe implementation", "full DEV tick replay"], "reason": "initial estimate", "next_checkpoint": "after self-test and sanity replay"}]},
+  "plan": {"task_class": "planned_maintenance_or_migration", "implementation_completeness_gate": "pending", "packages": [
+    {"id": "WP_1", "task_class": "planned_maintenance_or_migration", "objective_ids": ["BOT25_VIRTUAL_CORE"], "acceptance_ids": ["ACCEPTANCE_1", "ACCEPTANCE_2"], "purpose": "implement and test V24 virtual bilateral core", "owner": "parent", "inputs": ["baseline_v1"], "outputs": ["local bot25 source and docs"], "risk": "high", "dependencies": [], "completion_evidence": [], "state": "in_progress", "blocker": null, "next_check": "self-test"},
+    {"id": "WP_2", "task_class": "planned_maintenance_or_migration", "objective_ids": ["BOT25_VIRTUAL_CORE"], "acceptance_ids": ["ACCEPTANCE_3"], "purpose": "fixed V23 vs V24 DEV comparison", "owner": "parent", "inputs": ["XAUUSD_tick_dev.csv"], "outputs": ["fixed DEV result package"], "risk": "medium", "dependencies": ["WP_1"], "completion_evidence": [], "state": "pending", "blocker": null, "next_check": "sanity replay"}
+  ]},
+  "baseline": {"id": "BASELINE_1", "captured_at": "2026-09-03T03:34:18Z", "fingerprint": "33287fda31cffe43ecad9e36e8cdacf6b60a55bb2367faf1c04fc6892193ac33", "layers": {
+    "source": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py", "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"}], "reason": "immutable task-local copy"},
+    "artifacts": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/README.md", "sha256": "1669107e5ed39282a9c9f8363d30e082a00ac9dbcd2ab1b49356b3b276fc6555"}], "reason": "immutable task-local copies"},
+    "configuration": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/s25_params.json", "sha256": "e740df8c99c5a486cbf7eef034897b9cee7a92498a5486c6bd4a1b307073afaa"}], "reason": "configuration frozen"},
+    "dependencies": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/SOURCE_BACKTEST.md", "sha256": "80755371c569d2803c4085720c486819f8c21601f80c4a7b463eff0755aaafef"}], "reason": "existing dependency mapping retained"},
+    "toolchain": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py", "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"}], "reason": "baseline self-test passed before edit; command retained in task log"},
+    "runtime": {"status": "unproven", "required_for_release": false, "evidence": [], "reason": "CentOS runtime intentionally not inspected or changed in this implementation phase"},
+    "persistence": {"status": "not_applicable", "required_for_release": false, "evidence": [], "reason": "no external persistence mutation"},
+    "gui_or_external": {"status": "not_applicable", "required_for_release": false, "evidence": [], "reason": "no external action"},
+    "behavior": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/SOURCE_BACKTEST.md", "sha256": "80755371c569d2803c4085720c486819f8c21601f80c4a7b463eff0755aaafef"}], "reason": "current bilateral seed behavior reproduced before edit"},
+    "tests": {"status": "captured", "required_for_release": true, "evidence": [{"path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py", "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"}], "reason": "python live_s25_bot.py --self-test passed before edit"}
+  }, "supplements": []},
+  "implementation": {"snapshot_id": null, "frozen_at": null, "candidate_manifest": {}, "known_omissions": ["no deployment", "no reusable evaluation"], "unproven_layers": ["CentOS runtime"]},
+  "audits": {"early": {"status": "pending", "target_id": null, "angle_ids": ["AUDIT_STRUCTURAL"], "evidence": [], "limitations": [], "later_evidence_state": "unproven", "test_transition_permission": "prohibited", "scope_redetermination": null}, "final": {"status": "pending", "target_id": null, "angle_ids": ["AUDIT_RELEASE"], "evidence": [], "limitations": [], "later_evidence_state": "pending", "test_transition_permission": "not_applicable", "scope_redetermination": null}, "low_risk_omission": null},
+  "tests": {"target_snapshot_id": null, "identity_gate": "pending", "partitions": [], "evidence_bridges": []},
+  "findings": [],
+  "correction_ledger": {"batches": [], "convergence_state": "not_started"},
+  "external_action": {"applicable": false, "target": null, "authority": null, "approval_evidence": [], "action": null, "expected_effects": [], "side_effects": [], "idempotency": null, "pre_action_audit": "not_applicable", "pre_action_evidence": [], "fresh_state": null, "guard_or_cas": null, "planned_execution": null, "maximum_attempts": 0, "attempts": 0, "original_action_result": "not_run", "post_action_verification": null, "recovery": null},
+  "release": {"candidate_id": null, "candidate_manifest": {}, "decision": "pending", "decision_target": "local candidate only", "reasons": [], "residual_risks": ["existing live V23 inventory must be flat before any future switch"]},
+  "final_report": {"status": "continue", "objective_result": "pending", "acceptance_disposition": {"ACCEPTANCE_1": "pending", "ACCEPTANCE_2": "pending", "ACCEPTANCE_3": "pending"}, "identity_summary": "pending", "budget_time_variance": "pending", "implementation_summary": "pending", "validation_summary": "pending", "correction_convergence": "pending", "external_action_summary": "no external action authorized", "final_audit_summary": "pending", "residual_risk_disposition": "pending", "evidence_summary": [], "limitations": [], "removed_behavior": [], "preservation_evidence": []}
+}

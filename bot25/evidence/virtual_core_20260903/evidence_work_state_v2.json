@@ -1,0 +1,594 @@
+{
+    "schema_version": "evidence_work_state_v2",
+    "manifest_id": "bot25_virtual_core_20260903_v1",
+    "manifest_version": 2,
+    "active": true,
+    "previous_manifest": {
+        "path": "bot/bot25/evidence/virtual_core_20260903/evidence_work_state_v1.json",
+        "sha256": "25223a88aa9d2b98843cfccf088f40bcab5f279731961c7ecd7468cdd7a8f398",
+        "manifest_version": 1
+    },
+    "work_definition": {
+        "objective_id": "BOT25_VIRTUAL_CORE",
+        "user_request": "bot25\u306f\u5e38\u6642\u5b9f\u30dd\u30b8\u30b7\u30e7\u30f3\u3092\u6301\u3064\u5fc5\u8981\u304c\u306a\u3044\u305f\u3081\u3001\u4e21\u5efa\u3066seed\u3092\u7591\u4f3c\u4fdd\u6709\u3078\u6539\u5584\u3059\u308b",
+        "normal_success_path": [
+            "freeze baseline",
+            "implement flat-only V24 identity",
+            "run local self-tests",
+            "compare fixed DEV tick replay",
+            "report no-deploy result"
+        ],
+        "normal_success_contract": {
+            "supported_entry": "a fresh flat bot25 V24 state",
+            "normal_input": "completed causal M5 decisions plus fresh XAUUSD Bid/Ask quotes",
+            "preconditions": [
+                "owned broker inventory is flat before V23 to V24 state adoption",
+                "entry gates pass"
+            ],
+            "main_processing": [
+                "represent one logical core per side in state only",
+                "open broker tickets only for frontier adds",
+                "close every profitable real ticket on release"
+            ],
+            "required_effect": "no bilateral seed broker orders while preserving logical ratio and capacity semantics",
+            "minimum_result": "local tests pass and fixed DEV tick comparison is persisted"
+        },
+        "minimum_required_outcome": "local-only V24 candidate with fail-closed migration and DEV evidence",
+        "design_constraints": [
+            "no CentOS deploy or restart",
+            "no push",
+            "no forward or reusable-evaluation tuning",
+            "preserve lot, frontier, drought, episode, spread, and ownership safety"
+        ],
+        "permitted_stop_conditions": [
+            "user_decision_required",
+            "technical_blocker",
+            "completion_no_go"
+        ],
+        "prohibited_substitutes": [
+            "stub",
+            "empty_or_status_only_success",
+            "old_artifact_as_new",
+            "bar-only profit claim"
+        ],
+        "acceptance": [
+            {
+                "id": "ACCEPTANCE_1",
+                "criterion": "episode start creates no real seed orders and exposes logical 1:1 core",
+                "required_evidence": [
+                    "self-test event and broker position assertions"
+                ],
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/test_evidence_v1.txt",
+                        "sha256": "abb56d9e7c3c771ea3c4eaca09e9e2ad98b4450644b5a3c63bf5934ad35e5e82"
+                    }
+                ],
+                "status": "passed",
+                "waiver": null
+            },
+            {
+                "id": "ACCEPTANCE_2",
+                "criterion": "V23 state with real inventory cannot migrate automatically",
+                "required_evidence": [
+                    "preflight migration test"
+                ],
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/test_evidence_v1.txt",
+                        "sha256": "abb56d9e7c3c771ea3c4eaca09e9e2ad98b4450644b5a3c63bf5934ad35e5e82"
+                    }
+                ],
+                "status": "passed",
+                "waiver": null
+            },
+            {
+                "id": "ACCEPTANCE_3",
+                "criterion": "ordered DEV comparison reports PnL PF MTM MDD and real trade counts",
+                "required_evidence": [
+                    "fixed DEV result package"
+                ],
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md",
+                        "sha256": "fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+                    }
+                ],
+                "status": "passed",
+                "waiver": null
+            }
+        ],
+        "authorized_scope": [
+            "C:/botter/bot/bot25 local source, params, tests, docs",
+            "C:/botter/backtest/dev_data/XAUUSD_tick_dev.csv read-only",
+            "task-local work and outputs evidence"
+        ],
+        "excluded_scope": [
+            "CentOS runtime",
+            "deploy",
+            "restart",
+            "git push",
+            "leakcheck",
+            "forward",
+            "broker state mutation"
+        ],
+        "no_change_boundaries": [
+            "magic 200025",
+            "lot 0.01",
+            "frontier 0.50 ATR",
+            "max logical side 6",
+            "ratio 3:1",
+            "12 hour episode",
+            "120 minute drought"
+        ],
+        "authority": "user-authorized local behavior improvement only",
+        "required_confirmations": [
+            {
+                "id": "DEPLOY_APPROVAL",
+                "status": "pending",
+                "authority": "user",
+                "evidence": []
+            }
+        ],
+        "comparison_baseline_id": "BASELINE_1",
+        "evidence_manifest_id": "EVIDENCE_1",
+        "evidence_manifest_completeness": "complete",
+        "audit_scope_ids": [
+            "SCOPE_REQUIREMENTS",
+            "SCOPE_RELEASE"
+        ],
+        "audit_angle_ids": [
+            "AUDIT_STRUCTURAL",
+            "AUDIT_RELEASE"
+        ],
+        "history": [
+            {
+                "version": 1,
+                "changed_at": "2026-09-03T03:34:18Z",
+                "reason": "initial freeze"
+            },
+            {
+                "version": 2,
+                "changed_at": "2026-09-03T10:45:00Z",
+                "reason": "local implementation and DEV validation complete"
+            }
+        ]
+    },
+    "risk": {
+        "class": "high",
+        "rationale": "changes live-order admission and inventory lifecycle even though deployment is excluded",
+        "dimensions": [
+            "live_order_behavior",
+            "state_migration",
+            "write_recoverability"
+        ],
+        "lowering_evidence": []
+    },
+    "execution_budget": {
+        "execution_mode": "direct_serial",
+        "rationale": "one stateful ordered tick recurrence must remain serial",
+        "max_delegated_jobs": 0,
+        "planned_audit_angle_ids": [
+            "AUDIT_STRUCTURAL",
+            "AUDIT_RELEASE"
+        ],
+        "same_root_cause_local_batch_limit": 2,
+        "evidence_budget": "baseline plus implementation snapshot plus self-test and one fixed DEV base/stress comparison",
+        "approximate_cost": "one full 21.3M-row DEV load and two serial numba replays",
+        "delegation_plan": [],
+        "replan_triggers": [
+            "two_nonprogress_correction_batches",
+            "material_scope_or_identity_change"
+        ]
+    },
+    "time_estimate": {
+        "range": "45-120 minutes",
+        "confidence": "medium",
+        "critical_path": [
+            "migration-safe implementation",
+            "full DEV tick replay"
+        ],
+        "high_cost_steps": [
+            "DEV tick load and replay"
+        ],
+        "external_waits": [],
+        "next_checkpoint": "after self-test and sanity replay",
+        "user_deadline": null,
+        "history": [
+            {
+                "version": 1,
+                "estimated_at": "2026-09-03T03:34:18Z",
+                "range": "45-120 minutes",
+                "confidence": "medium",
+                "critical_path": [
+                    "migration-safe implementation",
+                    "full DEV tick replay"
+                ],
+                "reason": "initial estimate",
+                "next_checkpoint": "after self-test and sanity replay"
+            }
+        ]
+    },
+    "plan": {
+        "task_class": "planned_maintenance_or_migration",
+        "implementation_completeness_gate": "passed",
+        "packages": [
+            {
+                "id": "WP_1",
+                "task_class": "planned_maintenance_or_migration",
+                "objective_ids": [
+                    "BOT25_VIRTUAL_CORE"
+                ],
+                "acceptance_ids": [
+                    "ACCEPTANCE_1",
+                    "ACCEPTANCE_2"
+                ],
+                "purpose": "implement and test V24 virtual bilateral core",
+                "owner": "parent",
+                "inputs": [
+                    "baseline_v1"
+                ],
+                "outputs": [
+                    "local bot25 source and docs"
+                ],
+                "risk": "high",
+                "dependencies": [],
+                "completion_evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/test_evidence_v1.txt",
+                        "sha256": "abb56d9e7c3c771ea3c4eaca09e9e2ad98b4450644b5a3c63bf5934ad35e5e82"
+                    }
+                ],
+                "state": "completed",
+                "blocker": null,
+                "next_check": "none"
+            },
+            {
+                "id": "WP_2",
+                "task_class": "planned_maintenance_or_migration",
+                "objective_ids": [
+                    "BOT25_VIRTUAL_CORE"
+                ],
+                "acceptance_ids": [
+                    "ACCEPTANCE_3"
+                ],
+                "purpose": "fixed V23 vs V24 DEV comparison",
+                "owner": "parent",
+                "inputs": [
+                    "XAUUSD_tick_dev.csv"
+                ],
+                "outputs": [
+                    "fixed DEV result package"
+                ],
+                "risk": "medium",
+                "dependencies": [
+                    "WP_1"
+                ],
+                "completion_evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md",
+                        "sha256": "fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+                    }
+                ],
+                "state": "completed",
+                "blocker": null,
+                "next_check": "none"
+            }
+        ]
+    },
+    "baseline": {
+        "id": "BASELINE_1",
+        "captured_at": "2026-09-03T03:34:18Z",
+        "fingerprint": "33287fda31cffe43ecad9e36e8cdacf6b60a55bb2367faf1c04fc6892193ac33",
+        "layers": {
+            "source": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py",
+                        "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"
+                    }
+                ],
+                "reason": "immutable task-local copy"
+            },
+            "artifacts": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/README.md",
+                        "sha256": "1669107e5ed39282a9c9f8363d30e082a00ac9dbcd2ab1b49356b3b276fc6555"
+                    }
+                ],
+                "reason": "immutable task-local copies"
+            },
+            "configuration": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/s25_params.json",
+                        "sha256": "e740df8c99c5a486cbf7eef034897b9cee7a92498a5486c6bd4a1b307073afaa"
+                    }
+                ],
+                "reason": "configuration frozen"
+            },
+            "dependencies": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/SOURCE_BACKTEST.md",
+                        "sha256": "80755371c569d2803c4085720c486819f8c21601f80c4a7b463eff0755aaafef"
+                    }
+                ],
+                "reason": "existing dependency mapping retained"
+            },
+            "toolchain": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py",
+                        "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"
+                    }
+                ],
+                "reason": "baseline self-test passed before edit; command retained in task log"
+            },
+            "runtime": {
+                "status": "unproven",
+                "required_for_release": false,
+                "evidence": [],
+                "reason": "CentOS runtime intentionally not inspected or changed in this implementation phase"
+            },
+            "persistence": {
+                "status": "not_applicable",
+                "required_for_release": false,
+                "evidence": [],
+                "reason": "no external persistence mutation"
+            },
+            "gui_or_external": {
+                "status": "not_applicable",
+                "required_for_release": false,
+                "evidence": [],
+                "reason": "no external action"
+            },
+            "behavior": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/SOURCE_BACKTEST.md",
+                        "sha256": "80755371c569d2803c4085720c486819f8c21601f80c4a7b463eff0755aaafef"
+                    }
+                ],
+                "reason": "current bilateral seed behavior reproduced before edit"
+            },
+            "tests": {
+                "status": "captured",
+                "required_for_release": true,
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/baseline_v1/live_s25_bot.py",
+                        "sha256": "0a3ed36dbb80539f2f48a298ebf14ba817d40c21a3d437535ea788156fe691f9"
+                    }
+                ],
+                "reason": "python live_s25_bot.py --self-test passed before edit"
+            }
+        },
+        "supplements": []
+    },
+    "implementation": {
+        "snapshot_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+        "frozen_at": "2026-09-03T10:45:00Z",
+        "candidate_manifest": {
+            "bot/bot25/live_s25_bot.py": "69406de3f3f61cddcbb7b7c218c8399ddbc6dd96b1b737339fde000c91000d52",
+            "bot/bot25/s25_params.json": "9e6c8f7690a320849f877c7f9b3691720f4ea232cfae3fe4451cb0e76117b5f0",
+            "bot/bot25/SOURCE_BACKTEST.md": "33d38fc120145b839c25166f1b30f38379303cf7045a072ef896533abbfb2f60",
+            "bot/bot25/README.md": "47e2af8697c644782dfa78c508a1333954685573613e3e6ea7b25c0b5acf514b",
+            "bot/bot25/PORTING_AUDIT.md": "2df64e15659b5ae7412dd53eafb23a471800ce138d264e09b66cdfd8f9e93144",
+            "bot/bot25/LOG_SCHEMA.md": "2f2a0392599953648a5a7a9a8cfc33746b160daa59e15ebaaa1cf346340a85e9",
+            "bot/bot25/V24_VIRTUAL_CORE_SPEC.md": "6bf4f10ee6efcfb86a3f7129095009e20404e0a90bf5abcc8f13117a029f65e5",
+            "bot/bot25/shadow_state_tagger.py": "ed42f4483c0a17a3e4d4d758d853870cbd7caf673752d3a432c79f7073acaf7d"
+        },
+        "known_omissions": [
+            "no deployment",
+            "no reusable evaluation"
+        ],
+        "unproven_layers": [
+            "CentOS runtime",
+            "broker commission swap and rejection"
+        ]
+    },
+    "audits": {
+        "early": {
+            "status": "passed",
+            "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+            "angle_ids": [
+                "AUDIT_STRUCTURAL"
+            ],
+            "evidence": [
+                {
+                    "path": "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md",
+                    "sha256": "fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+                }
+            ],
+            "limitations": [
+                "no real runtime mutation"
+            ],
+            "later_evidence_state": "complete",
+            "test_transition_permission": "allowed",
+            "scope_redetermination": null
+        },
+        "final": {
+            "status": "passed",
+            "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+            "angle_ids": [
+                "AUDIT_RELEASE"
+            ],
+            "evidence": [
+                {
+                    "path": "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md",
+                    "sha256": "fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+                }
+            ],
+            "limitations": [
+                "CentOS release intentionally excluded"
+            ],
+            "later_evidence_state": "complete",
+            "test_transition_permission": "not_applicable",
+            "scope_redetermination": null
+        },
+        "low_risk_omission": null
+    },
+    "tests": {
+        "target_snapshot_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+        "identity_gate": "passed",
+        "partitions": [
+            {
+                "id": "TEST_LOCAL",
+                "kind": "regression",
+                "requirement": "required",
+                "acceptance_ids": [
+                    "ACCEPTANCE_1",
+                    "ACCEPTANCE_2"
+                ],
+                "applicability_basis": "live-order behavior and migration changed",
+                "cost": "local self-test suite",
+                "evidence_owner": "parent",
+                "freshness": "current snapshot",
+                "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+                "environment": "Windows local shadow/fake executor",
+                "result": "passed",
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/test_evidence_v1.txt",
+                        "sha256": "abb56d9e7c3c771ea3c4eaca09e9e2ad98b4450644b5a3c63bf5934ad35e5e82"
+                    }
+                ],
+                "limitations": [
+                    "not CentOS"
+                ]
+            },
+            {
+                "id": "TEST_DEV",
+                "kind": "integration",
+                "requirement": "required",
+                "acceptance_ids": [
+                    "ACCEPTANCE_3"
+                ],
+                "applicability_basis": "economic and path parity claim",
+                "cost": "four full DEV replay cells",
+                "evidence_owner": "parent",
+                "freshness": "current runner and exact input hashes",
+                "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+                "environment": "Windows ordered XAUUSD DEV Bid Ask ticks",
+                "result": "passed",
+                "evidence": [
+                    {
+                        "path": "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md",
+                        "sha256": "fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+                    }
+                ],
+                "limitations": [
+                    "release and add remain completed M5 decision events"
+                ]
+            },
+            {"id": "TEST_STATIC", "kind": "static", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "covered by the regression evidence bundle rather than a separate partition", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "Windows local", "result": "not_run", "evidence": [], "limitations": ["no separate static partition"]},
+            {"id": "TEST_UNIT", "kind": "unit", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "behavior is covered by the integrated self-test", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "Windows local", "result": "not_run", "evidence": [], "limitations": ["no separate unit partition"]},
+            {"id": "TEST_BOUNDARY", "kind": "boundary", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "migration boundary is covered by the regression self-test", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "Windows local", "result": "not_run", "evidence": [], "limitations": ["no separate boundary partition"]},
+            {"id": "TEST_FAILURE", "kind": "failure_injection", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "no external executor was authorized", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["real executor failure injection excluded"]},
+            {"id": "TEST_PERSISTENCE", "kind": "persistence", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "no external persistence mutation", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["external persistence excluded"]},
+            {"id": "TEST_CONCURRENCY", "kind": "concurrency", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "runner is intentionally serial", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["no concurrent state writer"]},
+            {"id": "TEST_PACKAGE", "kind": "package", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "deployment package not authorized", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["CentOS package excluded"]},
+            {"id": "TEST_PERFORMANCE", "kind": "performance", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "latency and throughput were not acceptance criteria", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["no runtime performance claim"]},
+            {"id": "TEST_GUI", "kind": "gui", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "bot has no GUI behavior in scope", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["GUI absent"]},
+            {"id": "TEST_REAL", "kind": "real_environment", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "CentOS and broker mutation explicitly excluded", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["no CentOS or broker verification"]},
+            {"id": "TEST_RECOVERY", "kind": "recovery", "requirement": "not_applicable", "acceptance_ids": [], "applicability_basis": "no external action occurred", "cost": "none", "evidence_owner": "parent", "freshness": "current snapshot", "target_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6", "environment": "not run", "result": "not_run", "evidence": [], "limitations": ["recovery not exercised without deployment"]}
+        ],
+        "evidence_bridges": []
+    },
+    "findings": [],
+    "correction_ledger": {
+        "batches": [],
+        "convergence_state": "not_started"
+    },
+    "external_action": {
+        "applicable": false,
+        "target": null,
+        "authority": null,
+        "approval_evidence": [],
+        "action": null,
+        "expected_effects": [],
+        "side_effects": [],
+        "idempotency": null,
+        "pre_action_audit": "not_applicable",
+        "pre_action_evidence": [],
+        "fresh_state": null,
+        "guard_or_cas": null,
+        "planned_execution": null,
+        "maximum_attempts": 0,
+        "attempts": 0,
+        "original_action_result": "not_run",
+        "post_action_verification": null,
+        "recovery": null
+    },
+    "release": {
+        "candidate_id": "sha256:683b4978e8d38740910994dd3a5d50a54c5ea37c1da93254c59155707edfa1f6",
+        "candidate_manifest": {
+            "bot/bot25/live_s25_bot.py": "69406de3f3f61cddcbb7b7c218c8399ddbc6dd96b1b737339fde000c91000d52",
+            "bot/bot25/s25_params.json": "9e6c8f7690a320849f877c7f9b3691720f4ea232cfae3fe4451cb0e76117b5f0",
+            "bot/bot25/SOURCE_BACKTEST.md": "33d38fc120145b839c25166f1b30f38379303cf7045a072ef896533abbfb2f60",
+            "bot/bot25/README.md": "47e2af8697c644782dfa78c508a1333954685573613e3e6ea7b25c0b5acf514b",
+            "bot/bot25/PORTING_AUDIT.md": "2df64e15659b5ae7412dd53eafb23a471800ce138d264e09b66cdfd8f9e93144",
+            "bot/bot25/LOG_SCHEMA.md": "2f2a0392599953648a5a7a9a8cfc33746b160daa59e15ebaaa1cf346340a85e9",
+            "bot/bot25/V24_VIRTUAL_CORE_SPEC.md": "6bf4f10ee6efcfb86a3f7129095009e20404e0a90bf5abcc8f13117a029f65e5",
+            "bot/bot25/shadow_state_tagger.py": "ed42f4483c0a17a3e4d4d758d853870cbd7caf673752d3a432c79f7073acaf7d"
+        },
+        "decision": "operation_no_go",
+        "decision_target": "local candidate complete and CentOS operation excluded",
+        "reasons": [
+            "local tests and DEV structural comparison passed",
+            "deployment and runtime migration lack authorization"
+        ],
+        "residual_risks": [
+            "existing live V23 inventory must be flat before any future switch",
+            "real broker costs and execution remain unverified"
+        ]
+    },
+    "final_report": {
+        "status": "operation_no_go",
+        "objective_result": "local implementation and DEV validation complete",
+        "acceptance_disposition": {
+            "ACCEPTANCE_1": "passed",
+            "ACCEPTANCE_2": "passed",
+            "ACCEPTANCE_3": "passed"
+        },
+        "identity_summary": "BOT25_V24_SNAPSHOT_1 hash-bound source and params",
+        "budget_time_variance": "two display-only failed run folders retained before complete v4",
+        "implementation_summary": "physical bilateral seeds replaced by logical virtual cores",
+        "validation_summary": "syntax self-test passive tests static invariants and DEV accounting passed",
+        "correction_convergence": "converged after two display-only corrections",
+        "external_action_summary": "no external action authorized or performed",
+        "final_audit_summary": "local PASS; operation NO-GO",
+        "residual_risk_disposition": "defer deployment until flat V23 and explicit approval",
+        "evidence_summary": [
+            "bot/bot25/evidence/virtual_core_20260903/final_audit_v1.md sha256=fb532d34b57b86edd234fa95facfbe380177a669524d65db97ad8acf22548b66"
+        ],
+        "limitations": [
+            "no CentOS runtime test",
+            "no reusable evaluation"
+        ],
+        "removed_behavior": [
+            "physical LONG and SHORT seed orders",
+            "physical best-price core protection"
+        ],
+        "preservation_evidence": [
+            {
+                "path": "bot/bot25/evidence/virtual_core_20260903/test_evidence_v1.txt",
+                "sha256": "abb56d9e7c3c771ea3c4eaca09e9e2ad98b4450644b5a3c63bf5934ad35e5e82"
+            }
+        ]
+    }
+}

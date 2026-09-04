@@ -1,5 +1,21 @@
 # Source Backtest
 
+## Bot24 execution evidence and bounded logging (2026-09-03 local correction)
+
+- The mandatory execution ledger now uses a bot24-specific 29-column schema
+  with lane/magic, opportunity/basket, separate ticket/position/deal identities,
+  entry/exit prices and causal event/release/available/decision/executable clocks.
+- Core is recorded as lane 1 / magic `200024`; the independent v206 strategy is
+  recorded as lane 206 / magic `240206`. This keeps simultaneous independent
+  entries distinguishable without changing their signal or lifecycle rules.
+- Repeated synchronization/data diagnostics are summarized on a bounded cadence,
+  and `s24_bot.log` uses 10 MiB size rotation with five backups.
+- This is evidence/operations hardening only. Signal conditions, entry timing,
+  lots, capacity, TP/SL, holds, cooldowns, routing and broker commands are unchanged.
+- The repository's prior self-test fixture rows and diagnostic log were not live
+  history. The canonical upload files were reset to a header-only execution CSV
+  and an empty process log before validation.
+
 ## Added independent v206 lane (2026-09-01 local implementation)
 
 - Frozen candidate: `man_237_v206 / path_monotonic_center_approach`.

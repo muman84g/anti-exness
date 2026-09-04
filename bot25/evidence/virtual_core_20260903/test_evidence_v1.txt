@@ -1,0 +1,8 @@
+python_compile=PASS
+live_s25_bot_self_test=PASS
+passive_evidence_test=PASS
+static_virtual_core_invariants=PASS
+dev_v4_artifact_and_accounting_validation=PASS
+dev_v4_equity_visual_check=PASS
+reusable_evaluation_used=false
+external_action_performed=false

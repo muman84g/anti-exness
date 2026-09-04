@@ -60,7 +60,8 @@ started:
 
 Signal-stop reasons distinguish session, spread, unavailable features, volume,
 impulse, breakout, stale, cooldown, capacity, opposite-side inventory and add
-threshold. Existing `logs/s24_trades.csv` keeps its original schema.
+threshold. The mandatory `logs/s24_trades.csv` uses the bot24 29-column
+execution-evidence schema documented below; passive CSV files remain separate.
 
 Both core and runner use `exit_clock=confirmed_m1`. This is a bot24 strategy
 contract, not a shared default for other bots.
@@ -292,8 +293,11 @@ manual archive/recovery. Once a path has been validated or created by the
 process, its later disappearance also fails closed instead of creating a fresh
 history. This catches runtime deletion or replacement after startup validation.
 Full-width rows are also checked as execution evidence: UTC timestamp, event,
-strategy and symbol identities, live flag, optional signal timestamp, side,
-ticket and numeric fields must be structurally valid. The row about to be
+strategy, lane, magic and symbol identities, live flag, causal event/release/
+available/decision/executable clocks, separate ticket/position/deal identities,
+optional signal timestamp, side and numeric fields must be structurally valid.
+Core rows identify lane 1 / magic 200024 and v206 rows identify lane 206 / magic
+240206. The row about to be
 appended is checked before the file is opened, so an internally malformed event
 cannot be written and discovered only on the following poll.
 After a mandatory execution row is written, the file is flushed and fsynced
@@ -309,6 +313,10 @@ is rejected instead of recreating or appending to unverified evidence.
 An absent execution CSV may be created with its canonical header on the first
 row. An already-existing zero-byte file is instead treated as lost/corrupt
 evidence and fails closed; it is never silently reinitialized as a new history.
+The process log uses size-based rotation at 10 MiB with five backups. Repeating
+data/synchronization diagnostics are coalesced and summarized every 300 seconds,
+preventing a persistent outage from growing `s24_bot.log` without bound while
+retaining the first event and repeat count.
 
 The bridge compiles with `OPEN_R1`,
 `REPAIR_R1`, and `CLOSE_R1` at 0 errors / 0 warnings. Its response envelope,

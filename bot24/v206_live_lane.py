@@ -411,6 +411,16 @@ class V206LiveLane:
         self.runner._save_state()
 
     def _log(self, event: str, **kwargs: Any) -> None:
+        st = self.state
+        pending = st.get("pending_open") or st.get("pending_signal") or {}
+        if isinstance(pending, dict) and pending.get("opportunity_id"):
+            kwargs.setdefault("opportunity_id", str(pending["opportunity_id"]))
+        basket = st.get("basket") or []
+        if isinstance(basket, list) and len(basket) == 1 and isinstance(basket[0], dict):
+            row = basket[0]
+            kwargs.setdefault("ticket", row.get("ticket", ""))
+            kwargs.setdefault("position_identifier", row.get("position_identifier", ""))
+            kwargs.setdefault("entry_price", row.get("entry_price", ""))
         try:
             self.runner._trade_row(event, self.cfg, **kwargs)
         except Exception:
@@ -912,6 +922,8 @@ class V206LiveLane:
                 st["close_retry_after_utc"] = None
                 self._save()
                 self._log("v206_close_submitted", ticket=int(live.ticket), side=state_pos.get("side"), lot=result.lot,
+                          position_identifier=live_identifier, deal_id=int(result.deal),
+                          entry_price=float(state_pos.get("entry_price") or 0.0), exit_price=result.close_price,
                           price=result.close_price, profit=result.profit, reason="timeout_30m", signal_bar_time=state_pos.get("signal_bar_time"), note=result.raw_response)
                 return False
             return True
@@ -950,8 +962,11 @@ class V206LiveLane:
             self._block("v206_close_deal_invalid", ticket=identifier)
             return False
         reason = str((st.get("pending_close") or {}).get("reason") or "server_sl_tp_or_external_close")
-        self._log("v206_close_confirmed", ticket=identifier, side=state_pos.get("side"), lot=state_pos.get("lot"),
-                  price=float(deal.price), profit=float(deal.net_profit), reason=reason, signal_bar_time=state_pos.get("signal_bar_time"), note=f"deal={int(deal.deal)}")
+        self._log("v206_close_confirmed", ticket=int(state_pos.get("ticket") or 0), position_identifier=identifier,
+                  deal_id=int(deal.deal), side=state_pos.get("side"), lot=state_pos.get("lot"),
+                  entry_price=float(state_pos.get("entry_price") or 0.0), exit_price=float(deal.price),
+                  price=float(deal.price), profit=float(deal.net_profit), reason=reason,
+                  signal_bar_time=state_pos.get("signal_bar_time"), note=f"deal={int(deal.deal)}")
         st["basket"] = []
         st["pending_close"] = None
         st["close_retry_after_utc"] = None
@@ -1300,7 +1315,11 @@ class V206LiveLane:
                 st["entry_permission_reject_count"] = 0
             if result.status == "CONFIRMED" and not self.state.get("blocked_reason"):
                 st["last_decision"] = {"signal_bar_time": pending["signal_bar_time"], "outcome": "entry_confirmed"}
-                self._log("v206_entry_confirmed", ticket=result.ticket, side=pending["side"], lot=float(self.cfg["lot"]), price=result.fill, signal_bar_time=pending["signal_bar_time"], note=result.raw_response)
+                self._log("v206_entry_confirmed", opportunity_id=pending["opportunity_id"], ticket=result.ticket,
+                          position_identifier=result.identifier, deal_id=result.deal, side=pending["side"],
+                          lot=float(self.cfg["lot"]), entry_price=result.fill, price=result.fill,
+                          signal_bar_time=pending["signal_bar_time"], executable_at=datetime.fromtimestamp(result.open_time, UTC).isoformat(),
+                          note=result.raw_response)
                 self._save()
             return
         self._block("v206_open_response_ambiguous", raw=result.raw_response, opportunity_id=pending["opportunity_id"])

@@ -1322,13 +1322,30 @@ class S24SafetyRegressionTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), before)
 
     def test_trade_csv_semantically_invalid_full_width_rows_are_rejected(self):
+        def trade_row(**overrides):
+            row = {
+                "timestamp_utc": "2026-01-01T00:00:00+00:00",
+                "event": "entry",
+                "strategy_id": "visual_no_adverse_c_target16",
+                "lane_id": "1",
+                "magic": "200024",
+                "symbol": "XAUUSD",
+                "mt5_symbol": "XAUUSD",
+                "side": "LONG",
+                "lot": "0.01",
+                "entry_price": "2000",
+                "live": "True",
+            }
+            row.update(overrides)
+            return [row.get(name, "") for name in s24.TRADE_FIELDS]
+
         invalid_rows = [
             list(s24.TRADE_FIELDS),
-            ["not-a-timestamp", "entry", "visual_no_adverse_c_target16", "XAUUSD", "XAUUSD", "", "LONG", "0.01", "2000", "", "", "", "True", ""],
-            ["2026-01-01T00:00:00+00:00", "", "visual_no_adverse_c_target16", "XAUUSD", "XAUUSD", "", "", "", "", "", "", "", "True", ""],
-            ["2026-01-01T00:00:00+00:00", "entry", "", "XAUUSD", "XAUUSD", "", "LONG", "0.01", "2000", "", "", "", "True", ""],
-            ["2026-01-01T00:00:00+00:00", "entry", "visual_no_adverse_c_target16", "", "XAUUSD", "", "LONG", "0.01", "2000", "", "", "", "True", ""],
-            ["2026-01-01T00:00:00+00:00", "entry", "visual_no_adverse_c_target16", "XAUUSD", "XAUUSD", "", "LONG", "0.01", "2000", "", "", "", "maybe", ""],
+            trade_row(timestamp_utc="not-a-timestamp"),
+            trade_row(event=""),
+            trade_row(strategy_id=""),
+            trade_row(symbol=""),
+            trade_row(live="maybe"),
         ]
         for invalid_row in invalid_rows:
             with self.subTest(row=invalid_row), tempfile.TemporaryDirectory() as root:
@@ -1365,6 +1382,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
                     "timestamp_utc": "2026-01-01T00:00:00+00:00",
                     "event": "entry_skip",
                     "strategy_id": "visual_no_adverse_c_target16",
+                    "lane_id": 1,
+                    "magic": 200024,
                     "symbol": "XAUUSD",
                     "mt5_symbol": "XAUUSD",
                     "live": False,
@@ -1383,6 +1402,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
             "timestamp_utc": "2026-01-01T00:00:00+00:00",
             "event": "entry_skip",
             "strategy_id": "visual_no_adverse_c_target16",
+            "lane_id": "1",
+            "magic": "200024",
             "symbol": "XAUUSD",
             "mt5_symbol": "XAUUSD",
             "live": "False",
@@ -1418,6 +1439,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
             "timestamp_utc": "2026-01-01T00:00:00+00:00",
             "event": "entry_skip",
             "strategy_id": "visual_no_adverse_c_target16",
+            "lane_id": 1,
+            "magic": 200024,
             "symbol": "XAUUSD",
             "mt5_symbol": "XAUUSD",
             "live": False,
@@ -1443,6 +1466,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
             "timestamp_utc": "2026-01-01T00:00:00+00:00",
             "event": "entry_skip",
             "strategy_id": "visual_no_adverse_c_target16",
+            "lane_id": 1,
+            "magic": 200024,
             "symbol": "XAUUSD",
             "mt5_symbol": "XAUUSD",
             "live": False,
