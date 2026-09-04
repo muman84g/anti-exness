@@ -91,7 +91,7 @@ LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
 EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-legacy-query-v32"
+EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-close-claim-v33"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -379,6 +379,11 @@ _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "session_vwap_strategies": tuple(f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)),
     "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
     "q01_variance_release_strategies": ("q01_variance_release_lane_1",),
+}
+UNPUBLISHED_OPEN_ERRORS = {
+    "ERR|COMMAND_BUSY", "ERR|CLAIM_BUSY", "ERR|LOCK_TIMEOUT",
+    "ERR|WRITE_FAILED", "ERR|CLAIM_FAILED", "ERR|REQUEST_EXPIRED",
+    "ERR|RESPONSE_BUSY", "ERR|INVALID_TIMEOUT",
 }
 
 # A persisted policy id/hash pair is the generation marker for state introduced
@@ -5502,6 +5507,21 @@ class S23HorizontalInventoryRunner:
                 recoverable=False,
             )
             return False
+        flat_clear_reasons = set(FLAT_AUTO_CLEAR_SYNC_REASONS)
+        # Legacy versions persisted a definite no-submission as a permanent
+        # block. Migrate only that exact reason with its original evidence,
+        # no owned basket/close intent, and no outstanding OPEN receipt. The
+        # shared helper still requires two consecutive clean inventory reads.
+        if (
+            st.get("sync_block_reason") == "ipc_open_not_published"
+            and isinstance(st.get("sync_block_details"), dict)
+            and isinstance(st["sync_block_details"].get("error"), str)
+            and st["sync_block_details"].get("error") in UNPUBLISHED_OPEN_ERRORS
+            and not st.get("basket")
+            and not st.get("pending_close_reason")
+            and all(value is None for key, value in st.items() if key.startswith("pending_open_"))
+        ):
+            flat_clear_reasons.add("ipc_open_not_published")
         if clean_sync_block_if_flat(
             symbol_key=strat["id"],
             state=st,
@@ -5510,7 +5530,7 @@ class S23HorizontalInventoryRunner:
             save_state=self._save_state,
             options=self.safety,
             audit=lambda _symbol, event, reason: self._trade_row(event, strat, reason=reason),
-            flat_auto_clear_reasons=FLAT_AUTO_CLEAR_SYNC_REASONS,
+            flat_auto_clear_reasons=flat_clear_reasons,
             confirm_position_absent=self.executor.confirm_position_absent,
             required_flat_confirmations=(
                 3 if st.get("sync_block_reason") == "unresolved_open_action" else 2
@@ -6956,25 +6976,16 @@ class S23HorizontalInventoryRunner:
                 error = str(getattr(self.executor, "last_order_error", None) or "UNKNOWN_OPEN_FAILURE")
             else:
                 error = ""
-            if ticket is None and error in {
-                "ERR|COMMAND_BUSY",
-                "ERR|CLAIM_BUSY",
-                "ERR|LOCK_TIMEOUT",
-                "ERR|WRITE_FAILED",
-                "ERR|CLAIM_FAILED",
-                "ERR|REQUEST_EXPIRED",
-                "ERR|RESPONSE_BUSY",
-                "ERR|INVALID_TIMEOUT",
-            }:
+            if ticket is None and error in UNPUBLISHED_OPEN_ERRORS:
                 self._clear_pending_open(strat)
                 self._set_sync_block(
                     strat,
                     "ipc_open_not_published",
                     {"error": error},
-                    recoverable=False,
+                    recoverable=True,
                 )
                 self._save_state()
-                return True
+                return False
             if ticket is None and error in {
                 "ERR|ACCOUNT_IDENTITY_GUARD",
                 "ERR|ACCOUNT_MODE_GUARD",
@@ -9800,6 +9811,25 @@ class S23HorizontalInventoryRunner:
         )
         return attempted, "entry_attempted" if attempted else "entry_final_guard"
 
+    @staticmethod
+    def _retryable_unsubmitted_lane(st: dict[str, Any]) -> bool:
+        if (
+            st.get("sync_block_new_entries") is not True
+            or st.get("sync_block_recoverable") is not True
+            or any(value is not None for key, value in st.items() if key.startswith("pending_open_"))
+        ):
+            return False
+        reason = st.get("sync_block_reason")
+        if reason in ("positions_unavailable", "orders_unavailable"):
+            return True
+        details = st.get("sync_block_details")
+        error = details.get("error") if isinstance(details, dict) else None
+        return bool(
+            reason == "ipc_open_not_published"
+            and isinstance(error, str)
+            and error in UNPUBLISHED_OPEN_ERRORS
+        )
+
     def _route_opportunity(
         self,
         opportunity: dict[str, Any],
@@ -9809,6 +9839,8 @@ class S23HorizontalInventoryRunner:
         lane_readiness: dict[int, tuple[bool, str, bool]],
     ) -> tuple[int | None, str]:
         routing = self.state["routing"]
+        previous_receipt = dict(routing)
+        retryable_unsent = False
         routing["last_routed_signal_bar"] = opportunity["event_time"]
         routing["last_routed_opportunity_id"] = opportunity["opportunity_id"]
         routing["last_consumed_lane_id"] = None
@@ -9834,15 +9866,40 @@ class S23HorizontalInventoryRunner:
                 self._save_state()
                 return lane_id, prep_reason
             if not ready:
+                if self._retryable_unsubmitted_lane(self._st(strat)):
+                    retryable_unsent = True
                 self._trade_row("opportunity_noop", strat, reason=prep_reason, **fields)
                 continue
             consumed, reason = self._consume_opportunity(strat, opportunity, price_row, info, poll_time)
+            lane_state = self._st(strat)
+            if (
+                not consumed
+                and reason in {"entry_final_guard", "add_final_guard"}
+                and self._retryable_unsubmitted_lane(lane_state)
+            ):
+                retryable_unsent = True
             self._trade_row("opportunity_consumed" if consumed else "opportunity_noop", strat, reason=reason, **fields)
             if consumed:
                 routing["last_consumed_lane_id"] = lane_id
                 self._save_state()
                 return lane_id, reason
         self._trade_row("opportunity_unconsumed", primary, reason="all_lanes_noop", **fields)
+        if retryable_unsent and opportunity.get("source") == "za":
+            # Every lane returned no consumption and at least one proved a
+            # transient failure before publication. Release only this routing
+            # reservation. Next poll re-evaluates the latest confirmed bar and
+            # all current gates; it never queues an expired historical entry.
+            # A crash before this durable release leaves the reservation in
+            # place (missed opportunity, never an unproved resend).
+            for key in (
+                "last_routed_signal_bar", "last_routed_opportunity_id",
+                "last_consumed_lane_id", "last_route_decision_utc",
+            ):
+                routing[key] = previous_receipt.get(key)
+            self._trade_row(
+                "opportunity_retry_released", primary,
+                reason="transient_pre_submission_failure", **fields,
+            )
         self._save_state()
         return None, "all_lanes_noop"
 

@@ -1,5 +1,38 @@
 # Bot23 integrated inventory and independent session overlays
 
+## CLOSE claim recovery v33 (2026-09-04 local re-audit)
+
+The EA must never execute a recovered CLOSE claim again. It returns the
+correlated `ERR|CLOSE_RESULT_UNRESOLVED` receipt and leaves Python to reconcile
+the owned POSITION/CLOSEDEAL lifecycle. The Python CLOSE submission marker is
+retained across restart; the receipt is not a definitive no-fill rejection.
+Normal first-time CLOSE execution and read-only claim recovery are unchanged.
+
+EA source/binary, `EXPECTED_BRIDGE_VERSION` and `expected_bridge_version` must
+be deployed together as `2026-09-04-s23-close-claim-v33`. A v32 EA is rejected
+by the updated preflight. Compilation and local tests are not deployment proof.
+
+## Local IPC recovery correction (2026-09-04)
+
+- Correlated responses wait for EA claim cleanup within the existing response
+  timeout. A confirmed result stays confirmed if cleanup stalls; Python never
+  deletes the EA claim or publishes behind it.
+- Definitive unpublished OPEN errors clear only their new submission receipt and
+  create a recoverable inventory block, not a permanent lane disable. Unknown
+  OPEN results remain consumed and require reconciliation before any resend.
+- Legacy `ipc_open_not_published` blocks may clear after two consecutive complete
+  flat position/order queries only with an allowlisted error, no basket/close
+  intent and no pending OPEN fields. Unknown evidence remains blocked.
+- ZA routing releases a reservation only when every lane did nothing and lane
+  readiness or a final entry/add guard proves a transient pre-submission failure. The next poll checks
+  the latest confirmed bar and all current admission/staleness gates again. This
+  is not historical catch-up, a guaranteed fill, or an exemption from strategy
+  restrictions. A consuming lane or ambiguous submission retains the reservation.
+- Normal independent lane entries/adds are preserved. No strategy thresholds,
+  quantities, switches, ownership namespace or deployment files changed.
+- Tests: `test_s23_ipc_completion.py`, `test_s23_ipc_recovery.py` and the existing
+  no-order regression suite. Local tests do not prove CentOS has this version.
+
 Bridge v32 correction (2026-09-04): POSITIONS/ORDERS may read retired magic
 200023 solely for cutover inventory checks. Executable ownership remains
 230023-230044; legacy inventory is not adopted or tradable. Nonempty or failed

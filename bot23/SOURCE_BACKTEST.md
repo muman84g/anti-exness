@@ -1,5 +1,32 @@
 # Source Backtest
 
+## 2026-09-04 CLOSE claim recovery v33
+
+Operational safety correction only: an EA recovered CLOSE claim cannot call
+the trade handler again. Return `CLOSE_RESULT_UNRESOLVED` for owned position/deal
+reconciliation, preserving the Python submission marker across restart.
+The bridge protocol requirement is `2026-09-04-s23-close-claim-v33`; this does not
+change signal parameters, lane counts, lot, stop/target or the backtest mapping.
+The rebuilt EX5 and matched Python/params must be updated together. No CentOS
+deployment or integrated Forward replay is implied by local verification.
+
+## 2026-09-04 IPC recovery execution boundary
+
+This local operational correction does not change the selected signals, lane
+limits, TP/SL, timing parameters, or backtest mapping. Definite pre-submission
+IPC failures are recoverable after owned-inventory reconciliation. ZA may
+re-evaluate its latest confirmed bar after an all-lanes-noop transient final
+guard failure; it does not backfill historical ticks or assume the price of the
+original missed entry. Time-varying policy is checked at the new attempt.
+
+Ambiguous OPEN remains consumed, and pending/filled orders cannot be retried by
+this release path. The response/claim completion hand-off waits within the
+existing IPC response budget without discarding a confirmed response. These
+changes remove infrastructure-only skips; exact tick backtest fill parity is
+still limited by live polling, broker quotes, spread and execution latency.
+Local failure-injection tests are not an integrated Forward PnL rerun or runtime
+deployment proof.
+
 ## 2026-09-04 close-ledger replay durability
 
 Existing confirmed-deal replay now re-establishes file and parent-directory

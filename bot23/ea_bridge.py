@@ -222,6 +222,18 @@ class EABridgeServer:
                                     os.remove(self.res_file)
                                 except OSError:
                                     pass
+                                # A correlated response proves completion, but
+                                # the EA publishes it before clearing its claim.
+                                # Keep the IPC lock while that final hand-off
+                                # drains, within the existing response budget.
+                                # Never delete the EA claim or turn a confirmed
+                                # result into TIMEOUT: a stuck claim must still
+                                # block the next request without losing this fill.
+                                while os.path.exists(self.claim_file):
+                                    remaining = wait_deadline - time.monotonic()
+                                    if remaining <= 0:
+                                        break
+                                    time.sleep(min(0.01, remaining))
                                 return finish(res[len(prefix):-len(suffix)])
                         except OSError:
                             time.sleep(0.05)

@@ -8550,7 +8550,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                 runner.executor = executor
                 opportunity, row, poll_time, info = sample_opportunity()
                 with patch.object(live_s23_bot, "utc_now", return_value=poll_time.to_pydatetime()):
-                    self.assertTrue(
+                    self.assertFalse(
                         runner._open_entry(
                             strategy, "LONG", row, info, basket_atr30=2.5,
                             execution_time=poll_time, opportunity=opportunity,
@@ -8559,7 +8559,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                     )
                 self.assertIsNone(state["pending_open_opportunity_id"])
                 self.assertEqual(state["sync_block_reason"], "ipc_open_not_published")
-                self.assertFalse(state["sync_block_recoverable"])
+                self.assertTrue(state["sync_block_recoverable"])
 
     def test_live_open_fails_closed_when_post_reservation_inventory_query_fails(self):
         for unavailable_query in ("positions", "orders"):

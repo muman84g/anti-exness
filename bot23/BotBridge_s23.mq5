@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-09-04-s23-legacy-query-v32"
+#define BRIDGE_VERSION "2026-09-04-s23-close-claim-v33"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -925,6 +925,7 @@ void OnTimer()
    bool request_expired = deadline_msc <= 0 ||
       ((long)TimeGMT()) >= deadline_msc / 1000;
    bool recovered_open = recovered_claim && StringFind(command, "OPEN|") == 0;
+   bool recovered_close = recovered_claim && StringFind(command, "CLOSE|") == 0;
    if(recovered_claim && ReadCommand() == envelope)
    {
       ClearCommand();
@@ -937,6 +938,15 @@ void OnTimer()
    if(recovered_open)
    {
       if(WriteResponse("RES|" + request_id + "|ERR|OPEN_RESULT_UNRESOLVED|ENDRES"))
+         ClearClaim();
+      return;
+   }
+   if(recovered_close)
+   {
+      // Claim persistence precedes CTrade. After an interrupted execution or
+      // failed response/cleanup we cannot prove whether CLOSE already ran.
+      // Never execute it again; Python must reconcile POSITION/CLOSEDEAL.
+      if(WriteResponse("RES|" + request_id + "|ERR|CLOSE_RESULT_UNRESOLVED|ENDRES"))
          ClearClaim();
       return;
    }
