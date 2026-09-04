@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-09-04-s23-strict-ipc-q01-v31"
+#define BRIDGE_VERSION "2026-09-04-s23-legacy-query-v32"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -299,6 +299,12 @@ bool ValidHistoryNumericFields(string &parts[], const int count)
 bool IsOwnedMagic(const long magic)
 {
    return magic >= 230023 && magic <= 230044;
+}
+
+bool IsInventoryQueryMagic(const long magic)
+{
+   // Retired inventory must be visible to cutover preflight, not tradable.
+   return IsOwnedMagic(magic) || magic == 200023;
 }
 
 string HandleCommand(const string command)
@@ -631,7 +637,7 @@ string HandleCommand(const string command)
       string symbol = parts[1];
       long parsed_magic = 0;
       if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
-         !IsOwnedMagic(parsed_magic))
+         !IsInventoryQueryMagic(parsed_magic))
          return "ERR|POSITIONS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";
@@ -680,7 +686,7 @@ string HandleCommand(const string command)
       string symbol = parts[1];
       long parsed_magic = 0;
       if(symbol != "XAUUSD" || !ParseCanonicalUnsignedLong(parts[2], parsed_magic) ||
-         !IsOwnedMagic(parsed_magic))
+         !IsInventoryQueryMagic(parsed_magic))
          return "ERR|ORDERS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
       string response = "OK";

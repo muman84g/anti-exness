@@ -195,13 +195,37 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             self.assertIn(exact_guard, source)
         self.assertIn('symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n)', source)
         self.assertIn("timeframe != PERIOD_M1", source)
-        self.assertIn("!IsOwnedMagic(parsed_magic)", source)
+        self.assertIn("!IsInventoryQueryMagic(parsed_magic)", source)
         position_block = source.split('if(op == "POSITION"', 1)[1].split(
             'if(op == "ORDERS"', 1,
         )[0]
         self.assertIn('PositionGetString(POSITION_SYMBOL) != "XAUUSD"', position_block)
         self.assertIn("!IsOwnedMagic(selected_magic)", position_block)
         self.assertIn("CanonicalCommentForMagic(selected_magic)", position_block)
+
+    def test_legacy_inventory_read_permission_is_separate_from_ownership(self):
+        source = Path(__file__).with_name("BotBridge_s23.mq5").read_text(encoding="utf-8")
+        owned = source.split("bool IsOwnedMagic(", 1)[1].split("}", 1)[0]
+        query = source.split("bool IsInventoryQueryMagic(", 1)[1].split("}", 1)[0]
+        self.assertIn("return magic >= 230023 && magic <= 230044;", owned)
+        self.assertNotIn("200023", owned)
+        self.assertIn("return IsOwnedMagic(magic) || magic == 200023;", query)
+        self.assertEqual(live_s23_bot.LEGACY_S23_MAGICS, (200023,))
+        self.assertEqual(source.count("!IsInventoryQueryMagic(parsed_magic)"), 2)
+        for operation, end, broker_read in (
+            ("POSITIONS", "POSITION", "PositionsTotal()"),
+            ("ORDERS", "CLOSEDEAL", "OrdersTotal()"),
+        ):
+            block = source.split(f'if(op == "{operation}"', 1)[1].split(f'if(op == "{end}"', 1)[0]
+            self.assertIn('symbol != "XAUUSD"', block)
+            self.assertIn("ParseCanonicalUnsignedLong(parts[2], parsed_magic)", block)
+            self.assertLess(block.index("!IsInventoryQueryMagic(parsed_magic)"), block.index(broker_read))
+        for operation in ("OPEN", "CLOSE", "POSITION"):
+            block = source.split(f'if(op == "{operation}"', 1)[1].split('if(op == ', 1)[0]
+            self.assertNotIn("IsInventoryQueryMagic", block)
+        # The retired magic has no executable comment policy; it cannot OPEN/CLOSE.
+        policy = source.split("string CanonicalCommentForMagic(", 1)[1].split("}\n", 1)[0]
+        self.assertNotIn("200023", policy)
 
     def test_close_command_binds_account_identity_atomically(self):
         source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")

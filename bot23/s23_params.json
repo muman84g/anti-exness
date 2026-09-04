@@ -124,7 +124,7 @@
     ]
   },
   "expected_bridge_name": "BotBridge_s23",
-  "expected_bridge_version": "2026-09-04-s23-strict-ipc-q01-v31",
+"expected_bridge_version": "2026-09-04-s23-legacy-query-v32",
   "symbol": "XAUUSD",
   "mt5_symbol": "XAUUSD",
   "default_lot": 0.01,

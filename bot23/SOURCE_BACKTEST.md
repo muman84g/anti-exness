@@ -19,7 +19,7 @@ alone does not prove that a quoted close row is complete.
 - Feed gap: a quote interval over 300 seconds closes at the first arrival quote. Feed-gap and fixed-hold exits do not defer for wide spread. Exact market-closed no-fill retains a durable close intent and retries from fresh broker quote time.
 - Ownership: independent lane 22, magic 230044, comment `s23_q01_l1`; Q01 does not reuse any existing basket or signal identity.
 - Evidence status: fixed DEV/Leakcheck/Forward tick evidence is inherited from the frozen research package. This local port verifies implementation parity and lifecycle safety; it does not create a fresh holdout or live-runtime result.
-- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`; bridge `2026-09-04-s23-strict-ipc-q01-v31`.
+- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`; bridge `2026-09-04-s23-legacy-query-v32`.
 - Runtime boundary: no CentOS/MT5 placement, restart, attachment, account access, state repair, or order execution was performed.
 
 ## 2026-08-31 t0530 edge-break best integration

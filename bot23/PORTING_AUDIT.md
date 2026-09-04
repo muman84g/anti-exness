@@ -1,5 +1,17 @@
 # Bot23 porting audit
 
+## 2026-09-04 legacy inventory query correction
+
+Observed v31 startup failure: the Python legacy-flat preflight queried magic
+200023, but EA POSITIONS/ORDERS admitted only currently owned magics. Split the
+read-only inventory allowlist from executable ownership in v32. Retired 200023
+is visible only to list queries; OPEN/CLOSE/POSITION policies are unchanged.
+Queries remain XAUUSD-only with strict canonical numeric syntax. Existing legacy
+positions/orders and failed queries still refuse cutover; no state reset,
+automatic legacy adoption, or weakened ownership check was introduced.
+Isolated Python regression: 542 run, 541 passed, 1 skipped; runner self-test PASS.
+MetaEditor build: 0 errors, 0 warnings. No push/deployment/restart/EA attachment.
+
 Audit date: 2026-08-14
 
 ## Result

@@ -1,5 +1,11 @@
 # Bot23 integrated inventory and independent session overlays
 
+Bridge v32 correction (2026-09-04): POSITIONS/ORDERS may read retired magic
+200023 solely for cutover inventory checks. Executable ownership remains
+230023-230044; legacy inventory is not adopted or tradable. Nonempty or failed
+legacy queries still block startup. Runner and params require v32; compile and
+attach the matching EA before restarting. Local verification is not deployment.
+
 Close-ledger durability re-audit (2026-09-04): an existing confirmed-deal row is
 filesystem-synced again, including its parent directory, before replay can consume
 position state. A readable row from an interrupted fsync is not durability proof.
@@ -129,7 +135,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-04-s23-strict-ipc-q01-v31` です。v31はv30の全IPC/TICKS/ownership guard、edge lane allowlist、deadline切り下げ比較を継承し、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`を所有allowlistへ追加します。さらにrequest ID、deadline、全execution数値、履歴・inventory queryの項目数と数値表現を厳密検査し、符号、指数表記、末尾文字、空値、余分なfieldを変換前に拒否します。INFO/HIST/HISTPAGE/TICKSはXAUUSDへ、履歴はM1へ、inventory queryはbot23の所有magicへ固定します。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-04-s23-legacy-query-v32` です。v31はv30の全IPC/TICKS/ownership guard、edge lane allowlist、deadline切り下げ比較を継承し、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`を所有allowlistへ追加します。さらにrequest ID、deadline、全execution数値、履歴・inventory queryの項目数と数値表現を厳密検査し、符号、指数表記、末尾文字、空値、余分なfieldを変換前に拒否します。INFO/HIST/HISTPAGE/TICKSはXAUUSDへ、履歴はM1へ、inventory queryはbot23の所有magicへ固定します。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
