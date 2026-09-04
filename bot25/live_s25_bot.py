@@ -2613,7 +2613,6 @@ class S25V24Runner:
                 self._m5_receipt(strategy, bar_time, quote_time, reason="recovered_after_restart", note="processed_bar_had_no_receipt")
                 self._save_state()
             return
-        state["last_processed_m5_bar"] = bar_key
         atr = float(row.get("atr14", math.nan))
         ema = float(row.get("ema200", math.nan))
         if math.isfinite(atr) and math.isfinite(ema):
@@ -2622,9 +2621,13 @@ class S25V24Runner:
         available_at = bar_time + pd.Timedelta(minutes=5)
         if quote_time < available_at:
             self._trade_row("m5_not_evaluated", strategy, quote_time_utc=dt_text(quote_time), signal_bar_time=bar_key, reason="future_or_unavailable_completed_bar")
-            self._m5_receipt(strategy, bar_time, quote_time, reason="not_evaluated_future_bar", note="action=not_evaluated;future_or_unavailable_completed_bar")
+            # The diagnostic above is provisional, not a final decision receipt.
+            # Reserving its receipt here would hide the later eligible decision.
             self._save_state()
             return
+        # A pre-boundary quote postpones this bar; it must not consume it.
+        # Keep the existing once-only semantics after availability is proven.
+        state["last_processed_m5_bar"] = bar_key
         if quote_time > available_at + pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 7))):
             self._trade_row("m5_not_evaluated", strategy, quote_time_utc=dt_text(quote_time), signal_bar_time=bar_key, reason="stale_completed_bar")
             self._m5_receipt(strategy, bar_time, quote_time, reason="not_evaluated_stale", note="action=not_evaluated;stale_completed_bar")
@@ -3112,8 +3115,10 @@ def self_test() -> None:
     assert future_runner._st(strategy)["positions"] == []
     with open(TRADE_LOG_FILE, "r", newline="", encoding="utf-8") as handle:
         future_rows = list(csv.DictReader(handle))
-    future_decision = next(row for row in future_rows if row["event"] == "m5_decision" and row["reason"] == "not_evaluated_future_bar")
+    future_decision = next(row for row in future_rows if row["event"] == "m5_not_evaluated" and row["reason"] == "future_or_unavailable_completed_bar")
     assert not future_decision["executable_at"]
+    assert future_runner._st(strategy).get("last_processed_m5_bar") != dt_text(future_row.name)
+    assert future_runner._st(strategy).get("last_decision_receipt_m5_bar") != dt_text(future_row.name)
 
     legacy_path = os.path.join(os.path.dirname(TRADE_LOG_FILE), "legacy_s25_trades.csv")
     with open(legacy_path, "w", newline="", encoding="utf-8") as handle:

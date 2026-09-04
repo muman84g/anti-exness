@@ -29,6 +29,61 @@ class CountingExecutor(s25.FakeExecutor):
 
 
 class V24VirtualCoreRegressionTests(unittest.TestCase):
+    def test_inherited_losing_long_is_included_at_episode_deadline(self):
+        runner = object.__new__(s25.S25V24Runner)
+        runner.live_enabled = True
+        runner.params = {"episode_minutes": 720, "feed_gap_minutes": 5,
+                         "time_close_spread_limit_points": 300.0}
+        position = {"ticket": 38888532, "side": "LONG", "entry_price": 4485.371,
+                    "lot": 0.01, "close_requested": False}
+        state = {"episode_start_quote_utc": "2026-09-04T03:58:24.987000+00:00",
+                 "last_quote_utc": "2026-09-04T15:58:23.987000+00:00",
+                 "positions": [position], "close_defer": None}
+        runner._st = lambda strategy: state
+        runner._sync_strategy = mock.Mock(return_value=True)
+        runner._save_state = mock.Mock()
+        runner._trade_row = mock.Mock()
+        runner._apply_pending_post_close = mock.Mock(return_value=False)
+        runner._close_positions = mock.Mock(return_value="pending")
+        info = SimpleNamespace(bid=4392.149, ask=4392.331, point=0.001)
+        runner._run_strategy({}, None, info, pd.Timestamp("2026-09-04T15:58:24.986Z"))
+        runner._close_positions.assert_not_called()
+        runner._run_strategy({}, None, info, pd.Timestamp("2026-09-04T15:58:24.987Z"))
+        runner._close_positions.assert_called_once()
+        args = runner._close_positions.call_args.args
+        self.assertEqual(args[1], [position])
+        self.assertEqual(args[2], "episode_12h")
+        self.assertEqual(state["episode_start_quote_utc"], "2026-09-04T03:58:24.987000+00:00")
+
+    def test_preboundary_quote_does_not_consume_bar_or_final_receipt(self):
+        # No constructor, disk state, executor, bridge, or real orders.
+        runner = object.__new__(s25.S25V24Runner)
+        state = {"last_processed_m5_bar": "2026-09-04T10:40:00+00:00",
+                 "last_decision_receipt_m5_bar": "2026-09-04T10:40:00+00:00"}
+        runner.params = {"max_signal_delay_minutes": 7}
+        runner._st = lambda strategy: state
+        runner._save_state = mock.Mock()
+        runner._trade_row = mock.Mock()
+        runner._ensure_virtual_bilateral_core = mock.Mock(return_value=False)
+        runner._opportunity_id = mock.Mock(return_value="boundary_test")
+        row = pd.Series({"atr14": 3.48, "ema200": 4471.9, "break_dir": 1},
+                        name=pd.Timestamp("2026-09-04T10:45:00Z"))
+        for quote in ("2026-09-04T10:49:59.697Z", "2026-09-04T10:49:59.999Z"):
+            runner._process_m5_event({}, row, None, pd.Timestamp(quote))
+        self.assertEqual(state["last_processed_m5_bar"], "2026-09-04T10:40:00+00:00")
+        self.assertEqual(state["last_decision_receipt_m5_bar"], "2026-09-04T10:40:00+00:00")
+        runner._ensure_virtual_bilateral_core.assert_not_called()
+        # Includes the persisted-state restart case: no bar/receipt was consumed.
+        runner._process_m5_event({}, row, None, pd.Timestamp("2026-09-04T10:50:00Z"))
+        runner._ensure_virtual_bilateral_core.assert_called_once()
+        self.assertEqual(state["last_processed_m5_bar"], row.name.isoformat())
+        self.assertEqual(state["last_decision_receipt_m5_bar"], row.name.isoformat())
+        receipts = [call for call in runner._trade_row.call_args_list if call.args[0] == "m5_decision"]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].kwargs["decision_time"], "2026-09-04T10:50:00+00:00")
+        runner._process_m5_event({}, row, None, pd.Timestamp("2026-09-04T10:50:05Z"))
+        runner._ensure_virtual_bilateral_core.assert_called_once()
+
     def test_authorized_live_config_still_requires_v24_ack(self):
         params = copy.deepcopy(s25.load_params())
         self.assertIs(params["live_trading_enabled"], True)
