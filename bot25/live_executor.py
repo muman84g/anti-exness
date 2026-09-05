@@ -30,6 +30,14 @@ def _strict_int_text(value: Any) -> int:
     return int(text)
 
 
+def _comment_matches_order_type(comment: str, order_type: int) -> bool:
+    match = S25_COMMENT_RE.fullmatch(comment)
+    if match is None or order_type not in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}:
+        return False
+    marker = comment[len("s25_m231_")]
+    return marker == ("L" if order_type == ORDER_TYPE_BUY else "S")
+
+
 @dataclass
 class SymbolInfo:
     bid: float
@@ -108,7 +116,7 @@ class MT5Executor:
         self.last_open_identifier: int | None = None
         self.last_open_deal: int | None = None
         self.last_open_price: float | None = None
-        self.last_open_time: int | None = None
+        self.last_open_time_msc: int | None = None
 
     def get_bridge_capabilities(self) -> dict[str, Any] | None:
         res = ea_bridge.send_command("CAPS|", timeout=10)
@@ -297,13 +305,20 @@ class MT5Executor:
         self.last_open_identifier = None
         self.last_open_deal = None
         self.last_open_price = None
-        self.last_open_time = None
+        self.last_open_time_msc = None
+        raw_numeric = (
+            order_type, lot, sl, tp, digits, deviation, magic,
+            expected_login, expected_owned_positions,
+        )
+        order_type_value = -1
         try:
             lot_value, sl_value, tp_value = float(lot), float(sl), float(tp)
+            order_type_value = int(order_type)
             digits_value, deviation_value, magic_value = int(digits), int(deviation), int(magic)
             login_value, server_value, owned_value = int(expected_login), str(expected_server), int(expected_owned_positions)
             valid = (
-                str(symbol) == "XAUUSD" and int(order_type) in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}
+                not any(isinstance(value, bool) for value in raw_numeric)
+                and str(symbol) == "XAUUSD" and order_type_value in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}
                 and math.isfinite(lot_value) and math.isclose(lot_value, 0.01, rel_tol=0.0, abs_tol=1e-12)
                 and math.isfinite(sl_value) and sl_value == 0.0 and math.isfinite(tp_value) and tp_value == 0.0
                 and 0 <= digits_value <= 10 and deviation_value == 50 and magic_value == S25_MAGIC
@@ -314,13 +329,13 @@ class MT5Executor:
         except (TypeError, ValueError, OverflowError):
             valid = False
         safe_comment = str(comment)
-        if not valid or S25_COMMENT_RE.fullmatch(safe_comment) is None:
+        if not valid or not _comment_matches_order_type(safe_comment, order_type_value):
             self.last_order_error = "OPEN_POLICY_GUARD"
             return None
         sl_text = f"{sl_value:.{digits_value}f}" if sl_value else "0"
         tp_text = f"{tp_value:.{digits_value}f}" if tp_value else "0"
         res = ea_bridge.send_command(
-            f"OPEN|{symbol}|{int(order_type)}|{lot_value:.2f}|{sl_text}|{tp_text}|{magic_value}|{safe_comment}|{deviation_value}|{login_value}|{server_value}|{owned_value}",
+            f"OPEN|{symbol}|{order_type_value}|{lot_value:.2f}|{sl_text}|{tp_text}|{magic_value}|{safe_comment}|{deviation_value}|{login_value}|{server_value}|{owned_value}",
             timeout=15,
         )
         if not res or not res.startswith("OK|"):
@@ -331,13 +346,13 @@ class MT5Executor:
             if len(parts) != 7:
                 raise ValueError(res)
             ticket, identifier, deal = map(_strict_int_text, parts[1:4])
-            price, open_time, retcode = float(parts[4]), _strict_int_text(parts[5]), _strict_int_text(parts[6])
-            if ticket <= 0 or identifier <= 0 or deal <= 0 or not math.isfinite(price) or price <= 0 or open_time <= 0 or retcode != TRADE_RETCODE_DONE:
+            price, open_time_msc, retcode = float(parts[4]), _strict_int_text(parts[5]), _strict_int_text(parts[6])
+            if ticket <= 0 or identifier <= 0 or deal <= 0 or not math.isfinite(price) or price <= 0 or open_time_msc <= 0 or retcode != TRADE_RETCODE_DONE:
                 raise ValueError(res)
             self.last_open_identifier = identifier
             self.last_open_deal = deal
             self.last_open_price = price
-            self.last_open_time = open_time
+            self.last_open_time_msc = open_time_msc
             return ticket
         except (TypeError, ValueError, OverflowError, IndexError):
             self.last_order_error = f"MALFORMED_OK:{res}"
@@ -349,6 +364,10 @@ class MT5Executor:
         expected_comment: str, expected_identifier: int, expected_type: int,
         expected_volume: float,
     ) -> CloseResult:
+        raw_numeric = (
+            ticket, deviation, expected_login, expected_magic,
+            expected_identifier, expected_type, expected_volume,
+        )
         try:
             ticket_value, deviation_value = int(ticket), int(deviation)
             login_value, server_value = int(expected_login), str(expected_server)
@@ -356,10 +375,11 @@ class MT5Executor:
             comment_value, identifier_value = str(expected_comment), int(expected_identifier)
             type_value, volume_value = int(expected_type), float(expected_volume)
             valid = (
-                ticket_value > 0 and deviation_value == 50 and login_value > 0
+                not any(isinstance(value, bool) for value in raw_numeric)
+                and ticket_value > 0 and deviation_value == 50 and login_value > 0
                 and bool(server_value) and not any(token in server_value for token in ("|", ",", "\r", "\n"))
                 and symbol_value == "XAUUSD" and magic_value == S25_MAGIC
-                and S25_COMMENT_RE.fullmatch(comment_value) is not None
+                and _comment_matches_order_type(comment_value, type_value)
                 and identifier_value > 0 and type_value in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}
                 and math.isfinite(volume_value) and math.isclose(volume_value, 0.01, rel_tol=0.0, abs_tol=1e-12)
             )

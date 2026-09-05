@@ -6,12 +6,20 @@ Parent hash: `12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10`
 
 Candidate identity: `bot25_v24_xauusd_virtual_bilateral_core_v001`
 
-Candidate parameter hash: `788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36`
+Base V24 parameter hash: `788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36`
+
+Adopted V24+L05 parameter hash: `ad0f8775c62303b037aa89e900d971900c6ead2e640f70b3dfec989c30d1d88c`
 
 The hash is SHA-256 of this canonical UTF-8 JSON object:
 
 ```json
 {"change":"physical_bilateral_seeds_to_virtual_core","drought_minutes":120,"episode_minutes":720,"frontier_add_atr":0.5,"max_active_to_opposite_ratio":3,"max_logical_positions_per_side":6,"parent_hash":"12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10","physical_seed_orders":0,"release":"all_profitable_real_tickets_lifo","virtual_core_per_side":1}
+```
+
+The current combined hash is SHA-256 of this canonical UTF-8 JSON object:
+
+```json
+{"base_v24":{"change":"physical_bilateral_seeds_to_virtual_core","drought_minutes":120,"episode_minutes":720,"frontier_add_atr":0.5,"max_active_to_opposite_ratio":3,"max_logical_positions_per_side":6,"parent_hash":"12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10","physical_seed_orders":0,"release":"all_profitable_real_tickets_lifo","virtual_core_per_side":1},"exit_overlay":{"confirmed_bar_minutes":5,"losing_ticket_only":true,"loss_policy":"L05","opposite_native_pivot_break":true,"reclaim_then_reloss":true,"retroactive_on_upgrade":false,"route":"existing_fill_confirmed_close"}}
 ```
 
 ## Fixed delta
@@ -31,9 +39,21 @@ The hash is SHA-256 of this canonical UTF-8 JSON object:
   A close is retried only after broker evidence proves the prior attempt did not fill.
 - A virtual-only episode still expires or resets after a feed gap.
 
+## L05 overlay delta
+
+- Keep every V24 entry, capacity, ratio, frontier, native release, expiry, and
+  feed-gap rule unchanged.
+- Track the latest native down/up pivot break from completed M5 bars.
+- For LONG/SHORT respectively, require a post-entry down/up break, a later
+  reclaim close, then a still later re-loss close.
+- Close only losing eligible real tickets via the existing durable close path.
+  L05 is not a productive close and cannot open, seed, or switch a wave.
+- Persist the activation watermark, break level/time/reclaimed flag, and each
+  ticket's entry-M5 eligibility across restart.
+
 ## Migration and release boundary
 
-- Exact state-v5/man231 and state-v6/V23 may become V24 state-v7 while positions
+- Exact state-v5/man231 and state-v6/V23 may become current state-v8 while positions
   remain only if stored and broker ticket, stable identity, open time, side, lot,
   magic, and comment match,
   broker orders and pending lifecycle actions are empty, cap/ratio remain valid,
@@ -53,3 +73,6 @@ The hash is SHA-256 of this canonical UTF-8 JSON object:
 - Real OPEN/CLOSE also require a fresh broker quote, exact account and ownership
   inventory, request-correlated bridge evidence, and durable lifecycle intent.
   Ambiguous close submissions are reconciled but never automatically replayed.
+- Exact state-v7 V24 may become state-v8 without replacing or closing positions.
+  Its L05 trackers start empty at the previous last-processed M5 watermark;
+  unresolved lifecycle state refuses migration and the source file is preserved.

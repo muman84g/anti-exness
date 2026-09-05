@@ -1,10 +1,11 @@
 # Source Backtest
 
 - Bot: `bot25` / S25
-- Strategy: local `V24` virtual-core child of V23
+- Strategy: local `V24` virtual-core child of V23 with frozen `L05` exit overlay
 - Strategy ID: `bot25_v24_xauusd_virtual_bilateral_core_v001`
-- Candidate ID: `combo_014_v001_v001_virtual_core_v001`
-- Frozen candidate-parameter hash: `788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36`
+- Candidate ID: `bot25_exit20_l05_v3_live_v001`
+- Frozen candidate-parameter hash: `ad0f8775c62303b037aa89e900d971900c6ead2e640f70b3dfec989c30d1d88c`
+- Base V24 hash: `788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36`
 - Parent V23 hash: `12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10`
 - Instrument/execution: XAUUSD true ticks; decisions from completed Bid M5 bars
 - Parent specification: `backtest/検討中/chatgpt案/多重ポジ/20260827_XAUUSD_break比率wavefront/best/07_man231_core_satellite_固定仕様.md`
@@ -37,6 +38,24 @@
 - Shadow proxy applies the Base assumption of 0.030 adverse price slippage at
   both entry and close. Live satellite selection also requires a 0.030 price
   buffer before submitting close, while broker-confirmed fills remain canonical.
+
+## L05 adopted exit overlay
+
+L05 does not replace V24. For each real ticket, only an opposite native pivot
+break at or after its entry M5 is eligible. A later completed M5 close must first
+reclaim the broken pivot and another later completed M5 close must lose it
+again. At that final event only losing tickets are passed to the normal
+fill-confirmed close controller with `reason=loss_policy_L05`. Same-bar
+break/reclaim/re-loss, profitable tickets, pre-entry breaks, and retrospective
+evaluation after deployment are excluded.
+
+The frozen OOS audit is
+`C:\Users\muuma\Downloads\codex-temp\s25_m1_close_dev_20260904\runner_audit_20260905\BOT25_L05_OOS_AUDIT_20260905_ja.md`.
+Leakcheck Base/Stress were respectively `+720.940 / PF 1.6456 / DD 229.276`
+and `+672.586 / PF 1.5886 / DD 231.297`. Forward Base/Stress were
+`+698.705 / PF 1.9585 / DD 279.556` and
+`+668.327 / PF 1.8675 / DD 302.852`. The user accepted the lower trade count
+and lower OOS PnL in exchange for the improved PF, DD, and PnL/DD on 2026-09-05.
 
 ## Parent V23 recorded results
 
@@ -98,3 +117,56 @@ inventory remains fail-closed and no replacement seed is created.
 During shadow-only canary, migrated real inventory is verified for an exact
 state/broker match without reconciliation, and all strategy entry/exit mutation
 is held until explicit live activation.
+State-v7 V24 upgrades to state-v8 L05 only after the same exact broker/state,
+empty-order, no-pending-action and CAS checks. The upgrade preserves every
+position and the existing legacy-core mapping while starting L05 at a new
+non-retroactive watermark.
+
+The 2026-09-05 bridge-v9 and state-shape corrections are live-boundary guards,
+not a new research candidate. They enforce agreement among BUY/SELL, the
+canonical comment marker, persisted entry time/price, and broker inventory, and
+reject malformed recovery state. They do not change the frozen V24 or L05
+signal, allocation, or exit semantics and therefore do not create a new
+backtest-selection result.
+
+The subsequent bridge-v10/executor correction extends the same live-only
+boundary: OPEN success must match the re-queried position's side, volume, price,
+and millisecond open time, while persisted OPEN and post-close handoff state must
+retain the active episode/M5/wave lifecycle that produced it. Strict JSON type
+checks reject boolean aliases in numeric configuration. No V24/L05 candidate
+parameter or backtest decision path changed.
+
+The later state-v8 completeness correction is also live-only. It rejects
+incomplete current episode/inventory and missing durable safety fields before
+runtime mutation. Recognized older states may be completed only inside the
+broker-verified migration path; a missing legacy frontier is fixed once from the
+fresh preflight midpoint, matching the prior first-evaluation fallback without
+changing any selected V24/L05 signal or backtest parameter.
+
+The v9 pending-CLOSE/defer validation is likewise a live restart-safety guard.
+It authenticates persisted close intent against the finite production reason
+set and, for M5 exits, the already selected completed bar and decision window.
+It does not add a signal, change close selection, or alter any DEV, Leakcheck,
+or Forward result.
+
+The v10 pre-commit state validation is also live-only. It changes when an
+invalid internal state is rejected—from the following restart to immediately
+before persistence—but does not change any valid signal, entry, close, or
+backtest path.
+
+The v11 exact-field schema check is another persistence-only guard and has no
+effect on valid V24/L05 replay semantics or research results.
+
+The v12 CLOSE retry timestamp normalization is live-only and does not change
+the selected exit or any backtest result.
+
+The v13 persisted logical-cap/ratio check mirrors the already selected
+allocator constraints and does not alter valid replay results.
+
+The v14 live-shadow inventory rejection is a runtime state-integrity guard. It
+does not alter virtual-core substitution, valid broker inventory, any selected
+entry or exit, or DEV, Leakcheck, and Forward replay results.
+
+The v15 query-order and outer-loop persistence guards complete that same
+live-only failure boundary. They do not change a valid V24/L05 replay path or
+any research result.

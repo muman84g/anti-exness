@@ -8,12 +8,12 @@
   "bot_number": "25",
   "bot_suffix": "s25",
   "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
-  "candidate_id": "combo_014_v001_v001_virtual_core_v001",
-  "candidate_params_hash": "788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36",
-  "parent_candidate_params_hash": "12dc94c78f5fb6bb01710e40a8f5f199af472f2323ab0f2bb02063fda427ca10",
+  "candidate_id": "bot25_exit20_l05_v3_live_v001",
+  "candidate_params_hash": "ad0f8775c62303b037aa89e900d971900c6ead2e640f70b3dfec989c30d1d88c",
+  "parent_candidate_params_hash": "788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36",
   "expected_magic": 200025,
   "expected_bridge_name": "BotBridge_s25",
-  "expected_bridge_version": "2026-09-04-s25-v24-atomic-v8",
+  "expected_bridge_version": "2026-09-05-s25-v24-atomic-v10",
   "symbol": "XAUUSD",
   "mt5_symbol": "XAUUSD",
   "default_lot": 0.01,
@@ -75,7 +75,7 @@
     {
       "enabled": true,
       "id": "v24_virtual_bilateral_book",
-      "spec_id": "man_231_drought_minority_virtual_core_v24_v001",
+      "spec_id": "man_231_drought_minority_virtual_core_v24_l05_v001",
       "magic": 200025,
       "comment_prefix": "s25_m231",
       "lot": 0.01,
@@ -87,7 +87,8 @@
       "virtual_core_positions_per_side": 1,
       "physical_seed_orders": 0,
       "max_positions_per_side": 6,
-      "max_active_to_opposite_ratio": 3
+      "max_active_to_opposite_ratio": 3,
+      "loss_policy": "L05"
     }
   ]
 }

@@ -1,10 +1,18 @@
-# Bot25 V24 XAUUSD virtual bilateral book
+# Bot25 V24 XAUUSD virtual bilateral book + L05 loss exit
 
-Local shadow candidate derived from the fixed `V23` child of `man_231`. It keeps
+Local live-configured candidate derived from the fixed `V23` child of `man_231`. It keeps
 one cost-free logical core on each side for capacity and ratio accounting, but
 does not send bilateral seed orders. Broker positions are opened only by a
 0.50 ATR frontier add. On a release, every profitable real ticket on the active
 side is eligible newest-first; the protected core is the virtual ticket.
+
+The adopted L05 overlay adds one ticket-level loss exit without changing those
+entries or native exits. After an eligible ticket's entry, an opposite native
+pivot break must occur, a later completed M5 close must reclaim that pivot, and
+a still later completed M5 close must lose it again. Only tickets still losing
+after the configured adverse-close allowance are sent to the existing durable,
+fill-confirmed close path. L05 never opens a position and never advances the
+productive-close clock.
 
 V23 adds one rule only: after a broker-confirmed gross-price or shadow productive close of
 at least 0.10 USD, if no further productive close occurs for more than 120
@@ -49,8 +57,8 @@ only the completed M5 bar, current quote, V23 state, inventory counts/MTM,
 episode age, and productive-close age available at registration. Observer or
 tagger failures are logged once per signature and do not change trading.
 
-Exact bot25 state-v5/man231 and state-v6/V23 predecessors can upgrade to V24
-state-v7 with existing positions only when stored and broker position IDs,
+Exact bot25 state-v5/man231 and state-v6/V23 predecessors can upgrade to the
+current state-v8 with existing positions only when stored and broker position IDs,
 ticket, open time, side, lot, magic, and comment all match, broker orders are empty, no open/close
 reservation exists, and the state file passes an unchanged-content check. One
 best-price legacy position per side temporarily represents that side's core, so
@@ -62,6 +70,10 @@ While migrated real inventory exists and V24 is shadow-only, the runner verifies
 an exact read-only state/broker ownership match and logs status, but does not
 reconcile, add, close, or otherwise mutate the canonical position lifecycle.
 Existing-position management resumes only in explicitly activated live mode.
+An exact state-v7 V24 book can upgrade in place to state-v8 after the same
+inventory and unchanged-file checks. Existing positions are retained, but L05
+starts with empty break/reclaim trackers at the last processed M5 watermark, so
+pre-deployment bars can never cause a retrospective close.
 
 ## Logs
 
@@ -105,14 +117,16 @@ separately named passive observer remains evidence-only.
 Get-ChildItem -File *.py | ForEach-Object { py -m py_compile $_.FullName }
 py live_s25_bot.py --self-test
 py test_s25_passive_evidence.py
+py -m unittest -v test_s25_l05_exit_overlay.py
 py -m unittest -v test_s25_v24_virtual_core.py
 py -m unittest -v test_s25_execution_boundary.py
 ```
 
-This V24 source is not authorized for CentOS deployment or real operation. A
-future switch requires an exact state/broker ownership match, zero owned orders
-and pending lifecycle actions, an explicit deployment decision, and both
-real-order gates to be deliberately enabled. See `SOURCE_BACKTEST.md`.
+This local L05 edit has not been deployed or restarted on CentOS. The checked-in
+configuration requests live mode, but that is not runtime proof. A future
+switch requires an exact state/broker ownership match, zero owned orders and
+pending lifecycle actions, an explicit deployment decision, and both existing
+real-order gates. See `SOURCE_BACKTEST.md`.
 
 Confirmed close consumption is transactional: operational rows are durable before
 one final state commit. Failed writes restore the prior state unless the exact
@@ -133,6 +147,25 @@ Pending adoption and confirmed-flat consumption use the same single-commit
 transaction as close reconciliation. Recovery rows have stable position/comment
 identities so retries after a failed state save do not duplicate the ledger.
 
+Pending OPEN recovery is also causally bound to the completed M5 signal and the
+reservation timestamp. It accepts exactly one matching broker position opened
+within 60 seconds after that reservation; older/later same-comment inventory is
+not adopted. Persisted reservations with a mismatched known-position set,
+side/reason, opportunity ID, or signal age fail closed before broker actions.
+
+Current state and broker reconciliation also require comment direction, entry
+price, and broker entry time to agree exactly. Malformed sync-block lifecycle
+fields and boolean values in numeric/direction fields are rejected before any
+broker mutation. A future deployment must compile and attach
+`BotBridge_s25.mq5` version `2026-09-05-s25-v24-atomic-v10`; changing only the
+Python files or params is not a complete bridge update.
+
+The executor and EA both enforce comment direction against BUY/SELL. A
+request-correlated OPEN success is accepted only when its price and broker-open
+millisecond timestamp match the unique post-order position query. Persisted
+frontier-add and post-close handoff records must also retain their active
+episode, completed-M5, wave, and OPEN-versus-CLOSE lifecycle identity.
+
 Post-OPEN confirmation verifies the entire returned owned namespace, including
 exact preexisting position ownership. Foreign same-magic rows or prior-position
 drift retain pending intent and block entries. Pending adoption requires exactly
@@ -142,3 +175,42 @@ candidate among several unexplained positions.
 Release-driven wave handoff is persisted with the validated close reservation
 before any broker CLOSE. Restart therefore preserves the intended next wave if
 the process stops after a close submission. Ownership rejection does not arm it.
+
+Current state-v8 must contain every durable strategy and position safety field.
+Real inventory cannot exist without a complete episode identity, and an active
+episode must retain both frontier prices. Missing current-state fields fail
+closed instead of being silently defaulted. Only an explicitly recognized older
+state may receive migration defaults; broker-verified migration fills missing
+frontiers once from the fresh preflight midpoint and validates the completed
+current shape before the CAS-protected commit.
+
+Persisted CLOSE intent is fail-closed as well. Restart accepts only the
+production reasons `feed_gap`, `episode_12h`, `loss_policy_L05`,
+`opposite_pivot_break`, and `ema200_retouch`. M5-driven closes must match the
+last processed completed M5 bar and its configured decision window; full-close
+defer state must belong to an active episode and retain an ordered quote-time
+lifecycle. An arbitrary or stale injected reason cannot reach broker CLOSE.
+
+Every normal and transactional state commit is validated against the same
+current-state contract immediately before its atomic write. If an internal
+runtime path ever forms an incomplete episode, reservation, M5 identity, or
+close lifecycle, the write raises and leaves the prior canonical file intact;
+invalid transient state is not deferred until the next restart to be detected.
+
+Current state-v8 uses an exact schema: unknown fields are rejected as well as
+missing fields. This prevents retired lifecycle data from being silently
+carried into a current-version restart or save.
+
+Pending CLOSE timestamps must follow request, submission, and retry order. A
+due retry timestamp is consumed before a new submission marker is committed.
+
+Current state also recomputes logical inventory with virtual-core substitution
+and rejects persisted 6-per-side or 3:1 ratio violations before trading.
+
+Live mode cannot load or save synthetic shadow inventory. Reconciliation that
+encounters it blocks strategy mutation in memory without overwriting the last
+valid canonical state file.
+
+This rejection runs before broker inventory queries. The outer run loop and
+its early quote-failure paths also preserve the canonical file when an already
+blocked in-memory state is structurally invalid.

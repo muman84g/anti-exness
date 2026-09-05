@@ -35,7 +35,7 @@
   Commission, swap, and fee remain included in the separate realized
   `position_close_confirmed.profit`; they do not change the V23 strategy clock.
 - `startup_state_migrated` records an exact state-v5/man231 or state-v6/V23 to
-  state-v7/V24 upgrade. Flat migration requires empty owned inventory; nonflat
+  state-v8/V24+L05 upgrade. Flat migration requires empty owned inventory; nonflat
   migration requires an exact state/broker identity, side, lot, symbol, magic,
   comment and lifecycle match. Old contents are never logged.
 - `ticket` is the MT5 position ticket. `position_identifier` is the stable MT5
@@ -77,6 +77,10 @@
   event. A reservation is persisted before the broker request.
 - M5: one `m5_decision` per processed bar with `signal`, `no_signal`, or a
   specific `not_evaluated_*` reason.
+- L05 loss exits use the ordinary `close_reserved`, `close_requested`, and
+  confirmed-close rows with `reason=loss_policy_L05`. The matching
+  `m5_decision.note` identifies the completed-bar re-loss and selected-ticket
+  count; L05 does not emit `productive_close_confirmed`.
 - Close: `close_reserved` -> `close_requested` ->
   `position_close_confirmed`; shadow uses `close` directly after reservation.
 - Reconciliation emits realized rows only after all missing state positions in

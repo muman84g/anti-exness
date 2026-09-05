@@ -407,6 +407,87 @@ class V24VirtualCoreRegressionTests(unittest.TestCase):
                 state["legacy_physical_core_position_ids"] = {"LONG": 5010, "SHORT": None}
                 self.assertEqual(runner._virtual_core_flags(strategy), (1, 1))
 
+    def test_flat_v5_state_upgrades_and_starts_virtual_core_without_seed(self):
+        params = copy.deepcopy(s25.load_params())
+        params["live_trading_enabled"] = True
+        params["shadow_forward_enabled"] = False
+        params["shadow_opportunity_observer"]["enabled"] = False
+        params["shadow_state_tagger"]["enabled"] = False
+        strategy = params["strategies"][0]
+        legacy_state = {
+            "version": 5,
+            "bot": "bot25",
+            "strategy_id": "bot25_man231_xauusd_bilateral_core_satellite_v001",
+            "last_saved_utc": "",
+            "strategies": {
+                "man231_bilateral_book": {
+                    "positions": [],
+                    "episode_sequence": 0,
+                    "current_episode_id": None,
+                    "episode_start_quote_utc": None,
+                    "active_wave": 0,
+                    "last_atr": None,
+                    "last_ema": None,
+                    "last_long_frontier": None,
+                    "last_short_frontier": None,
+                    "last_processed_m5_bar": None,
+                    "last_quote_utc": None,
+                    "pending_open": None,
+                    "pending_close_reason": None,
+                    "sync_block_new_entries": False,
+                    "sync_block_reason": None,
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="s25-v24-flat-v5-") as temp:
+            state_path = str(Path(temp) / "state" / "s25_bot_state.json")
+            trade_path = str(Path(temp) / "logs" / "s25_trades.csv")
+            Path(state_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(state_path).write_text(json.dumps(legacy_state), encoding="utf-8")
+            gate = {
+                params["real_trading_activation_env"]:
+                params["real_trading_activation_value"],
+            }
+            with (
+                mock.patch.object(s25, "STATE_FILE", state_path),
+                mock.patch.object(s25, "TRADE_LOG_FILE", trade_path),
+                mock.patch.dict(os.environ, gate),
+            ):
+                executor = CountingExecutor(positions=[], quote_time="2026-08-27T00:25:00Z")
+                runner = s25.S25V24Runner(params)
+                runner.dm = s25.FakeDM()
+                runner.executor = executor
+                runner._suppress_manual_alerts = True
+
+                self.assertEqual(
+                    runner._state_identity_status,
+                    "compatible_legacy_to_v24_pending",
+                )
+                self.assertTrue(runner.connect_and_preflight())
+                self.assertEqual(runner._state_identity_status, "current")
+                self.assertEqual(executor.open_calls, 0)
+                self.assertEqual(runner._logical_position_counts(strategy), (0, 0))
+
+                runner.run_once()
+
+                self.assertEqual(executor.open_calls, 0)
+                self.assertEqual(runner._position_counts(strategy), (0, 0))
+                self.assertEqual(runner._logical_position_counts(strategy), (1, 1))
+                self.assertEqual(
+                    runner._st(strategy)["current_episode_id"],
+                    "s25_v24_e000001",
+                )
+                restarted = s25.S25V24Runner(params)
+                restarted.dm = s25.FakeDM()
+                restarted.executor = CountingExecutor(
+                    positions=[], quote_time="2026-08-27T00:25:01Z",
+                )
+                restarted._suppress_manual_alerts = True
+                self.assertTrue(restarted.connect_and_preflight())
+                self.assertEqual(restarted.executor.open_calls, 0)
+                self.assertEqual(restarted._logical_position_counts(strategy), (1, 1))
+
     def test_nonflat_v5_inventory_is_adopted_without_seed_or_double_core(self):
         params = copy.deepcopy(s25.load_params())
         params["live_trading_enabled"] = True

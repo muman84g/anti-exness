@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s25"
-#define BRIDGE_VERSION "2026-09-04-s25-v24-atomic-v8"
+#define BRIDGE_VERSION "2026-09-05-s25-v24-atomic-v10"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s25.txt";
@@ -169,6 +169,17 @@ bool IsCanonicalS25Comment(const string comment)
    return true;
 }
 
+bool IsCanonicalS25CommentForType(const string comment, const int position_type)
+{
+   if(!IsCanonicalS25Comment(comment))
+      return false;
+   ushort side = StringGetCharacter(comment, StringLen("s25_m231_"));
+   return (
+      (position_type == POSITION_TYPE_BUY && side == 'L') ||
+      (position_type == POSITION_TYPE_SELL && side == 'S')
+   );
+}
+
 bool IsCanonicalOpenPolicy(
    const string symbol,
    const int order_type,
@@ -186,7 +197,7 @@ bool IsCanonicalOpenPolicy(
        sl == 0.0 &&
        tp == 0.0 &&
        magic == 200025 &&
-       IsCanonicalS25Comment(comment) &&
+       IsCanonicalS25CommentForType(comment, order_type) &&
       deviation == 50
    );
 }
@@ -430,7 +441,9 @@ string HandleCommand(const string command)
           if(PositionGetString(POSITION_SYMBOL) == symbol &&
              PositionGetInteger(POSITION_MAGIC) == magic)
           {
-              if(!IsCanonicalS25Comment(PositionGetString(POSITION_COMMENT)))
+              if(!IsCanonicalS25CommentForType(
+                    PositionGetString(POSITION_COMMENT),
+                    (int)PositionGetInteger(POSITION_TYPE)))
                 return "ERR|OPEN_INVENTORY_GUARD";
              owned_positions++;
           }
@@ -502,7 +515,12 @@ string HandleCommand(const string command)
            if((ulong)PositionGetInteger(POSITION_IDENTIFIER) == identifier &&
               PositionGetString(POSITION_SYMBOL) == symbol &&
               PositionGetInteger(POSITION_MAGIC) == magic &&
-              PositionGetString(POSITION_COMMENT) == comment)
+              PositionGetString(POSITION_COMMENT) == comment &&
+              (int)PositionGetInteger(POSITION_TYPE) == order_type &&
+              IsCanonicalS25CommentForType(
+                 PositionGetString(POSITION_COMMENT),
+                 (int)PositionGetInteger(POSITION_TYPE)) &&
+              MathAbs(PositionGetDouble(POSITION_VOLUME) - volume) <= 0.000000001)
            {
               if(position_ticket != 0)
                  return "ERR|OPEN_POSITION_CONFIRMATION";
@@ -560,7 +578,9 @@ string HandleCommand(const string command)
       long selected_magic = PositionGetInteger(POSITION_MAGIC);
        if(PositionGetString(POSITION_SYMBOL) != "XAUUSD" ||
           !IsOwnedMagic(selected_magic) ||
-          !IsCanonicalS25Comment(PositionGetString(POSITION_COMMENT)))
+          !IsCanonicalS25CommentForType(
+             PositionGetString(POSITION_COMMENT),
+             (int)PositionGetInteger(POSITION_TYPE)))
          return "ERR|POSITION_POLICY_GUARD";
       return "OK|" + PositionRecord();
    }
@@ -690,7 +710,7 @@ string HandleCommand(const string command)
        int expected_type = (int)StringToInteger(parts[9]);
        double expected_volume = StringToDouble(parts[10]);
        if(ticket == 0 || deviation != 50 || expected_symbol != "XAUUSD" ||
-          expected_magic != 200025 || !IsCanonicalS25Comment(expected_comment) ||
+          expected_magic != 200025 || !IsCanonicalS25CommentForType(expected_comment, expected_type) ||
           expected_identifier == 0 ||
           (expected_type != POSITION_TYPE_BUY && expected_type != POSITION_TYPE_SELL) ||
           MathAbs(expected_volume - 0.01) > 0.000000001)

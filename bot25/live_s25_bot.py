@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Bot25 V24 XAUUSD virtual bilateral core/satellite runner.
+"""Bot25 V24 XAUUSD virtual bilateral core/satellite runner with L05 exit.
 
 Strategy decisions use completed M5 bars. Order execution, 12-hour episode
 expiry, feed-gap detection, spread-deferred full close, ownership sync, and
@@ -7,6 +7,8 @@ partial close confirmation run from fresh broker quotes on every poll.
 
 One core per side exists only in logical inventory. Broker positions are opened
 only by frontier adds; the virtual cores never create, close, or value orders.
+L05 adds a completed-M5, post-entry opposite-break reclaim/re-loss exit for
+losing real tickets and routes it through the existing close controller.
 """
 
 from __future__ import annotations
@@ -66,7 +68,10 @@ except ImportError:
 UTC = timezone.utc
 EXPECTED_S25_MAGIC = 200025
 S25_COMMENT_RE = re.compile(r"s25_m231_[LS][0-9]{4,}")
-STATE_VERSION = 7
+STATE_VERSION = 8
+PREVIOUS_V24_STATE_VERSION = 7
+V24_STRATEGY_ID = "bot25_v24_xauusd_virtual_bilateral_core_v001"
+V24_STRATEGY_KEY = "v24_virtual_bilateral_book"
 PREVIOUS_STATE_VERSION = 6
 PREVIOUS_STRATEGY_ID = "bot25_v23_xauusd_drought_minority_pause_v001"
 PREVIOUS_STRATEGY_KEY = "v23_bilateral_book"
@@ -87,7 +92,23 @@ V24_CANDIDATE_SPEC = {
     "virtual_core_per_side": 1,
 }
 V24_CANDIDATE_HASH = "788e7b076cd49f67cc0f2f87677f350b8ac88bcc13b15bd26cde7589105cca36"
+BOT25_CANDIDATE_SPEC = {
+    "base_v24": V24_CANDIDATE_SPEC,
+    "exit_overlay": {
+        "confirmed_bar_minutes": 5,
+        "losing_ticket_only": True,
+        "loss_policy": "L05",
+        "opposite_native_pivot_break": True,
+        "reclaim_then_reloss": True,
+        "retroactive_on_upgrade": False,
+        "route": "existing_fill_confirmed_close",
+    },
+}
+BOT25_CANDIDATE_HASH = "ad0f8775c62303b037aa89e900d971900c6ead2e640f70b3dfec989c30d1d88c"
 PRODUCTIVE_CLOSE_REASONS = {"opposite_pivot_break", "ema200_retouch"}
+FULL_CLOSE_REASONS = {"feed_gap", "episode_12h"}
+M5_CLOSE_REASONS = PRODUCTIVE_CLOSE_REASONS | {"loss_policy_L05"}
+SUPPORTED_CLOSE_REASONS = FULL_CLOSE_REASONS | M5_CLOSE_REASONS
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
     "close_unconfirmed",
@@ -337,6 +358,8 @@ def add_man231_features(bars: pd.DataFrame) -> pd.DataFrame:
     out["atr14"] = tr.rolling(14, min_periods=14).mean()
     out["ema200"] = close.ewm(span=200, adjust=False, min_periods=200).mean()
     break_dir = np.zeros(len(out), dtype=np.int8)
+    native_pivot_high = np.full(len(out), np.nan, dtype=float)
+    native_pivot_low = np.full(len(out), np.nan, dtype=float)
     pivot_high = math.nan
     pivot_low = math.nan
     highs = high.to_numpy(float)
@@ -355,9 +378,13 @@ def add_man231_features(bars: pd.DataFrame) -> pd.DataFrame:
         buffer = 0.10 * atr[i]
         if math.isfinite(pivot_high) and closes[i - 1] <= pivot_high + buffer and closes[i] > pivot_high + buffer:
             break_dir[i] = 1
+            native_pivot_high[i] = pivot_high
         elif math.isfinite(pivot_low) and closes[i - 1] >= pivot_low - buffer and closes[i] < pivot_low - buffer:
             break_dir[i] = -1
+            native_pivot_low[i] = pivot_low
     out["break_dir"] = break_dir
+    out["native_pivot_high"] = native_pivot_high
+    out["native_pivot_low"] = native_pivot_low
     return out
 
 
@@ -594,6 +621,9 @@ class S25V24Runner:
             "pending_productive_close": None,
             "drought_blocked_adds": 0,
             "last_processed_m5_bar": None,
+            "l05_activation_m5_bar": None,
+            "l05_down_break": None,
+            "l05_up_break": None,
             "last_quote_utc": None,
             "skip_seed_quote_utc": None,
             "pending_post_close_action": None,
@@ -629,16 +659,25 @@ class S25V24Runner:
             "strategies": {strategy["id"]: self._default_strategy_state() for strategy in self.params["strategies"]},
         }
 
-    def _current_state_shape_error(self, state: Any) -> str | None:
-        """Validate current V24 lifecycle state before any defaults are injected."""
+    def _current_state_shape_error(
+        self, state: Any, *, allow_migration_episode_repair: bool = False,
+    ) -> str | None:
+        """Validate current V24+L05 lifecycle state before defaults are injected."""
         if not isinstance(state, dict) or not isinstance(state.get("strategies"), dict):
             return "state_or_strategies_not_object"
+        top_level_fields = {"version", "bot", "strategy_id", "last_saved_utc", "strategies"}
+        if not top_level_fields.issubset(state):
+            return "top_level_state_fields_missing"
+        if not allow_migration_episode_repair and set(state) != top_level_fields:
+            return "top_level_state_fields_unknown"
         if (
             state.get("version") != STATE_VERSION
             or state.get("bot") != "bot25"
             or state.get("strategy_id") != self.params.get("strategy_id")
         ):
             return "state_identity_invalid"
+        if state.get("last_saved_utc") not in (None, "") and parse_ts(state.get("last_saved_utc")) is None:
+            return "last_saved_utc_invalid"
         expected = {str(strategy["id"]) for strategy in self.params.get("strategies", [])}
         if set(state["strategies"]) != expected:
             return "strategy_key_set_mismatch"
@@ -646,6 +685,11 @@ class S25V24Runner:
             target = state["strategies"].get(strategy["id"])
             if not isinstance(target, dict) or not isinstance(target.get("positions"), list):
                 return "strategy_or_positions_shape_invalid"
+            strategy_state_fields = set(self._default_strategy_state())
+            if not strategy_state_fields.issubset(target):
+                return "strategy_state_fields_missing"
+            if not allow_migration_episode_repair and set(target) != strategy_state_fields:
+                return "strategy_state_fields_unknown"
             for field in (
                 "episode_sequence", "shadow_sequence", "drought_blocked_adds",
                 "trade_permission_reject_count", "flat_clear_confirmation_count",
@@ -653,16 +697,42 @@ class S25V24Runner:
                 value = target.get(field, 0)
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     return f"invalid_nonnegative_counter:{field}"
-            if target.get("active_wave", 0) not in {-1, 0, 1}:
+            active_wave_value = target.get("active_wave", 0)
+            if isinstance(active_wave_value, bool) or not isinstance(active_wave_value, int) or active_wave_value not in {-1, 0, 1}:
                 return "active_wave_invalid"
             for field in ("sync_block_new_entries", "sync_block_recoverable"):
                 if not isinstance(target.get(field, False), bool):
                     return f"invalid_boolean:{field}"
             if not isinstance(target.get("sync_block_details", {}), dict):
                 return "sync_block_details_invalid"
+            sync_blocked = bool(target.get("sync_block_new_entries", False))
+            sync_reason = str(target.get("sync_block_reason") or "")
+            sync_recoverable = bool(target.get("sync_block_recoverable", False))
+            sync_details = target.get("sync_block_details", {})
+            flat_count = int(target.get("flat_clear_confirmation_count", 0))
+            flat_reason = target.get("flat_clear_confirmation_reason")
+            if (
+                (sync_blocked and not sync_reason)
+                or (
+                    not sync_blocked
+                    and (bool(sync_reason) or sync_recoverable or bool(sync_details))
+                )
+                or (flat_count == 0 and flat_reason not in (None, ""))
+                or (
+                    flat_count > 0
+                    and (
+                        not sync_blocked
+                        or not sync_recoverable
+                        or str(flat_reason or "") != sync_reason
+                    )
+                )
+            ):
+                return "sync_block_lifecycle_invalid"
             for field in ("last_atr", "last_ema", "last_long_frontier", "last_short_frontier"):
                 value = target.get(field)
                 if value not in (None, ""):
+                    if isinstance(value, bool):
+                        return f"invalid_numeric_state:{field}"
                     try:
                         numeric_value = float(value)
                     except (TypeError, ValueError, OverflowError):
@@ -670,10 +740,29 @@ class S25V24Runner:
                     if not math.isfinite(numeric_value) or numeric_value <= 0.0:
                         return f"invalid_numeric_state:{field}"
             seen_ids: set[int] = set()
+            seen_tickets: set[int] = set()
+            seen_comments: set[str] = set()
             ids_by_side: dict[str, set[int]] = {"LONG": set(), "SHORT": set()}
             for position in target["positions"]:
                 if not isinstance(position, dict):
                     return "position_not_object"
+                required_position_fields = {
+                    "ticket", "position_identifier", "side", "lot", "entry_price",
+                    "entry_time_utc", "open_time_epoch", "owner_symbol", "owner_magic",
+                    "owner_comment", "shadow", "close_requested",
+                    "close_submission_started_utc", "l05_entry_m5_bar",
+                }
+                if not required_position_fields.issubset(position):
+                    return "position_fields_missing"
+                if not allow_migration_episode_repair and set(position) != required_position_fields:
+                    return "position_fields_unknown"
+                raw_position_numbers = (
+                    position.get("ticket"), position.get("position_identifier"),
+                    position.get("lot"), position.get("entry_price"),
+                    position.get("open_time_epoch"), position.get("owner_magic"),
+                )
+                if any(isinstance(value, bool) for value in raw_position_numbers):
+                    return "position_numeric_field_invalid"
                 try:
                     ticket = int(position.get("ticket") or 0)
                     position_id = int(position.get("position_identifier") or ticket)
@@ -686,8 +775,11 @@ class S25V24Runner:
                 shadow_value = position.get("shadow", False)
                 shadow = bool(shadow_value)
                 close_requested = position.get("close_requested", False)
+                owner_comment = str(position.get("owner_comment") or "")
+                comment_match = re.search(r"[LS]([0-9]+)$", owner_comment)
                 if (
-                    ticket == 0 or position_id == 0 or position_id in seen_ids
+                    ticket == 0 or ticket in seen_tickets
+                    or position_id == 0 or position_id in seen_ids
                     or (not shadow and (ticket < 0 or position_id < 0))
                     or not isinstance(shadow_value, bool)
                     or position.get("side") not in {"LONG", "SHORT"}
@@ -695,43 +787,128 @@ class S25V24Runner:
                     or not math.isfinite(entry_price) or entry_price <= 0.0
                     or open_time_epoch <= 0
                     or parse_ts(position.get("entry_time_utc")) is None
+                    or int(parse_ts(position.get("entry_time_utc")).timestamp()) != open_time_epoch
                     or str(position.get("owner_symbol") or "") != str(self.params.get("mt5_symbol", self.params["symbol"]))
                     or owner_magic != int(strategy["magic"])
-                    or S25_COMMENT_RE.fullmatch(str(position.get("owner_comment") or "")) is None
+                    or S25_COMMENT_RE.fullmatch(owner_comment) is None
+                    or not self._comment_matches_side(owner_comment, str(position.get("side")))
+                    or owner_comment in seen_comments
+                    or comment_match is None
                     or not isinstance(close_requested, bool)
                 ):
                     return "position_identity_or_ownership_invalid"
+                if getattr(self, "live_enabled", False) and shadow:
+                    return "shadow_position_in_live_state"
+                l05_entry_bar = position.get("l05_entry_m5_bar")
+                if l05_entry_bar not in (None, "") and parse_ts(l05_entry_bar) is None:
+                    return "position_l05_entry_m5_bar_invalid"
                 marker = position.get("close_submission_started_utc")
                 if marker not in (None, "") and (parse_ts(marker) is None or not close_requested):
                     return "close_submission_marker_invalid"
+                seen_tickets.add(ticket)
                 seen_ids.add(position_id)
+                seen_comments.add(owner_comment)
                 ids_by_side[str(position["side"])].add(position_id)
             pending_open = target.get("pending_open")
             if pending_open is not None and not isinstance(pending_open, dict):
                 return "pending_open_shape_invalid"
             if isinstance(pending_open, dict):
+                required_pending_open_fields = {
+                    "side", "lot", "comment", "reason", "opportunity_id",
+                    "quote_time_utc", "decision_time", "signal_bar_time",
+                    "known_position_ids", "flat_confirmation_count",
+                }
+                if not required_pending_open_fields.issubset(pending_open):
+                    return "pending_open_fields_missing"
+                if set(pending_open) != required_pending_open_fields:
+                    return "pending_open_fields_unknown"
                 known_values = pending_open.get("known_position_ids", [])
                 if not isinstance(known_values, list):
+                    return "pending_open_values_invalid"
+                if isinstance(pending_open.get("lot"), bool) or any(isinstance(value, bool) for value in known_values):
                     return "pending_open_values_invalid"
                 try:
                     pending_lot = float(pending_open.get("lot"))
                     known_ids = [int(value) for value in known_values]
                 except (TypeError, ValueError, OverflowError):
                     return "pending_open_values_invalid"
+                flat_confirmation_count = pending_open.get("flat_confirmation_count", 0)
+                signal_bar_time = pending_open.get("signal_bar_time")
                 if (
                     pending_open.get("side") not in {"LONG", "SHORT"}
                     or not math.isfinite(pending_lot)
                     or not math.isclose(pending_lot, float(strategy.get("lot", 0.01)), rel_tol=0.0, abs_tol=1e-9)
-                    or 0 in known_ids or len(known_ids) != len(set(known_ids))
+                    or any(value <= 0 for value in known_ids)
+                    or len(known_ids) != len(set(known_ids))
                     or S25_COMMENT_RE.fullmatch(str(pending_open.get("comment") or "")) is None
+                    or not self._comment_matches_side(
+                        pending_open.get("comment"), str(pending_open.get("side")),
+                    )
+                    or str(pending_open.get("comment") or "") in seen_comments
+                    or not str(pending_open.get("reason") or "")
+                    or not str(pending_open.get("opportunity_id") or "")
                     or parse_ts(pending_open.get("quote_time_utc")) is None
+                    or parse_ts(pending_open.get("decision_time")) is None
+                    or (signal_bar_time not in (None, "") and parse_ts(signal_bar_time) is None)
+                    or isinstance(flat_confirmation_count, bool)
+                    or not isinstance(flat_confirmation_count, int)
+                    or flat_confirmation_count not in {0, 1}
                 ):
                     return "pending_open_values_invalid"
+                pending_side = str(pending_open.get("side"))
+                pending_reason = str(pending_open.get("reason") or "")
+                quote_ts = parse_ts(pending_open.get("quote_time_utc"))
+                decision_ts = parse_ts(pending_open.get("decision_time"))
+                signal_ts = parse_ts(signal_bar_time)
+                expected_reason = "long_frontier_add" if pending_side == "LONG" else "short_frontier_add"
+                expected_opportunity = (
+                    self._opportunity_id(dt_text(signal_ts), decision_ts, "m5")
+                    if signal_ts is not None and decision_ts is not None else None
+                )
+                available_ts = signal_ts + pd.Timedelta(minutes=5) if signal_ts is not None else None
+                max_delay = pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 7)))
+                if (
+                    set(known_ids) != seen_ids
+                    or pending_reason != expected_reason
+                    or signal_ts is None
+                    or quote_ts != decision_ts
+                    or available_ts is None
+                    or decision_ts is None
+                    or decision_ts < available_ts
+                    or decision_ts > available_ts + max_delay
+                    or str(pending_open.get("opportunity_id") or "") != expected_opportunity
+                    or target.get("current_episode_id") is None
+                    or target.get("episode_start_quote_utc") is None
+                    or parse_ts(target.get("last_processed_m5_bar")) != signal_ts
+                    or int(target.get("active_wave", 0)) != (1 if pending_side == "LONG" else -1)
+                ):
+                    return "pending_open_causal_identity_invalid"
             if (target.get("current_episode_id") is None) != (target.get("episode_start_quote_utc") is None):
                 return "episode_identity_incomplete"
             episode_id = target.get("current_episode_id")
             if episode_id is not None and re.fullmatch(r"s25_(?:v24|m231)_e[0-9]{6,}", str(episode_id)) is None:
                 return "episode_identity_invalid"
+            if episode_id is not None:
+                episode_sequence = int(str(episode_id).rsplit("e", 1)[1])
+                if episode_sequence <= 0 or episode_sequence != int(target.get("episode_sequence", 0)):
+                    return "episode_sequence_identity_mismatch"
+            episode_active = episode_id is not None
+            if target["positions"] and not episode_active and not allow_migration_episode_repair:
+                return "position_without_episode_identity"
+            frontier_values = (
+                target.get("last_long_frontier"), target.get("last_short_frontier"),
+            )
+            if (
+                episode_active
+                and any(value in (None, "") for value in frontier_values)
+                and not allow_migration_episode_repair
+            ):
+                return "episode_frontier_identity_incomplete"
+            if not episode_active and (
+                int(target.get("active_wave", 0)) != 0
+                or any(value not in (None, "") for value in frontier_values)
+            ):
+                return "inactive_episode_lifecycle_invalid"
             legacy_core = target.get("legacy_physical_core_position_ids")
             if not isinstance(legacy_core, dict) or set(legacy_core) != {"LONG", "SHORT"}:
                 return "legacy_core_mapping_invalid"
@@ -754,26 +931,288 @@ class S25V24Runner:
                 mapped_ids.append(mapped_id)
             if len(mapped_ids) != len(set(mapped_ids)):
                 return "legacy_core_mapping_invalid"
+            real_counts = {
+                side: len(ids_by_side[side]) for side in ("LONG", "SHORT")
+            }
+            logical_counts: dict[str, int] = {}
+            for side in ("LONG", "SHORT"):
+                mapped = legacy_core.get(side)
+                mapped_id = int(mapped) if mapped is not None else 0
+                virtual_core = 0 if mapped_id > 0 and mapped_id in ids_by_side[side] else (1 if episode_active else 0)
+                logical_counts[side] = real_counts[side] + virtual_core
+            max_side = int(strategy.get("max_positions_per_side", 6))
+            ratio = int(strategy.get("max_active_to_opposite_ratio", 3))
+            if any(count > max_side for count in logical_counts.values()):
+                return "logical_position_cap_exceeded"
+            if (
+                logical_counts["LONG"]
+                and logical_counts["SHORT"]
+                and (
+                    logical_counts["LONG"] > ratio * logical_counts["SHORT"]
+                    or logical_counts["SHORT"] > ratio * logical_counts["LONG"]
+                )
+            ):
+                return "logical_position_ratio_exceeded"
+            activation_bar = target.get("l05_activation_m5_bar")
+            if activation_bar not in (None, "") and parse_ts(activation_bar) is None:
+                return "l05_activation_m5_bar_invalid"
+            activation_ts = parse_ts(activation_bar)
+            last_processed_ts = parse_ts(target.get("last_processed_m5_bar"))
+            l05_trackers_present = any(
+                target.get(name) is not None for name in ("l05_down_break", "l05_up_break")
+            )
+            l05_position_marks_present = any(
+                position.get("l05_entry_m5_bar") not in (None, "")
+                for position in target["positions"]
+            )
+            if activation_ts is None and (l05_trackers_present or l05_position_marks_present):
+                return "l05_activation_identity_incomplete"
+            if (l05_trackers_present or l05_position_marks_present) and last_processed_ts is None:
+                return "l05_processed_watermark_missing"
+            if activation_ts is not None and last_processed_ts is not None and activation_ts > last_processed_ts:
+                return "l05_activation_after_last_processed"
+            for position in target["positions"]:
+                entry_ts = parse_ts(position.get("l05_entry_m5_bar"))
+                if (
+                    (activation_ts is not None and entry_ts is not None and entry_ts < activation_ts)
+                    or (last_processed_ts is not None and entry_ts is not None and entry_ts > last_processed_ts)
+                ):
+                    return "position_l05_entry_time_order_invalid"
+            for tracker_name in ("l05_down_break", "l05_up_break"):
+                tracker = target.get(tracker_name)
+                if tracker is None:
+                    continue
+                if not isinstance(tracker, dict) or set(tracker) != {"level", "break_m5_bar", "reclaimed"}:
+                    return f"{tracker_name}_invalid"
+                try:
+                    level = float(tracker.get("level"))
+                except (TypeError, ValueError, OverflowError):
+                    return f"{tracker_name}_invalid"
+                if (
+                    isinstance(tracker.get("level"), bool)
+                    or not math.isfinite(level) or level <= 0.0
+                    or parse_ts(tracker.get("break_m5_bar")) is None
+                    or not isinstance(tracker.get("reclaimed"), bool)
+                ):
+                    return f"{tracker_name}_invalid"
+                break_ts = parse_ts(tracker.get("break_m5_bar"))
+                if (
+                    (activation_ts is not None and break_ts is not None and break_ts < activation_ts)
+                    or (last_processed_ts is not None and break_ts is not None and break_ts > last_processed_ts)
+                ):
+                    return f"{tracker_name}_time_order_invalid"
             pending_action = target.get("pending_post_close_action")
             if pending_action is not None:
-                if not isinstance(pending_action, dict) or pending_action.get("new_wave") not in {-1, 0, 1}:
+                if not isinstance(pending_action, dict) or not {
+                    "new_wave", "reason", "m5_bar",
+                }.issubset(pending_action):
+                    return "pending_post_close_action_fields_missing"
+                if set(pending_action) != {"new_wave", "reason", "m5_bar"}:
+                    return "pending_post_close_action_fields_unknown"
+                pending_wave = pending_action.get("new_wave") if isinstance(pending_action, dict) else None
+                pending_action_reason = str(pending_action.get("reason") or "") if isinstance(pending_action, dict) else ""
+                pending_action_bar = pending_action.get("m5_bar") if isinstance(pending_action, dict) else None
+                if (
+                    not isinstance(pending_action, dict)
+                    or isinstance(pending_wave, bool)
+                    or not isinstance(pending_wave, int)
+                    or pending_wave not in {-1, 0, 1}
+                    or pending_action_reason not in PRODUCTIVE_CLOSE_REASONS
+                    or parse_ts(pending_action_bar) is None
+                    or target.get("current_episode_id") is None
+                    or target.get("episode_start_quote_utc") is None
+                    or (
+                        pending_action_reason == "opposite_pivot_break"
+                        and (pending_wave == 0 or pending_wave != -int(target.get("active_wave", 0)))
+                    )
+                    or (
+                        pending_action_reason == "ema200_retouch"
+                        and (pending_wave != 0 or int(target.get("active_wave", 0)) == 0)
+                    )
+                ):
                     return "pending_post_close_action_invalid"
-                if pending_action.get("m5_bar") not in (None, "") and parse_ts(pending_action.get("m5_bar")) is None:
-                    return "pending_post_close_action_invalid"
+            pending_productive = target.get("pending_productive_close")
+            if pending_productive is not None:
+                if not isinstance(pending_productive, dict):
+                    return "pending_productive_close_invalid"
+                if not {
+                    "reason", "position_ids", "confirmed_ids",
+                    "strategy_profit_usd", "last_deal_utc",
+                }.issubset(pending_productive):
+                    return "pending_productive_close_fields_missing"
+                if set(pending_productive) != {
+                    "reason", "position_ids", "confirmed_ids",
+                    "strategy_profit_usd", "last_deal_utc",
+                }:
+                    return "pending_productive_close_fields_unknown"
+                position_ids_value = pending_productive.get("position_ids")
+                confirmed_ids_value = pending_productive.get("confirmed_ids")
+                if (
+                    not isinstance(position_ids_value, list)
+                    or not isinstance(confirmed_ids_value, list)
+                    or isinstance(pending_productive.get("strategy_profit_usd"), bool)
+                    or any(isinstance(value, bool) for value in [*position_ids_value, *confirmed_ids_value])
+                ):
+                    return "pending_productive_close_invalid"
+                try:
+                    position_ids = [int(value) for value in position_ids_value]
+                    confirmed_ids = [int(value) for value in confirmed_ids_value]
+                    strategy_profit = float(pending_productive.get("strategy_profit_usd"))
+                except (TypeError, ValueError, OverflowError):
+                    return "pending_productive_close_invalid"
+                last_deal = pending_productive.get("last_deal_utc")
+                if (
+                    not isinstance(position_ids_value, list)
+                    or not isinstance(confirmed_ids_value, list)
+                    or not position_ids
+                    or any(value <= 0 for value in position_ids)
+                    or any(value <= 0 for value in confirmed_ids)
+                    or len(position_ids) != len(set(position_ids))
+                    or len(confirmed_ids) != len(set(confirmed_ids))
+                    or not set(confirmed_ids).issubset(position_ids)
+                    or not math.isfinite(strategy_profit)
+                    or str(pending_productive.get("reason") or "") not in PRODUCTIVE_CLOSE_REASONS
+                    or (last_deal not in (None, "") and parse_ts(last_deal) is None)
+                ):
+                    return "pending_productive_close_invalid"
+                close_requested_ids = {
+                    int(position.get("position_identifier") or position.get("ticket") or 0)
+                    for position in target["positions"] if position.get("close_requested")
+                }
+                current_position_ids = {
+                    int(position.get("position_identifier") or position.get("ticket") or 0)
+                    for position in target["positions"]
+                }
+                unconfirmed_ids = set(position_ids) - set(confirmed_ids)
+                if (
+                    str(pending_productive.get("reason")) != str(target.get("pending_close_reason") or "")
+                    or not unconfirmed_ids
+                    or not unconfirmed_ids.issubset(close_requested_ids)
+                    or bool(set(confirmed_ids) & current_position_ids)
+                    or (bool(confirmed_ids) != (last_deal not in (None, "")))
+                ):
+                    return "pending_productive_close_lifecycle_invalid"
+            close_requested_present = any(
+                position.get("close_requested") for position in target["positions"]
+            )
+            pending_close_present = any(
+                target.get(field) not in (None, "")
+                for field in (
+                    "pending_close_reason", "pending_close_m5_bar",
+                    "pending_close_requested_at_utc", "close_retry_after_utc",
+                )
+            ) or pending_productive is not None
+            if (
+                close_requested_present
+                and (
+                    not str(target.get("pending_close_reason") or "")
+                    or parse_ts(target.get("pending_close_requested_at_utc")) is None
+                )
+            ) or (pending_close_present and not close_requested_present):
+                return "pending_close_lifecycle_invalid"
+            if close_requested_present:
+                pending_close_reason = str(target.get("pending_close_reason") or "")
+                pending_close_bar = parse_ts(target.get("pending_close_m5_bar"))
+                pending_close_requested_at = parse_ts(target.get("pending_close_requested_at_utc"))
+                close_retry_after = parse_ts(target.get("close_retry_after_utc"))
+                if pending_close_reason not in SUPPORTED_CLOSE_REASONS:
+                    return "pending_close_reason_invalid"
+                if pending_close_reason in M5_CLOSE_REASONS:
+                    close_available_at = (
+                        pending_close_bar + pd.Timedelta(minutes=5)
+                        if pending_close_bar is not None else None
+                    )
+                    close_max_delay = pd.Timedelta(
+                        minutes=float(self.params.get("max_signal_delay_minutes", 7))
+                    )
+                    if (
+                        pending_close_bar is None
+                        or last_processed_ts is None
+                        or pending_close_bar != last_processed_ts
+                        or pending_close_requested_at is None
+                        or close_available_at is None
+                        or pending_close_requested_at < close_available_at
+                        or pending_close_requested_at > close_available_at + close_max_delay
+                    ):
+                        return "pending_close_m5_identity_invalid"
+                elif target.get("pending_close_m5_bar") not in (None, ""):
+                    return "pending_close_m5_identity_invalid"
+                submission_markers = [
+                    parse_ts(position.get("close_submission_started_utc"))
+                    for position in target["positions"]
+                    if position.get("close_requested")
+                    and position.get("close_submission_started_utc") not in (None, "")
+                ]
+                if (
+                    pending_close_requested_at is None
+                    or (
+                        close_retry_after is not None
+                        and close_retry_after < pending_close_requested_at
+                    )
+                    or any(marker < pending_close_requested_at for marker in submission_markers)
+                    or (
+                        close_retry_after is not None
+                        and any(marker > close_retry_after for marker in submission_markers)
+                    )
+                ):
+                    return "pending_close_time_order_invalid"
+            if pending_action is not None and close_requested_present and (
+                str(pending_action.get("reason") or "") != str(target.get("pending_close_reason") or "")
+                or parse_ts(pending_action.get("m5_bar")) != parse_ts(target.get("pending_close_m5_bar"))
+            ):
+                return "pending_post_close_action_lifecycle_invalid"
             close_defer = target.get("close_defer")
             if close_defer is not None:
                 if not isinstance(close_defer, dict) or not str(close_defer.get("reason") or ""):
                     return "close_defer_invalid"
+                if not {
+                    "reason", "armed_at_utc", "first_wide_quote_utc",
+                    "last_evaluated_quote_utc", "stable_quote_count", "next_retry_utc",
+                }.issubset(close_defer):
+                    return "close_defer_fields_missing"
+                if set(close_defer) != {
+                    "reason", "armed_at_utc", "first_wide_quote_utc",
+                    "last_evaluated_quote_utc", "stable_quote_count", "next_retry_utc",
+                }:
+                    return "close_defer_fields_unknown"
                 for field in ("armed_at_utc", "first_wide_quote_utc", "last_evaluated_quote_utc", "next_retry_utc"):
                     if close_defer.get(field) not in (None, "") and parse_ts(close_defer.get(field)) is None:
                         return "close_defer_invalid"
                 stable_count = close_defer.get("stable_quote_count", 0)
                 if isinstance(stable_count, bool) or not isinstance(stable_count, int) or stable_count < 0:
                     return "close_defer_invalid"
+                defer_reason = str(close_defer.get("reason") or "")
+                armed_at = parse_ts(close_defer.get("armed_at_utc"))
+                first_wide = parse_ts(close_defer.get("first_wide_quote_utc"))
+                last_evaluated = parse_ts(close_defer.get("last_evaluated_quote_utc"))
+                if defer_reason not in FULL_CLOSE_REASONS:
+                    return "close_defer_reason_invalid"
+                if (
+                    not episode_active
+                    or armed_at is None
+                    or (stable_count > 0 and first_wide is None)
+                    or (first_wide is not None and first_wide < armed_at)
+                    or (last_evaluated is not None and last_evaluated < armed_at)
+                    or (
+                        first_wide is not None
+                        and last_evaluated is not None
+                        and last_evaluated < first_wide
+                    )
+                ):
+                    return "close_defer_lifecycle_invalid"
+            if pending_open is not None and (
+                close_requested_present
+                or pending_close_present
+                or close_defer is not None
+                or pending_action is not None
+            ):
+                return "open_close_lifecycle_conflict"
             for field in (
                 "episode_start_quote_utc", "last_productive_close_utc", "last_processed_m5_bar",
+                "l05_activation_m5_bar",
                 "last_quote_utc", "skip_seed_quote_utc", "entry_retry_until_utc",
                 "pending_close_m5_bar", "pending_close_requested_at_utc", "close_retry_after_utc",
+                "manual_alert_last_at_utc", "last_decision_receipt_m5_bar",
             ):
                 if target.get(field) not in (None, "") and parse_ts(target.get(field)) is None:
                     return f"invalid_timestamp:{field}"
@@ -802,6 +1241,54 @@ class S25V24Runner:
         except (TypeError, ValueError):
             state_version = 0
             current_identity = False
+        compatible_v24 = (
+            isinstance(state, dict)
+            and state.get("bot") == "bot25"
+            and state.get("strategy_id") == V24_STRATEGY_ID
+            and state_version == PREVIOUS_V24_STATE_VERSION
+            and isinstance(state.get("strategies"), dict)
+            and set(state["strategies"]) == {V24_STRATEGY_KEY}
+            and isinstance(state["strategies"].get(V24_STRATEGY_KEY), dict)
+            and self.params.get("strategy_id") == V24_STRATEGY_ID
+        )
+        if compatible_v24 and len(self.params.get("strategies", [])) == 1:
+            target_key = self.params["strategies"][0]["id"]
+            state["version"] = STATE_VERSION
+            state["strategies"] = {target_key: state["strategies"][V24_STRATEGY_KEY]}
+            target = state["strategies"][target_key]
+            prior_processed_bar = target.get("last_processed_m5_bar")
+            for key, value in self._default_strategy_state().items():
+                target.setdefault(key, copy.deepcopy(value))
+            target["l05_activation_m5_bar"] = prior_processed_bar
+            target["l05_down_break"] = None
+            target["l05_up_break"] = None
+            for position in target.get("positions") or []:
+                if isinstance(position, dict):
+                    position.setdefault("close_submission_started_utc", None)
+                    position["l05_entry_m5_bar"] = prior_processed_bar
+            shape_error = self._current_state_shape_error(
+                state, allow_migration_episode_repair=True,
+            )
+            if shape_error:
+                self._state_identity_status = "foreign_or_invalid"
+                logging.critical("S25 V24 state cannot form a valid L05 state: %s", shape_error)
+                default_state = default["strategies"][target_key]
+                default_state["sync_block_new_entries"] = True
+                default_state["sync_block_reason"] = f"v24_l05_state_shape_invalid:{shape_error}"
+                default_state["sync_block_recoverable"] = False
+                return default
+            self._state_identity_status = "compatible_v24_to_l05_pending"
+            self._retired_state_sha256 = hashlib.sha256(raw or b"").hexdigest()
+            self._compatible_source_identity = {
+                "version": PREVIOUS_V24_STATE_VERSION,
+                "strategy_id": V24_STRATEGY_ID,
+                "strategy_key": V24_STRATEGY_KEY,
+            }
+            logging.warning(
+                "S25 V24 state staged for broker-owned inventory proof before L05 activation: positions=%d",
+                len(target.get("positions") or []),
+            )
+            return state
         compatible_spec = next(
             (
                 (version, strategy_id, strategy_key)
@@ -825,10 +1312,17 @@ class S25V24Runner:
             target = state["strategies"][target_key]
             for key, value in self._default_strategy_state().items():
                 target.setdefault(key, value)
+            prior_processed_bar = target.get("last_processed_m5_bar")
+            target["l05_activation_m5_bar"] = prior_processed_bar
+            target["l05_down_break"] = None
+            target["l05_up_break"] = None
             for position in target.get("positions") or []:
                 if isinstance(position, dict):
                     position.setdefault("close_submission_started_utc", None)
-            shape_error = self._current_state_shape_error(state)
+                    position["l05_entry_m5_bar"] = prior_processed_bar
+            shape_error = self._current_state_shape_error(
+                state, allow_migration_episode_repair=True,
+            )
             if shape_error:
                 self._state_identity_status = "foreign_or_invalid"
                 logging.critical("S25 compatible legacy state cannot form a valid V24 state: %s", shape_error)
@@ -875,7 +1369,7 @@ class S25V24Runner:
         shape_error = self._current_state_shape_error(state)
         if shape_error:
             self._state_identity_status = "foreign_or_invalid"
-            logging.critical("S25 current V24 state shape invalid: %s", shape_error)
+            logging.critical("S25 current V24+L05 state shape invalid: %s", shape_error)
             default_state = default["strategies"][self.params["strategies"][0]["id"]]
             default_state["sync_block_new_entries"] = True
             default_state["sync_block_reason"] = f"state_shape_invalid:{shape_error}"
@@ -896,7 +1390,29 @@ class S25V24Runner:
         if getattr(self, "_close_transaction_active", False):
             return
         self.state["last_saved_utc"] = dt_text(utc_now())
+        shape_error = self._current_state_shape_error(self.state)
+        if shape_error:
+            raise RuntimeError(f"refusing invalid current state save: {shape_error}")
         atomic_write_json(STATE_FILE, self.state)
+
+    def _save_runtime_state_if_valid(self, context: str) -> bool:
+        """Persist a handled runtime block without overwriting valid state.
+
+        Direct callers of `_save_state` still receive an exception for invalid
+        internal state. Runtime failure branches use this guard because their
+        purpose is to remain fail-closed and retry diagnostics, not to crash
+        repeatedly after an already detected structural violation.
+        """
+        shape_error = self._current_state_shape_error(self.state)
+        if shape_error:
+            logging.critical(
+                "S25 %s left invalid in-memory state; canonical state preserved: %s",
+                context,
+                shape_error,
+            )
+            return False
+        self._save_state()
+        return True
 
     @contextmanager
     def _close_state_transaction(self):
@@ -914,6 +1430,11 @@ class S25V24Runner:
         try:
             yield
             self.state["last_saved_utc"] = dt_text(utc_now())
+            shape_error = self._current_state_shape_error(self.state)
+            if shape_error:
+                raise RuntimeError(
+                    f"refusing invalid transactional state save: {shape_error}"
+                )
             attempted = copy.deepcopy(self.state)
             atomic_write_json(STATE_FILE, attempted)
         except BaseException:
@@ -992,9 +1513,11 @@ class S25V24Runner:
         return True
 
     def _commit_compatible_state_upgrade(self, strategy: dict[str, Any], quote_time: pd.Timestamp) -> bool:
-        """Persist a proven legacy -> V24 state upgrade with unchanged-file CAS."""
-        if self._state_identity_status != "compatible_legacy_to_v24_pending" or not self._retired_state_sha256:
+        """Persist a proven compatible state upgrade with unchanged-file CAS."""
+        pending_statuses = {"compatible_legacy_to_v24_pending", "compatible_v24_to_l05_pending"}
+        if self._state_identity_status not in pending_statuses or not self._retired_state_sha256:
             return False
+        upgrade_status = self._state_identity_status
         try:
             with open(STATE_FILE, "rb") as handle:
                 current_raw = handle.read()
@@ -1002,14 +1525,14 @@ class S25V24Runner:
             logging.exception("S25 compatible-state CAS read failed; old state preserved")
             return False
         if hashlib.sha256(current_raw).hexdigest() != self._retired_state_sha256:
-            logging.critical("S25 legacy state changed during V24 preflight; upgrade refused")
+            logging.critical("S25 compatible state changed during preflight; upgrade refused")
             return False
         digest_prefix = self._retired_state_sha256[:12]
         source = dict(self._compatible_source_identity or {})
         try:
             self._save_state()
         except Exception:
-            logging.exception("S25 compatible V24 state save failed; old state preserved")
+            logging.exception("S25 compatible state save failed; old state preserved")
             return False
         self._state_identity_status = "current"
         self._retired_state_sha256 = None
@@ -1020,8 +1543,9 @@ class S25V24Runner:
             "startup_state_migrated", strategy, quote_time_utc=dt_text(quote_time),
             opportunity_id=self._opportunity_id(None, quote_time, "startup_state_migrated"),
             reason=(
-                "nonflat_legacy_owned_inventory_upgraded_to_v24"
-                if migrated_positions else "flat_legacy_state_upgraded_to_v24"
+                ("nonflat_v24_owned_inventory_upgraded_to_l05" if migrated_positions else "flat_v24_state_upgraded_to_l05")
+                if upgrade_status == "compatible_v24_to_l05_pending"
+                else ("nonflat_legacy_owned_inventory_upgraded_to_v24" if migrated_positions else "flat_legacy_state_upgraded_to_v24")
             ),
             note=json.dumps(
                 {
@@ -1035,8 +1559,10 @@ class S25V24Runner:
         )
         return True
 
-    def _compatible_state_inventory_proven_and_staged(self, strategy: dict[str, Any]) -> bool:
-        """Prove an exact reservation-free legacy inventory and stage transitional cores."""
+    def _compatible_state_inventory_proven_and_staged(
+        self, strategy: dict[str, Any], info: Any,
+    ) -> bool:
+        """Prove exact reservation-free inventory before a compatible state upgrade."""
         state = self._st(strategy)
         positions_state = state.get("positions")
         if not isinstance(positions_state, list):
@@ -1100,15 +1626,17 @@ class S25V24Runner:
             ):
                 logging.critical("S25 V24 migration state/broker side, lot, or ownership does not match")
                 return False
-            core_ids: dict[str, int | None] = {"LONG": None, "SHORT": None}
-            for side in ("LONG", "SHORT"):
-                side_positions = [position for position in positions_state if position.get("side") == side]
-                if side_positions:
-                    core = min(side_positions, key=lambda row: float(row["entry_price"])) if side == "LONG" else max(
-                        side_positions, key=lambda row: float(row["entry_price"])
-                    )
-                    core_ids[side] = int(core.get("position_identifier") or core.get("ticket"))
-            state["legacy_physical_core_position_ids"] = core_ids
+            source_version = int((self._compatible_source_identity or {}).get("version", 0) or 0)
+            if source_version != PREVIOUS_V24_STATE_VERSION:
+                core_ids: dict[str, int | None] = {"LONG": None, "SHORT": None}
+                for side in ("LONG", "SHORT"):
+                    side_positions = [position for position in positions_state if position.get("side") == side]
+                    if side_positions:
+                        core = min(side_positions, key=lambda row: float(row["entry_price"])) if side == "LONG" else max(
+                            side_positions, key=lambda row: float(row["entry_price"])
+                        )
+                        core_ids[side] = int(core.get("position_identifier") or core.get("ticket"))
+                state["legacy_physical_core_position_ids"] = core_ids
             if positions_state:
                 self._ensure_episode_identity(strategy)
                 if state.get("episode_start_quote_utc") is None:
@@ -1118,6 +1646,12 @@ class S25V24Runner:
                         logging.critical("S25 V24 migration requires broker-derived entry time for nonflat inventory")
                         return False
                     state["episode_start_quote_utc"] = dt_text(min(opened))
+            if state.get("episode_start_quote_utc") is not None:
+                current_mid = 0.5 * (float(info.bid) + float(info.ask))
+                if state.get("last_long_frontier") in (None, ""):
+                    state["last_long_frontier"] = current_mid
+                if state.get("last_short_frontier") in (None, ""):
+                    state["last_short_frontier"] = current_mid
             long_count, short_count = self._logical_position_counts(strategy)
             max_side = int(strategy.get("max_positions_per_side", 6))
             ratio = int(strategy.get("max_active_to_opposite_ratio", 3))
@@ -1129,6 +1663,10 @@ class S25V24Runner:
             return False
         if long_count and short_count and (long_count > ratio * short_count or short_count > ratio * long_count):
             logging.critical("S25 V24 migration would exceed the logical side ratio")
+            return False
+        shape_error = self._current_state_shape_error(self.state)
+        if shape_error:
+            logging.critical("S25 staged migration did not form a valid current state: %s", shape_error)
             return False
         return True
 
@@ -1243,7 +1781,7 @@ class S25V24Runner:
                     self._last_retained_block_warning = retained
                 return
             self._last_retained_block_warning = None
-            if previous != reason:
+            if previous != reason or bool(state.get("sync_block_recoverable", False)) != bool(recoverable):
                 state["flat_clear_confirmation_count"] = 0
                 state["flat_clear_confirmation_reason"] = None
                 logging.error("S25 entry/add blocked: %s", reason)
@@ -1267,6 +1805,12 @@ class S25V24Runner:
     def _side_from_record(record: Any) -> str:
         return "LONG" if int(getattr(record, "type", -1)) == ORDER_TYPE_BUY else "SHORT"
 
+    @staticmethod
+    def _comment_matches_side(comment: Any, side: str) -> bool:
+        text = str(comment or "")
+        match = S25_COMMENT_RE.fullmatch(text)
+        return match is not None and text[len("s25_m231_")] == ("L" if side == "LONG" else "S")
+
     def _owned_position(self, strategy: dict[str, Any], record: Any) -> bool:
         try:
             return (
@@ -1276,7 +1820,9 @@ class S25V24Runner:
                 and math.isclose(float(getattr(record, "volume", 0.0)), float(strategy.get("lot", 0.01)), rel_tol=0.0, abs_tol=1e-9)
                 and str(getattr(record, "symbol", "")) == str(self.params.get("mt5_symbol", self.params["symbol"]))
                 and int(getattr(record, "magic", -1)) == int(strategy["magic"])
-                and S25_COMMENT_RE.fullmatch(str(getattr(record, "comment", "") or "")) is not None
+                and self._comment_matches_side(
+                    getattr(record, "comment", ""), self._side_from_record(record),
+                )
             )
         except (TypeError, ValueError, OverflowError):
             return False
@@ -1289,8 +1835,8 @@ class S25V24Runner:
                 and int(position.get("position_identifier") or position.get("ticket") or 0) > 0
                 and str(position.get("owner_symbol") or "") == str(self.params.get("mt5_symbol", self.params["symbol"]))
                 and int(position.get("owner_magic") or -1) == int(strategy["magic"])
-                and S25_COMMENT_RE.fullmatch(str(position.get("owner_comment") or "")) is not None
                 and position.get("side") in {"LONG", "SHORT"}
+                and self._comment_matches_side(position.get("owner_comment"), str(position.get("side")))
                 and math.isclose(float(position.get("lot") or 0.0), float(strategy.get("lot", 0.01)), rel_tol=0.0, abs_tol=1e-9)
             )
         except (TypeError, ValueError, OverflowError):
@@ -1305,6 +1851,12 @@ class S25V24Runner:
                 int(state_position.get("ticket") or 0) == int(getattr(live_position, "ticket", 0) or 0)
                 and state_id == live_id
                 and int(state_position.get("open_time_epoch") or 0) == live_open_time
+                and math.isclose(
+                    float(state_position.get("entry_price") or 0.0),
+                    float(getattr(live_position, "open_price", 0.0)),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
                 and self._state_ownership_proven(strategy, state_position)
                 and str(state_position.get("owner_comment") or "") == str(getattr(live_position, "comment", "") or "")
                 and state_position.get("side") == self._side_from_record(live_position)
@@ -1331,7 +1883,9 @@ class S25V24Runner:
             raise ValueError("broker position open time unavailable")
         return pd.Timestamp(open_time, unit="s", tz="UTC"), open_time
 
-    def _state_position_from_live(self, strategy: dict[str, Any], live_position: Any) -> dict[str, Any]:
+    def _state_position_from_live(
+        self, strategy: dict[str, Any], live_position: Any, l05_entry_m5_bar: str | None = None,
+    ) -> dict[str, Any]:
         position_id = int(getattr(live_position, "identifier", 0) or live_position.ticket)
         open_timestamp, open_time = self._broker_open_timestamp(live_position)
         return {
@@ -1344,6 +1898,7 @@ class S25V24Runner:
             "owner_comment": str(getattr(live_position, "comment", "") or ""),
             "shadow": False, "close_requested": False,
             "close_submission_started_utc": None,
+            "l05_entry_m5_bar": l05_entry_m5_bar,
         }
 
     @staticmethod
@@ -1499,18 +2054,37 @@ class S25V24Runner:
             self._save_state()
             return False
         known = {int(value) for value in pending.get("known_position_ids", [])}
+        reservation_time = parse_ts(pending.get("decision_time"))
+        if reservation_time is None:
+            reservation_time = parse_ts(pending.get("quote_time_utc"))
+
+        def reserved_candidate(position: Any) -> bool:
+            try:
+                opened_at, _opened_epoch = self._broker_open_timestamp(position)
+                time_matches = (
+                    reservation_time is not None
+                    and reservation_time <= opened_at <= reservation_time + pd.Timedelta(seconds=60)
+                )
+                return (
+                    int(getattr(position, "identifier", 0) or position.ticket) not in known
+                    and self._side_from_record(position) == pending.get("side")
+                    and abs(float(position.volume) - float(pending.get("lot", 0))) <= 1e-9
+                    and str(getattr(position, "comment", "") or "") == str(pending.get("comment", ""))
+                    and time_matches
+                )
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return False
+
         candidates = [
-            position for position in positions
-            if int(getattr(position, "identifier", 0) or position.ticket) not in known
-            and self._side_from_record(position) == pending.get("side")
-            and abs(float(position.volume) - float(pending.get("lot", 0))) <= 1e-9
-            and str(getattr(position, "comment", "") or "") == str(pending.get("comment", ""))
+            position for position in positions if reserved_candidate(position)
         ]
         unknown_ids = {int(getattr(position, "identifier", 0) or position.ticket) for position in positions} - known
         if len(candidates) == 1 and len(unknown_ids) == 1:
             with self._close_state_transaction():
                 self._ensure_episode_identity(strategy)
-                recovered_position = self._state_position_from_live(strategy, candidates[0])
+                recovered_position = self._state_position_from_live(
+                    strategy, candidates[0], pending.get("signal_bar_time"),
+                )
                 state["positions"].append(recovered_position)
                 state["pending_open"] = None
                 if state.get("sync_block_reason") in {None, "ambiguous_open_result", "pending_open_reconciliation_ambiguous"}:
@@ -1567,19 +2141,23 @@ class S25V24Runner:
         return None
 
     def _configuration_contract_error(self) -> str | None:
-        """Pin every strategy-semantic value represented by the V24 identity/hash."""
-        if bool(self.params.get("live_trading_enabled", False)) == bool(self.params.get("shadow_forward_enabled", False)):
+        """Pin every strategy-semantic value represented by the V24+L05 identity/hash."""
+        live_flag = self.params.get("live_trading_enabled")
+        shadow_flag = self.params.get("shadow_forward_enabled")
+        if type(live_flag) is not bool or type(shadow_flag) is not bool:
+            return "live_shadow_mode_boolean_required"
+        if live_flag == shadow_flag:
             return "exactly_one_live_or_shadow_mode_required"
         exact = {
             "enabled": True,
             "require_hedging_account": True,
             "bot_number": "25", "bot_suffix": "s25",
             "strategy_id": "bot25_v24_xauusd_virtual_bilateral_core_v001",
-            "candidate_id": "combo_014_v001_v001_virtual_core_v001",
-            "candidate_params_hash": V24_CANDIDATE_HASH,
-            "parent_candidate_params_hash": V24_CANDIDATE_SPEC["parent_hash"],
+            "candidate_id": "bot25_exit20_l05_v3_live_v001",
+            "candidate_params_hash": BOT25_CANDIDATE_HASH,
+            "parent_candidate_params_hash": V24_CANDIDATE_HASH,
             "expected_bridge_name": "BotBridge_s25",
-            "expected_bridge_version": "2026-09-04-s25-v24-atomic-v8",
+            "expected_bridge_version": "2026-09-05-s25-v24-atomic-v10",
             "real_trading_activation_env": "BOT25_ENABLE_REAL_TRADING",
             "real_trading_activation_value": "V24_VIRTUAL_CORE_LIVE_ACK",
             "expected_magic": EXPECTED_S25_MAGIC,
@@ -1590,10 +2168,12 @@ class S25V24Runner:
             "enforce_broker_quote_freshness": True,
         }
         for key, expected in exact.items():
-            if self.params.get(key) != expected:
+            observed = self.params.get(key)
+            if type(observed) is not type(expected) or observed != expected:
                 return f"config_mismatch:{key}"
         numeric = {
             "default_lot": 0.01, "contract_size": 100.0, "point_size": 0.001,
+            "poll_interval_seconds": 5.0,
             "productive_close_threshold_usd": 0.10,
             "productive_close_drought_minutes": 120.0, "episode_minutes": 720.0,
             "live_release_profit_buffer_price": 0.030,
@@ -1611,8 +2191,11 @@ class S25V24Runner:
             "trade_permission_alert_threshold": 3.0,
         }
         for key, expected in numeric.items():
+            raw_observed = self.params.get(key)
+            if isinstance(raw_observed, bool):
+                return f"config_mismatch:{key}"
             try:
-                observed = float(self.params.get(key))
+                observed = float(raw_observed)
             except (TypeError, ValueError, OverflowError):
                 return f"config_mismatch:{key}"
             if not math.isfinite(observed) or not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12):
@@ -1621,24 +2204,29 @@ class S25V24Runner:
         strategy_exact = {
             "enabled": True,
             "id": "v24_virtual_bilateral_book",
-            "spec_id": "man_231_drought_minority_virtual_core_v24_v001",
+            "spec_id": "man_231_drought_minority_virtual_core_v24_l05_v001",
             "magic": EXPECTED_S25_MAGIC, "comment_prefix": "s25_m231",
             "atr_period": 14, "ema_period": 200, "pivot_radius": 2,
             "virtual_core_positions_per_side": 1, "physical_seed_orders": 0,
             "max_positions_per_side": 6, "max_active_to_opposite_ratio": 3,
+            "loss_policy": "L05",
         }
         for key, expected in strategy_exact.items():
-            if strategy.get(key) != expected:
+            observed = strategy.get(key)
+            if type(observed) is not type(expected) or observed != expected:
                 return f"strategy_config_mismatch:{key}"
         for key, expected in {"lot": 0.01, "pivot_break_atr_buffer": 0.10, "frontier_add_atr": 0.50}.items():
+            raw_observed = strategy.get(key)
+            if isinstance(raw_observed, bool):
+                return f"strategy_config_mismatch:{key}"
             try:
-                observed = float(strategy.get(key))
+                observed = float(raw_observed)
             except (TypeError, ValueError, OverflowError):
                 return f"strategy_config_mismatch:{key}"
             if not math.isfinite(observed) or not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12):
                 return f"strategy_config_mismatch:{key}"
-        encoded_spec = json.dumps(V24_CANDIDATE_SPEC, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if hashlib.sha256(encoded_spec).hexdigest() != V24_CANDIDATE_HASH:
+        encoded_spec = json.dumps(BOT25_CANDIDATE_SPEC, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if hashlib.sha256(encoded_spec).hexdigest() != BOT25_CANDIDATE_HASH:
             return "embedded_candidate_hash_mismatch"
         expected_safety = {
             "hist_timestamps_are_utc": True,
@@ -1757,8 +2345,8 @@ class S25V24Runner:
         if self._state_identity_status == "retired_bot25":
             if not self._retire_loaded_state_if_flat(strategy, quote_time):
                 return False
-        if self._state_identity_status == "compatible_legacy_to_v24_pending":
-            if not self._compatible_state_inventory_proven_and_staged(strategy):
+        if self._state_identity_status in {"compatible_legacy_to_v24_pending", "compatible_v24_to_l05_pending"}:
+            if not self._compatible_state_inventory_proven_and_staged(strategy, info):
                 return False
             if not self._commit_compatible_state_upgrade(strategy, quote_time):
                 return False
@@ -1804,6 +2392,17 @@ class S25V24Runner:
     def _sync_strategy(self, strategy: dict[str, Any]) -> bool:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         state = self._st(strategy)
+        if self.live_enabled and any(
+            bool(position.get("shadow", False))
+            for position in state.get("positions") or []
+            if isinstance(position, dict)
+        ):
+            self._set_sync_block(
+                strategy, "shadow_positions_present_in_live_mode", recoverable=False,
+            )
+            # This is a local state-contract violation, not a broker condition.
+            # Reject it before any query-dependent branch can try to persist it.
+            return False
         positions = self.executor.get_positions(symbol, int(strategy["magic"]))
         orders = self.executor.get_orders(symbol, int(strategy["magic"]))
         if not self.live_enabled and self._has_real_state_positions(strategy):
@@ -1845,10 +2444,6 @@ class S25V24Runner:
             return False
         if not self.live_enabled and not self._has_real_state_positions(strategy):
             return True
-        if self.live_enabled and any(bool(position.get("shadow", False)) for position in state.get("positions") or []):
-            self._set_sync_block(strategy, "shadow_positions_present_in_live_mode", recoverable=False)
-            self._save_state()
-            return False
         state_positions = list(state.get("positions") or [])
         if state_positions and not state.get("current_episode_id"):
             self._ensure_episode_identity(strategy)
@@ -2118,9 +2713,18 @@ class S25V24Runner:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         lot = float(strategy.get("lot", self.params.get("default_lot", 0.01)))
         digits = int(self.params.get("price_digits", 3))
-        state["shadow_sequence"] = int(state.get("shadow_sequence", 0)) + 1
-        sequence = int(state["shadow_sequence"])
-        comment = f"{strategy['comment_prefix']}_{'L' if side == 'LONG' else 'S'}{sequence:04d}"[:31]
+        used_comments = {
+            str(position.get("owner_comment") or "")
+            for position in state.get("positions") or [] if isinstance(position, dict)
+        }
+        if isinstance(state.get("pending_open"), dict):
+            used_comments.add(str(state["pending_open"].get("comment") or ""))
+        while True:
+            state["shadow_sequence"] = int(state.get("shadow_sequence", 0)) + 1
+            sequence = int(state["shadow_sequence"])
+            comment = f"{strategy['comment_prefix']}_{'L' if side == 'LONG' else 'S'}{sequence:04d}"[:31]
+            if comment not in used_comments:
+                break
         opportunity_id = opportunity_id or self._opportunity_id(signal_bar_time, quote_time, reason)
         causal = self._causal_fields(signal_bar_time, quote_time)
         ticket: int | None = None
@@ -2202,7 +2806,16 @@ class S25V24Runner:
                     and math.isclose(float(position.volume), lot, rel_tol=0.0, abs_tol=1e-9)
                 ]
                 returned_identifier = int(getattr(self.executor, "last_open_identifier", 0) or 0)
-                if len(matches) == 1 and int(getattr(matches[0], "identifier", 0) or 0) == returned_identifier and len(new_owned) == 1:
+                returned_price = float(getattr(self.executor, "last_open_price", 0.0) or 0.0)
+                returned_time_msc = int(getattr(self.executor, "last_open_time_msc", 0) or 0)
+                matched_open_time_msc = int(getattr(matches[0], "open_time_msc", 0) or 0) if len(matches) == 1 else 0
+                if (
+                    len(matches) == 1
+                    and int(getattr(matches[0], "identifier", 0) or 0) == returned_identifier
+                    and math.isclose(float(matches[0].open_price), returned_price, rel_tol=0.0, abs_tol=1e-9)
+                    and matched_open_time_msc == returned_time_msc
+                    and len(new_owned) == 1
+                ):
                     confirmed = matches[0]
             if confirmed is None:
                 if not new_owned and self._open_error_is_definitive_no_fill(error):
@@ -2238,7 +2851,7 @@ class S25V24Runner:
         position_id = int(getattr(confirmed, "identifier", 0) or ticket or 0) if confirmed is not None else int(ticket or 0)
         execution_time = quote_time
         if confirmed is not None:
-            confirmed_state_position = self._state_position_from_live(strategy, confirmed)
+            confirmed_state_position = self._state_position_from_live(strategy, confirmed, signal_bar_time)
             state["positions"].append(confirmed_state_position)
             parsed_execution_time = parse_ts(confirmed_state_position.get("entry_time_utc"))
             if parsed_execution_time is None:
@@ -2252,6 +2865,7 @@ class S25V24Runner:
                 "owner_magic": int(strategy["magic"]), "owner_comment": comment,
                 "shadow": True, "close_requested": False,
                 "close_submission_started_utc": None,
+                "l05_entry_m5_bar": signal_bar_time,
             })
         logged_ticket = int(getattr(confirmed, "ticket", 0) or ticket or 0)
         price_basis = "broker_confirmed_open" if confirmed is not None else "shadow_adverse_cost_proxy"
@@ -2276,6 +2890,33 @@ class S25V24Runner:
         if not selected:
             return "nothing"
         state = self._st(strategy)
+        close_bar = parse_ts(m5_bar)
+        close_available_at = close_bar + pd.Timedelta(minutes=5) if close_bar is not None else None
+        close_delay = pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 7)))
+        close_intent_valid = reason in SUPPORTED_CLOSE_REASONS
+        if reason in M5_CLOSE_REASONS:
+            close_intent_valid = bool(
+                close_intent_valid
+                and close_bar is not None
+                and parse_ts(state.get("last_processed_m5_bar")) == close_bar
+                and close_available_at is not None
+                and quote_time >= close_available_at
+                and quote_time <= close_available_at + close_delay
+            )
+        elif reason in FULL_CLOSE_REASONS:
+            close_intent_valid = close_intent_valid and m5_bar in (None, "")
+        if not close_intent_valid:
+            logging.critical(
+                "S25 rejected unsupported or noncausal CLOSE intent: reason=%s m5_bar=%s",
+                reason, m5_bar,
+            )
+            self._set_sync_block(
+                strategy, "unsupported_or_noncausal_close_intent",
+                {"reason": str(reason), "m5_bar": str(m5_bar or "")},
+                recoverable=False,
+            )
+            self._save_state()
+            return "blocked"
         close_causal = self._causal_fields(m5_bar, quote_time)
         opportunity_id = self._opportunity_id(m5_bar, quote_time, "m5" if m5_bar else "close")
         selected_keys = {position_key(position) for position in selected}
@@ -2514,6 +3155,11 @@ class S25V24Runner:
         retry_after = parse_ts(state.get("close_retry_after_utc"))
         if retry_after is not None and quote_time < retry_after:
             return True
+        # A due retry timestamp is consumed before a new durable submission
+        # marker is written. If the process stops before that marker is saved,
+        # the old on-disk retry remains intact; after the marker commit there is
+        # no stale deadline predating the new submission attempt.
+        state["close_retry_after_utc"] = None
         pending_signal = state.get("pending_close_m5_bar")
         requested_at = parse_ts(state.get("pending_close_requested_at_utc"))
         causal = self._causal_fields(pending_signal, requested_at if requested_at is not None else quote_time)
@@ -2602,16 +3248,101 @@ class S25V24Runner:
             atr14=state.get("last_atr"), ema200=state.get("last_ema"), note=note,
         )
 
+    def _l05_update_and_select(
+        self, strategy: dict[str, Any], row: pd.Series, info: Any, bar_time: pd.Timestamp,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Advance frozen L05 on one completed M5 bar and return losing tickets.
+
+        A same-bar break can only arm state. Reclaim and later re-loss are
+        evaluated on strictly later completed bars, matching the frozen replay.
+        """
+        state = self._st(strategy)
+        bar_key = dt_text(bar_time)
+        if state.get("l05_activation_m5_bar") is None:
+            state["l05_activation_m5_bar"] = bar_key
+            for position in state.get("positions") or []:
+                if position.get("l05_entry_m5_bar") is None:
+                    position["l05_entry_m5_bar"] = bar_key
+        close_value = float(row.get("Close", math.nan))
+        if not math.isfinite(close_value):
+            return [], "l05=no_close_value"
+
+        new_break = int(row.get("break_dir", 0))
+        if new_break == -1:
+            level = float(row.get("native_pivot_low", math.nan))
+            if math.isfinite(level) and level > 0.0:
+                state["l05_down_break"] = {
+                    "level": level, "break_m5_bar": bar_key, "reclaimed": False,
+                }
+        if new_break == 1:
+            level = float(row.get("native_pivot_high", math.nan))
+            if math.isfinite(level) and level > 0.0:
+                state["l05_up_break"] = {
+                    "level": level, "break_m5_bar": bar_key, "reclaimed": False,
+                }
+
+        reloss_sides: set[str] = set()
+        for tracker_name, side, reclaim_test, reloss_test in (
+            ("l05_down_break", "LONG", lambda close, level: close >= level, lambda close, level: close < level),
+            ("l05_up_break", "SHORT", lambda close, level: close <= level, lambda close, level: close > level),
+        ):
+            tracker = state.get(tracker_name)
+            if not isinstance(tracker, dict):
+                continue
+            break_bar = parse_ts(tracker.get("break_m5_bar"))
+            if break_bar is None or bar_time <= break_bar:
+                continue
+            level = float(tracker["level"])
+            was_reclaimed = bool(tracker.get("reclaimed", False))
+            if was_reclaimed and reloss_test(close_value, level):
+                reloss_sides.add(side)
+            if reclaim_test(close_value, level):
+                tracker["reclaimed"] = True
+
+        if not reloss_sides or not state.get("positions"):
+            return [], "l05=armed_or_idle" if not reloss_sides else "l05=reloss;selected=0"
+        adverse_slip = float(self.params.get("shadow_adverse_slippage_price", 0.030))
+        expected_bid = float(info.bid) - adverse_slip
+        expected_ask = float(info.ask) + adverse_slip
+        selected: list[dict[str, Any]] = []
+        for position in state.get("positions") or []:
+            side = str(position.get("side") or "")
+            if side not in reloss_sides or position.get("close_requested"):
+                continue
+            tracker = state["l05_down_break" if side == "LONG" else "l05_up_break"]
+            entry_bar = parse_ts(position.get("l05_entry_m5_bar"))
+            if entry_bar is None:
+                entry_bar = parse_ts(state.get("l05_activation_m5_bar"))
+            break_bar = parse_ts(tracker.get("break_m5_bar")) if isinstance(tracker, dict) else None
+            if entry_bar is None or break_bar is None or break_bar < entry_bar:
+                continue
+            expected_pnl = position_price_pnl(position, expected_bid, expected_ask)
+            if expected_pnl < 0.0:
+                selected.append(position)
+        note = (
+            f"l05=reloss;long={int('LONG' in reloss_sides)};short={int('SHORT' in reloss_sides)};"
+            f"selected={len(selected)}"
+        )
+        return selected, note
+
     def _process_m5_event(self, strategy: dict[str, Any], row: pd.Series, info: Any, quote_time: pd.Timestamp) -> None:
         state = self._st(strategy)
         bar_time = parse_ts(row.name)
         if bar_time is None:
             return
         bar_key = dt_text(bar_time)
-        if state.get("last_processed_m5_bar") == bar_key:
+        last_processed = parse_ts(state.get("last_processed_m5_bar"))
+        if last_processed is not None and bar_time == last_processed:
             if state.get("last_decision_receipt_m5_bar") != bar_key:
                 self._m5_receipt(strategy, bar_time, quote_time, reason="recovered_after_restart", note="processed_bar_had_no_receipt")
                 self._save_state()
+            return
+        if last_processed is not None and bar_time < last_processed:
+            self._trade_row(
+                "m5_not_evaluated", strategy, quote_time_utc=dt_text(quote_time),
+                signal_bar_time=bar_key, reason="regressive_completed_bar",
+                note=f"last_processed_m5_bar={dt_text(last_processed)}",
+            )
             return
         atr = float(row.get("atr14", math.nan))
         ema = float(row.get("ema200", math.nan))
@@ -2638,8 +3369,21 @@ class S25V24Runner:
             self._m5_receipt(strategy, bar_time, quote_time, reason="not_evaluated_warmup", note="action=not_evaluated;warmup")
             self._save_state()
             return
+        l05_selected, l05_note = self._l05_update_and_select(strategy, row, info, bar_time)
+        if l05_selected:
+            l05_result = self._close_positions(
+                strategy, l05_selected, "loss_policy_L05", info, quote_time, bar_key,
+            )
+            l05_sides = {str(position.get("side") or "") for position in l05_selected}
+            self._m5_receipt(
+                strategy, bar_time, quote_time, reason="signal",
+                side=next(iter(l05_sides)) if len(l05_sides) == 1 else "",
+                note=f"action=l05_close_{l05_result};{l05_note}",
+            )
+            self._save_state()
+            return
         if not self._ensure_virtual_bilateral_core(strategy, info, quote_time):
-            self._m5_receipt(strategy, bar_time, quote_time, reason="signal" if int(row.get("break_dir", 0)) else "no_signal", note="action=entry_blocked;virtual_core_not_started")
+            self._m5_receipt(strategy, bar_time, quote_time, reason="signal" if int(row.get("break_dir", 0)) else "no_signal", note=f"action=entry_blocked;virtual_core_not_started;{l05_note}")
             self._save_state()
             return
         active = int(state.get("active_wave", 0))
@@ -2747,7 +3491,7 @@ class S25V24Runner:
                 logging.critical("S25 shadow canary halted after read-only inventory mismatch")
                 return
             state["last_quote_utc"] = dt_text(quote_time)
-            self._save_state()
+            self._save_runtime_state_if_valid("synchronization failure")
             return
         if shadow_inventory_hold:
             self._trade_row(
@@ -2790,7 +3534,7 @@ class S25V24Runner:
         info = self.executor.get_symbol_info(symbol)
         if info is None or int(getattr(info, "quote_time_msc", 0)) <= 0:
             self._set_sync_block(strategy, "symbol_info_failed", recoverable=True)
-            self._save_state()
+            self._save_runtime_state_if_valid("symbol-info failure")
             return
         quote_time = pd.Timestamp(int(info.quote_time_msc), unit="ms", tz="UTC")
         quote_clock_error = self._quote_clock_error(quote_time, strategy)
@@ -2799,7 +3543,7 @@ class S25V24Runner:
             # executable quote. Never progress entries or quote-timed exits here.
             self._sync_strategy(strategy)
             self._set_sync_block(strategy, quote_clock_error, recoverable=True)
-            self._save_state()
+            self._save_runtime_state_if_valid("quote-clock failure")
             return
         self._observe_quote(info, quote_time)
         bars = self._get_m5()
@@ -2808,11 +3552,11 @@ class S25V24Runner:
         if now - self._last_status_log >= float(self.params.get("status_log_interval_seconds", 300)):
             long_count, short_count = self._position_counts(strategy)
             logical_long, logical_short = self._logical_position_counts(strategy)
-            logging.info("S25 V24 status live=%s shadow=%s real_long=%d real_short=%d logical_long=%d logical_short=%d wave=%s drought_blocks=%d sync_block=%s", self.live_enabled, self.shadow_enabled, long_count, short_count, logical_long, logical_short, self._st(strategy).get("active_wave"), int(self._st(strategy).get("drought_blocked_adds", 0)), self._st(strategy).get("sync_block_reason"))
+            logging.info("S25 V24+L05 status live=%s shadow=%s real_long=%d real_short=%d logical_long=%d logical_short=%d wave=%s drought_blocks=%d sync_block=%s", self.live_enabled, self.shadow_enabled, long_count, short_count, logical_long, logical_short, self._st(strategy).get("active_wave"), int(self._st(strategy).get("drought_blocked_adds", 0)), self._st(strategy).get("sync_block_reason"))
             self._last_status_log = now
 
 
-# Compatibility aliases for older test/evidence imports; runtime identity is V24.
+# Compatibility aliases for older test/evidence imports; runtime is V24+L05.
 S25V23Runner = S25V24Runner
 S25Man231Runner = S25V24Runner
 
@@ -2838,13 +3582,14 @@ class FakeExecutor:
         self.last_open_identifier = None
         self.last_open_deal = None
         self.last_open_price = None
+        self.last_open_time_msc = None
         self.next_ticket = 1000
         self.next_deal = 12000
         self.deals: dict[int, Any] = {}
         self.info = SimpleNamespace(bid=4020.0, ask=4020.18, point=0.001, volume_min=0.01, volume_max=100.0, volume_step=0.01, digits=3, stops_level=0, quote_time_msc=int(pd.Timestamp(quote_time).timestamp() * 1000))
 
     def get_bridge_capabilities(self) -> dict[str, Any]:
-        return {"name": "BotBridge_s25", "version": "2026-09-04-s25-v24-atomic-v8", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
+        return {"name": "BotBridge_s25", "version": "2026-09-05-s25-v24-atomic-v10", "commands": set(REQUIRED_SHARED_ACCOUNT_COMMANDS)}
 
     def get_account_info(self) -> dict[str, Any]:
         return {"login": self.login, "server": self.server, "currency": "USD", "margin_mode": self.margin_mode, "margin_mode_name": "RETAIL_HEDGING", "account_trade_allowed": True, "account_trade_expert": True, "terminal_trade_allowed": True, "mql_trade_allowed": True}
@@ -2870,12 +3615,13 @@ class FakeExecutor:
     def open_position(self, symbol: str, order_type: int, lot: float, *_: Any, magic: int, comment: str, **__: Any) -> int:
         self.next_ticket += 1
         side_price = self.info.ask if order_type == ORDER_TYPE_BUY else self.info.bid
-        record = SimpleNamespace(ticket=self.next_ticket, identifier=self.next_ticket + 5000, symbol=symbol, type=order_type, volume=lot, open_price=side_price, sl=0.0, tp=0.0, profit=0.0, magic=magic, open_time=int(self.info.quote_time_msc / 1000), comment=comment)
+        record = SimpleNamespace(ticket=self.next_ticket, identifier=self.next_ticket + 5000, symbol=symbol, type=order_type, volume=lot, open_price=side_price, sl=0.0, tp=0.0, profit=0.0, magic=magic, open_time=int(self.info.quote_time_msc / 1000), open_time_msc=int(self.info.quote_time_msc), comment=comment)
         self.positions.append(record)
         self.next_deal += 1
         self.last_open_identifier = int(record.identifier)
         self.last_open_deal = self.next_deal
         self.last_open_price = side_price
+        self.last_open_time_msc = int(record.open_time_msc)
         return self.next_ticket
 
     def close_position(self, ticket: int, *_: Any, **__: Any) -> Any:
@@ -2901,8 +3647,8 @@ def self_test() -> None:
     assert type(configured["live_trading_enabled"]) is bool
     assert type(configured["shadow_forward_enabled"]) is bool
     assert configured["live_trading_enabled"] != configured["shadow_forward_enabled"]
-    encoded_spec = json.dumps(V24_CANDIDATE_SPEC, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    assert hashlib.sha256(encoded_spec).hexdigest() == V24_CANDIDATE_HASH == configured["candidate_params_hash"]
+    encoded_spec = json.dumps(BOT25_CANDIDATE_SPEC, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    assert hashlib.sha256(encoded_spec).hexdigest() == BOT25_CANDIDATE_HASH == configured["candidate_params_hash"]
     assert configured["strategies"][0]["physical_seed_orders"] == 0
     assert configured["strategies"][0]["virtual_core_positions_per_side"] == 1
     params = json.loads(json.dumps(configured))
@@ -3159,6 +3905,7 @@ def self_test() -> None:
     release_state["current_episode_id"] = "s25_v24_e000778"
     release_state["episode_start_quote_utc"] = "2026-08-27T00:00:00+00:00"
     release_state["active_wave"] = 1
+    release_state["last_processed_m5_bar"] = "2026-08-27T00:20:00+00:00"
     release_state["positions"] = [
         {"ticket": -31, "position_identifier": -31, "side": "LONG", "lot": 0.01, "entry_price": 4010.0, "owner_comment": "s25_m231_L0031"},
         {"ticket": -32, "position_identifier": -32, "side": "LONG", "lot": 0.01, "entry_price": 4015.0, "owner_comment": "s25_m231_L0032"},
@@ -3180,6 +3927,7 @@ def self_test() -> None:
     shadow_close._suppress_manual_alerts = True
     shadow_state = shadow_close._st(strategy)
     shadow_close._ensure_episode_identity(strategy)
+    shadow_state["last_processed_m5_bar"] = "2026-08-27T00:20:00+00:00"
     shadow_state["positions"] = [
         {"ticket": -11, "position_identifier": -11, "side": "LONG", "lot": 0.01, "entry_price": 4010.0, "owner_comment": "s25_m231_L0011"},
         {"ticket": -12, "position_identifier": -12, "side": "LONG", "lot": 0.01, "entry_price": 4015.0, "owner_comment": "s25_m231_L0012"},
@@ -3316,6 +4064,7 @@ def self_test() -> None:
             "owner_comment": "s25_m231_L0490", "shadow": False, "close_requested": False,
         }]
         live_old_strategy_state["current_episode_id"] = "s25_m231_e000490"
+        live_old_strategy_state["episode_sequence"] = 490
         live_old_strategy_state["episode_start_quote_utc"] = "2026-08-27T00:00:00+00:00"
         atomic_write_json(STATE_FILE, {
             "version": PREVIOUS_STATE_VERSION, "bot": "bot25",
@@ -3356,7 +4105,25 @@ def self_test() -> None:
         owned = SimpleNamespace(ticket=501, identifier=5501, symbol="XAUUSD", type=ORDER_TYPE_BUY, volume=0.01, open_price=4020.18, sl=0.0, tp=0.0, profit=0.0, magic=EXPECTED_S25_MAGIC, open_time=int(pd.Timestamp("2026-08-27T00:25:00Z").timestamp()), comment="s25_m231_L0001")
         recovered.executor = FakeExecutor(positions=[owned])
         recovered_state = recovered._st(strategy)
-        recovered_state["pending_open"] = {"side": "LONG", "lot": 0.01, "comment": "s25_m231_L0001", "reason": "bilateral_seed", "quote_time_utc": "2026-08-27T00:25:00+00:00", "known_position_ids": [], "flat_confirmation_count": 0}
+        recovered_state.update({
+            "episode_sequence": 1,
+            "current_episode_id": "s25_v24_e000001",
+            "episode_start_quote_utc": "2026-08-27T00:00:00+00:00",
+            "last_long_frontier": 4020.09,
+            "last_short_frontier": 4020.09,
+            "active_wave": 1,
+            "last_processed_m5_bar": "2026-08-27T00:20:00+00:00",
+            "l05_activation_m5_bar": "2026-08-27T00:20:00+00:00",
+        })
+        recovered_state["pending_open"] = {
+            "side": "LONG", "lot": 0.01, "comment": "s25_m231_L0001",
+            "reason": "long_frontier_add",
+            "quote_time_utc": "2026-08-27T00:25:00+00:00",
+            "decision_time": "2026-08-27T00:25:00+00:00",
+            "signal_bar_time": "2026-08-27T00:20:00+00:00",
+            "known_position_ids": [], "flat_confirmation_count": 0,
+            "opportunity_id": "m231_m5_20260827T002000Z",
+        }
         assert recovered._sync_strategy(strategy)
         assert recovered_state["pending_open"] is None and len(recovered_state["positions"]) == 1
 
@@ -3429,12 +4196,12 @@ def self_test() -> None:
         market_state = market_closed._st(strategy)
         market_closed._ensure_episode_identity(strategy)
         market_state["positions"] = [market_closed._state_position_from_live(strategy, market_position)]
-        assert market_closed._close_positions(strategy, list(market_state["positions"]), "market_closed_test", market_closed.executor.info, pd.Timestamp("2026-08-27T00:25:00Z"), None) == "requested"
+        assert market_closed._close_positions(strategy, list(market_state["positions"]), "feed_gap", market_closed.executor.info, pd.Timestamp("2026-08-27T00:25:00Z"), None) == "requested"
         assert market_state["positions"][0]["close_requested"] and market_state["close_defer"] is None
         assert market_state["positions"][0]["close_submission_started_utc"] is None
         with open(TRADE_LOG_FILE, "r", newline="", encoding="utf-8") as handle:
             market_rows = list(csv.DictReader(handle))
-        assert any(row["event"] == "close_requested" and row["reason"] == "market_closed_test" for row in market_rows)
+        assert any(row["event"] == "close_requested" and row["reason"] == "feed_gap" for row in market_rows)
 
         pending_flat = S25Man231Runner(live_params)
         pending_flat.state = pending_flat._default_state()
@@ -3442,7 +4209,24 @@ def self_test() -> None:
         pending_flat._suppress_manual_alerts = True
         pending_flat.executor = FakeExecutor()
         pending_flat_state = pending_flat._st(strategy)
-        pending_flat_state["pending_open"] = {"side": "SHORT", "lot": 0.01, "comment": "s25_m231_S0001", "reason": "bilateral_seed", "quote_time_utc": "2026-08-27T00:25:00+00:00", "known_position_ids": [], "flat_confirmation_count": 0}
+        pending_flat_state.update({
+            "episode_sequence": 1,
+            "current_episode_id": "s25_v24_e000001",
+            "episode_start_quote_utc": "2026-08-27T00:00:00+00:00",
+            "last_long_frontier": 4020.09,
+            "last_short_frontier": 4020.09,
+            "active_wave": -1,
+            "last_processed_m5_bar": "2026-08-27T00:20:00+00:00",
+        })
+        pending_flat_state["pending_open"] = {
+            "side": "SHORT", "lot": 0.01, "comment": "s25_m231_S0001",
+            "reason": "short_frontier_add",
+            "quote_time_utc": "2026-08-27T00:25:00+00:00",
+            "decision_time": "2026-08-27T00:25:00+00:00",
+            "signal_bar_time": "2026-08-27T00:20:00+00:00",
+            "known_position_ids": [], "flat_confirmation_count": 0,
+            "opportunity_id": "m231_m5_20260827T002000Z",
+        }
         assert not pending_flat._sync_strategy(strategy)
         assert pending_flat._sync_strategy(strategy)
         assert pending_flat_state["pending_open"] is None
@@ -3456,6 +4240,10 @@ def self_test() -> None:
         live_close.executor.next_deal = 15000
         live_close_state = live_close._st(strategy)
         live_close._ensure_episode_identity(strategy)
+        live_close_state["episode_start_quote_utc"] = "2026-08-27T00:00:00+00:00"
+        live_close_state["last_long_frontier"] = 4020.09
+        live_close_state["last_short_frontier"] = 4020.09
+        live_close_state["last_processed_m5_bar"] = "2026-08-27T00:20:00+00:00"
         live_close_state["positions"] = [live_close._state_position_from_live(strategy, live_owned)]
         assert live_close._close_positions(strategy, list(live_close_state["positions"]), "opposite_pivot_break", live_close.executor.info, pd.Timestamp("2026-08-27T00:25:00Z"), "2026-08-27T00:20:00Z") == "requested"
         with open(TRADE_LOG_FILE, "r", newline="", encoding="utf-8") as handle:
@@ -3482,10 +4270,18 @@ def self_test() -> None:
         close_owned = SimpleNamespace(ticket=601, identifier=6601, symbol="XAUUSD", type=ORDER_TYPE_BUY, volume=0.01, open_price=4020.18, sl=0.0, tp=0.0, profit=0.0, magic=EXPECTED_S25_MAGIC, open_time=int(pd.Timestamp("2026-08-27T00:25:00Z").timestamp()), comment="s25_m231_L0002")
         close_retry.executor = FakeExecutor(positions=[close_owned])
         close_retry_state = close_retry._st(strategy)
+        close_retry_state.update({
+            "episode_sequence": 1,
+            "current_episode_id": "s25_v24_e000001",
+            "episode_start_quote_utc": "2026-08-27T00:00:00+00:00",
+            "last_long_frontier": 4020.09,
+            "last_short_frontier": 4020.09,
+        })
         retry_position = close_retry._state_position_from_live(strategy, close_owned)
         retry_position["close_requested"] = True
         close_retry_state["positions"] = [retry_position]
-        close_retry_state["pending_close_reason"] = "test_close"
+        close_retry_state["pending_close_reason"] = "feed_gap"
+        close_retry_state["pending_close_requested_at_utc"] = "2026-08-27T00:25:00+00:00"
         assert close_retry._retry_pending_close_requests(strategy, pd.Timestamp("2026-08-27T00:25:00Z"))
         assert close_retry._sync_strategy(strategy)
         assert close_retry_state["positions"] == []
@@ -3497,12 +4293,14 @@ def self_test() -> None:
         two_phase.executor = FakeExecutor()
         two_state = two_phase._st(strategy)
         two_phase._ensure_episode_identity(strategy)
+        two_state["episode_start_quote_utc"] = "2026-08-27T00:00:00+00:00"
+        two_state["last_long_frontier"] = 4020.09
+        two_state["last_short_frontier"] = 4020.09
         two_state["positions"] = [
             {"ticket": 701, "position_identifier": 7701, "side": "LONG", "lot": 0.01, "entry_price": 4010.0, "entry_time_utc": "2026-08-27T00:00:00+00:00", "open_time_epoch": int(pd.Timestamp("2026-08-27T00:00:00Z").timestamp()), "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S25_MAGIC, "owner_comment": "s25_m231_L0701", "shadow": False, "close_requested": True, "close_submission_started_utc": "2026-08-27T00:25:00+00:00"},
             {"ticket": 702, "position_identifier": 7702, "side": "SHORT", "lot": 0.01, "entry_price": 4030.0, "entry_time_utc": "2026-08-27T00:00:00+00:00", "open_time_epoch": int(pd.Timestamp("2026-08-27T00:00:00Z").timestamp()), "owner_symbol": "XAUUSD", "owner_magic": EXPECTED_S25_MAGIC, "owner_comment": "s25_m231_S0702", "shadow": False, "close_requested": True, "close_submission_started_utc": "2026-08-27T00:25:00+00:00"},
         ]
-        two_state["pending_close_reason"] = "two_phase_test"
-        two_state["pending_close_m5_bar"] = "2026-08-27T00:20:00+00:00"
+        two_state["pending_close_reason"] = "feed_gap"
         two_state["pending_close_requested_at_utc"] = "2026-08-27T00:25:00+00:00"
         def fake_deal(deal_id: int, position_id: int, price: float) -> Any:
             return SimpleNamespace(deal=deal_id, position_id=position_id, symbol="XAUUSD", magic=EXPECTED_S25_MAGIC, reason="EXPERT", price=price, profit=1.25, commission=-0.05, swap=-0.02, fee=0.0, net_profit=1.18, deal_time=int(pd.Timestamp("2026-08-27T00:25:01Z").timestamp()), exit_volume=0.01)
@@ -3571,7 +4369,7 @@ def main() -> int:
             _SELF_TEST_HISTORICAL_QUOTES = False
             TRADE_LOG_FILE = original_trade_log
             STATE_FILE = original_state_file
-        print("s25 V24 virtual-core self-test ok")
+        print("s25 V24 virtual-core + L05 self-test ok")
         return 0
     runner_lock = acquire_runner_singleton_lock()
     if runner_lock is None:
