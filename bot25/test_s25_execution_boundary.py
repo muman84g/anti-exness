@@ -1376,8 +1376,14 @@ class ExecutionBoundaryTests(unittest.TestCase):
             executor.close_position(position["ticket"])
             with mock.patch.object(runner, "_quote_clock_error", return_value="broker_quote_stale"), mock.patch.object(runner, "_run_strategy") as run:
                 runner.run_once()
+                runner.run_once()
             self.assertEqual(runner._st(strategy)["positions"], [])
             self.assertEqual(runner._st(strategy)["sync_block_reason"], "broker_quote_stale")
+            with Path(s25.TRADE_LOG_FILE).open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertFalse([row for row in rows if row["event"] == "sync_block_cleared_flat"])
+            self.assertTrue(runner._sync_strategy(strategy, fresh_quote_proven=True))
+            self.assertIsNone(runner._st(strategy)["sync_block_reason"])
             run.assert_not_called()
 
     def test_manual_close_deal_magic_zero_reconciles_by_owned_position_identity(self):

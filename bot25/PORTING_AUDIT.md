@@ -292,6 +292,20 @@ explicitly unauthorized.
   compatible staging, broker-flat proof, state-v8 commit, virtual-core episode
   start, and restart. Both runs issue zero physical seed orders and retain
   logical LONG=1 / SHORT=1 after episode start.
+
+## State-v7 quote-block migration correction (2026-09-07)
+
+- A state-v7 book carrying a recoverable `broker_quote_stale` block no longer
+  loops forever at the state-v8 migration gate. The block clears only after a
+  fresh preflight quote, exact bot-owned position identity reconciliation, and
+  an empty bot-owned pending-order set; the unchanged-file CAS still guards the
+  migration commit.
+- Non-recoverable blocks and recoverable reasons other than quote-clock staleness
+  remain fail-closed and leave the source state file unchanged.
+- Normal stale-quote polling still performs read-only close reconciliation, but
+  flat inventory cannot clear a quote-clock block until a fresh quote is proven.
+  This removes repeated clear/reblock state and ledger writes while preserving
+  the no-entry/no-quote-timed-exit boundary.
 - A separate reconciliation regression fixes the intended manual-close rule:
   an exit deal may have magic zero, while ownership remains proven by the
   stored bot25 position identity, symbol, comment, side, lot, and unique MT5

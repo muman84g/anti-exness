@@ -74,6 +74,12 @@ An exact state-v7 V24 book can upgrade in place to state-v8 after the same
 inventory and unchanged-file checks. Existing positions are retained, but L05
 starts with empty break/reclaim trackers at the last processed M5 watermark, so
 pre-deployment bars can never cause a retrospective close.
+A retained recoverable `broker_quote_stale` block may be cleared during that
+upgrade only after the current broker quote is fresh and exact bot-owned
+position/order reconciliation succeeds. Other retained blocks still refuse
+migration. During normal polling, flat inventory alone never clears a quote-
+clock block; a later fresh quote is required, preventing market-closed clear/
+reblock churn and repeated audit writes.
 
 ## Logs
 

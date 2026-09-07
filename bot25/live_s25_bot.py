@@ -1580,7 +1580,14 @@ class S25V24Runner:
         if any(state.get(field) not in (None, "", False) for field in unresolved_fields):
             logging.critical("S25 V24 migration refused with a pending legacy lifecycle action")
             return False
-        if state.get("sync_block_new_entries") or state.get("sync_block_reason"):
+        retained_sync_block = bool(state.get("sync_block_new_entries") or state.get("sync_block_reason"))
+        retained_sync_reason = str(state.get("sync_block_reason") or "")
+        migration_clearable_block = (
+            retained_sync_block
+            and bool(state.get("sync_block_recoverable"))
+            and retained_sync_reason.startswith("broker_quote_stale")
+        )
+        if retained_sync_block and not migration_clearable_block:
             logging.critical("S25 V24 migration refused with a retained legacy sync block")
             return False
         if any(not isinstance(position, dict) or position.get("close_requested") for position in positions_state):
@@ -1664,6 +1671,12 @@ class S25V24Runner:
         if long_count and short_count and (long_count > ratio * short_count or short_count > ratio * long_count):
             logging.critical("S25 V24 migration would exceed the logical side ratio")
             return False
+        if migration_clearable_block:
+            logging.warning(
+                "S25 clearing a recoverable legacy sync block after fresh quote and exact broker inventory proof: %s",
+                retained_sync_reason,
+            )
+            self._set_sync_block(strategy, None)
         shape_error = self._current_state_shape_error(self.state)
         if shape_error:
             logging.critical("S25 staged migration did not form a valid current state: %s", shape_error)
@@ -2350,7 +2363,7 @@ class S25V24Runner:
                 return False
             if not self._commit_compatible_state_upgrade(strategy, quote_time):
                 return False
-        if not self._sync_strategy(strategy):
+        if not self._sync_strategy(strategy, fresh_quote_proven=True):
             return False
         state = self._st(strategy)
         if state["positions"]:
@@ -2389,7 +2402,7 @@ class S25V24Runner:
             return None
         return add_man231_features(bars)
 
-    def _sync_strategy(self, strategy: dict[str, Any]) -> bool:
+    def _sync_strategy(self, strategy: dict[str, Any], *, fresh_quote_proven: bool = False) -> bool:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         state = self._st(strategy)
         if self.live_enabled and any(
@@ -2424,7 +2437,9 @@ class S25V24Runner:
             self._set_sync_block(strategy, "same_magic_unexpected_order", {"tickets": [int(order.ticket) for order in orders]}, recoverable=False)
             self._save_state()
             return False
-        if not state.get("positions") and not state.get("pending_open") and orders_available and clean_sync_block_if_flat(
+        retained_reason = str(state.get("sync_block_reason") or "")
+        flat_clear_clock_safe = fresh_quote_proven or not retained_reason.startswith("broker_quote_")
+        if flat_clear_clock_safe and not state.get("positions") and not state.get("pending_open") and orders_available and clean_sync_block_if_flat(
             symbol_key=strategy["id"], state=state, positions=positions, orders=orders,
             save_state=self._save_state, options=self.safety,
             audit=lambda _symbol, event, reason: self._trade_row(event, strategy, reason=reason, note=_symbol),
@@ -2597,7 +2612,10 @@ class S25V24Runner:
         recoverable_reason = str(state.get("sync_block_reason") or "")
         if (
             orders_available and state.get("sync_block_new_entries") and state.get("sync_block_recoverable")
-            and (recoverable_reason in FULL_SYNC_RECOVERABLE_REASONS or recoverable_reason.startswith("broker_quote_"))
+            and (
+                recoverable_reason in FULL_SYNC_RECOVERABLE_REASONS
+                or (fresh_quote_proven and recoverable_reason.startswith("broker_quote_"))
+            )
         ):
             self._set_sync_block(strategy, None)
             self._save_state()
@@ -3486,7 +3504,7 @@ class S25V24Runner:
         state = self._st(strategy)
         previous_quote = parse_ts(state.get("last_quote_utc"))
         shadow_inventory_hold = not self.live_enabled and self._has_real_state_positions(strategy)
-        if not self._sync_strategy(strategy):
+        if not self._sync_strategy(strategy, fresh_quote_proven=True):
             if shadow_inventory_hold:
                 logging.critical("S25 shadow canary halted after read-only inventory mismatch")
                 return

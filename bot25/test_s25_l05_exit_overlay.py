@@ -318,6 +318,94 @@ class L05ExitOverlayTests(unittest.TestCase):
                 self.assertFalse(runner.connect_and_preflight())
                 self.assertEqual(Path(state_path).read_bytes(), before)
 
+    def test_v7_upgrade_clears_recoverable_legacy_sync_block_after_fresh_proof(self):
+        params = copy.deepcopy(self.params)
+        strategy = params["strategies"][0]
+        with tempfile.TemporaryDirectory(prefix="s25-l05-v7-recoverable-block-") as temp:
+            state_path = str(Path(temp) / "state.json")
+            trade_path = str(Path(temp) / "trades.csv")
+            with mock.patch.object(s25, "STATE_FILE", state_path), mock.patch.object(s25, "TRADE_LOG_FILE", trade_path):
+                seed = s25.S25V24Runner(params)
+                old = seed._default_state()
+                old["version"] = s25.PREVIOUS_V24_STATE_VERSION
+                state = old["strategies"][strategy["id"]]
+                state.pop("l05_activation_m5_bar")
+                state.pop("l05_down_break")
+                state.pop("l05_up_break")
+                state["sync_block_new_entries"] = True
+                state["sync_block_reason"] = "broker_quote_stale:32228.265"
+                state["sync_block_recoverable"] = True
+                state["sync_block_details"] = {}
+                s25.atomic_write_json(state_path, old)
+
+                runner = s25.S25V24Runner(params)
+                runner.dm = s25.FakeDM()
+                runner.executor = s25.FakeExecutor()
+                runner._suppress_manual_alerts = True
+                with mock.patch.object(s25, "_SELF_TEST_HISTORICAL_QUOTES", True):
+                    self.assertTrue(runner.connect_and_preflight())
+                migrated = json.loads(Path(state_path).read_text(encoding="utf-8"))
+                migrated_state = migrated["strategies"][strategy["id"]]
+                self.assertFalse(migrated_state["sync_block_new_entries"])
+                self.assertIsNone(migrated_state["sync_block_reason"])
+                self.assertFalse(migrated_state["sync_block_recoverable"])
+
+    def test_v7_upgrade_retains_nonrecoverable_legacy_sync_block(self):
+        params = copy.deepcopy(self.params)
+        strategy = params["strategies"][0]
+        with tempfile.TemporaryDirectory(prefix="s25-l05-v7-nonrecoverable-block-") as temp:
+            state_path = str(Path(temp) / "state.json")
+            with mock.patch.object(s25, "STATE_FILE", state_path):
+                seed = s25.S25V24Runner(params)
+                old = seed._default_state()
+                old["version"] = s25.PREVIOUS_V24_STATE_VERSION
+                state = old["strategies"][strategy["id"]]
+                state.pop("l05_activation_m5_bar")
+                state.pop("l05_down_break")
+                state.pop("l05_up_break")
+                state["sync_block_new_entries"] = True
+                state["sync_block_reason"] = "ambiguous_open_result"
+                state["sync_block_recoverable"] = False
+                state["sync_block_details"] = {"ticket": 123}
+                s25.atomic_write_json(state_path, old)
+                before = Path(state_path).read_bytes()
+
+                runner = s25.S25V24Runner(params)
+                runner.dm = s25.FakeDM()
+                runner.executor = s25.FakeExecutor()
+                runner._suppress_manual_alerts = True
+                with mock.patch.object(s25, "_SELF_TEST_HISTORICAL_QUOTES", True):
+                    self.assertFalse(runner.connect_and_preflight())
+                self.assertEqual(Path(state_path).read_bytes(), before)
+
+    def test_v7_upgrade_does_not_clear_other_recoverable_legacy_sync_block(self):
+        params = copy.deepcopy(self.params)
+        strategy = params["strategies"][0]
+        with tempfile.TemporaryDirectory(prefix="s25-l05-v7-other-recoverable-block-") as temp:
+            state_path = str(Path(temp) / "state.json")
+            with mock.patch.object(s25, "STATE_FILE", state_path):
+                seed = s25.S25V24Runner(params)
+                old = seed._default_state()
+                old["version"] = s25.PREVIOUS_V24_STATE_VERSION
+                state = old["strategies"][strategy["id"]]
+                state.pop("l05_activation_m5_bar")
+                state.pop("l05_down_break")
+                state.pop("l05_up_break")
+                state["sync_block_new_entries"] = True
+                state["sync_block_reason"] = "positions_unavailable"
+                state["sync_block_recoverable"] = True
+                state["sync_block_details"] = {}
+                s25.atomic_write_json(state_path, old)
+                before = Path(state_path).read_bytes()
+
+                runner = s25.S25V24Runner(params)
+                runner.dm = s25.FakeDM()
+                runner.executor = s25.FakeExecutor()
+                runner._suppress_manual_alerts = True
+                with mock.patch.object(s25, "_SELF_TEST_HISTORICAL_QUOTES", True):
+                    self.assertFalse(runner.connect_and_preflight())
+                self.assertEqual(Path(state_path).read_bytes(), before)
+
     def test_v6_upgrade_uses_one_nonretroactive_l05_watermark(self):
         params = copy.deepcopy(self.params)
         strategy = params["strategies"][0]
