@@ -796,7 +796,12 @@ class V206LiveLane:
             st["blocked_reason"] = None
             st["blocked_details"] = {}
             st["manual_alert_last_signature"] = None
-            st["last_consumed_signal_bar"] = state_pos.get("signal_bar_time")
+            st["last_closed_at_utc"] = None
+            st["last_closed_side"] = None
+            st["last_closed_reason"] = None
+            st["last_closed_signal_bar"] = None
+            st["last_consumed_signal_bar"] = None
+            st["cooldown_until_utc"] = None
             self._save()
             return True
         close_time = pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
