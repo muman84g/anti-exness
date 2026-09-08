@@ -3533,6 +3533,10 @@ class FakeExecutor:
         return {
             "margin_mode": self.margin_mode,
             "margin_mode_name": "RETAIL_HEDGING" if self.margin_mode == HEDGING_MARGIN_MODE else "RETAIL_NETTING",
+            "account_trade_allowed": True,
+            "account_trade_expert": True,
+            "terminal_trade_allowed": True,
+            "mql_trade_allowed": True,
             "login": MT5_LOGIN,
             "server": MT5_SERVER,
         }

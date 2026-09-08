@@ -737,9 +737,28 @@ class V206LiveLane:
             st["migration_flat_confirmations"] = 0
             self._save()
             return False
+        account = self.runner.executor.get_account_info()
+        try:
+            account_ok = (
+                isinstance(account, dict)
+                and int(account.get("login") or 0) == int(MT5_LOGIN)
+                and str(account.get("server") or "").casefold() == str(MT5_SERVER).casefold()
+                and str(account.get("margin_mode_name") or "") == "RETAIL_HEDGING"
+                and all(account.get(key) is True for key in (
+                    "account_trade_allowed", "account_trade_expert",
+                    "terminal_trade_allowed", "mql_trade_allowed",
+                ))
+            )
+        except (TypeError, ValueError, OverflowError):
+            account_ok = False
+        if not account_ok:
+            st["migration_flat_confirmations"] = 0
+            self._save()
+            return False
         deal = self.runner.executor.get_position_close_deal(identifier, max(1, opened_epoch - 60))
         if deal is False:
             deal = self.runner.executor.get_position_close_deal(identifier, 0)
+        explicit_no_deal = deal is False
         try:
             deal_ok = (
                 deal not in (None, False)
@@ -754,7 +773,7 @@ class V206LiveLane:
             )
         except (TypeError, ValueError, OverflowError, AttributeError):
             deal_ok = False
-        if not deal_ok:
+        if not deal_ok and not explicit_no_deal:
             st["migration_flat_confirmations"] = 0
             self._save()
             return False
@@ -762,6 +781,24 @@ class V206LiveLane:
         if st["migration_flat_confirmations"] < FLAT_CONFIRMATIONS:
             self._save()
             return False
+        if explicit_no_deal:
+            self._log(
+                "v206_quarantined_lifecycle_retired_without_close_deal", required=True,
+                ticket=ticket, position_identifier=identifier, side=state_pos.get("side"),
+                lot=lot, entry_price=float(state_pos.get("entry_price") or 0.0),
+                reason="same_account_proven_flat_history_none",
+                signal_bar_time=state_pos.get("signal_bar_time"),
+                note="no synthetic close time, exit price, or profit recorded",
+            )
+            st["migration_pending"] = False
+            st["migration_flat_confirmations"] = FLAT_CONFIRMATIONS
+            st["quarantined_state_snapshot"] = None
+            st["blocked_reason"] = None
+            st["blocked_details"] = {}
+            st["manual_alert_last_signature"] = None
+            st["last_consumed_signal_bar"] = state_pos.get("signal_bar_time")
+            self._save()
+            return True
         close_time = pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
         self._log(
             "v206_quarantined_close_reconciled", required=True, ticket=ticket,

@@ -195,8 +195,14 @@ Earlier V14 state gains empty retry/count fields without changing owned
 inventory. The exact v206 crash-after-fill shape containing one matching basket
 row and pending-open receipt can recover without state editing only after the
 position is absent, the namespace is order-clean, and three consecutive reads
-find one ownership-, volume-, time-, and magic-matching CLOSEDEAL. Every other
-quarantined lifecycle shape or ambiguous broker-history result remains blocked.
+find one ownership-, volume-, time-, and magic-matching CLOSEDEAL. For that same
+exact crash-after-fill shape only, three consecutive checks may instead retire
+the orphan when the configured hedging account is exact, its permissions are
+healthy, positions/orders and the exact ticket are absent, and both bounded and
+wider CLOSEDEAL queries explicitly return no deal. This writes a mandatory
+`same_account_proven_flat_history_none` audit row and never invents close time,
+exit price, or profit. Every other quarantined lifecycle shape or ambiguous
+broker-history result remains blocked.
 Partial retry identity, a retry outside the original signal validity
 window, or malformed counters fail closed instead of becoming executable.
 Persisted core/v206/shadow timestamps must remain ISO timestamp strings, and

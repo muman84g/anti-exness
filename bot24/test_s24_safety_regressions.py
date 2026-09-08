@@ -2191,6 +2191,90 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(st["migration_flat_confirmations"], 0)
         self.assertEqual(st["blocked_reason"], "v206_state_identity_mismatch")
 
+    def test_v206_crash_after_fill_quarantine_retires_on_same_account_flat_and_explicit_no_deal(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        rows = []
+        runner._trade_row = lambda event, _strat, **kwargs: rows.append({"event": event, **kwargs})
+        lane = runner.v206_lane
+        st = lane.state
+        signal_bar = "2026-01-01T12:59:00+00:00"
+        position = {
+            "ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
+            "entry_price": 2000.0, "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD",
+            "owner_magic": 240206, "owner_comment": "s24_v206", "signal_bar_time": signal_bar,
+        }
+        pending = {
+            "opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG", "lot": 0.01,
+            "owner_symbol": "XAUUSD", "owner_magic": 240206, "owner_comment": "s24_v206",
+            "signal_bar_time": signal_bar,
+        }
+        st.update({
+            "migration_pending": True, "migration_flat_confirmations": 0,
+            "blocked_reason": "v206_state_identity_mismatch",
+            "blocked_details": {"state_error": "open_lifecycle_container_conflict", "quarantined": True},
+            "quarantined_state_snapshot": {"basket": [position], "pending_open": pending, "pending_close": None},
+        })
+
+        class NoDealExecutor(RecordingExecutor):
+            def get_position_close_deal(self, *_args):
+                return False
+
+        runner.executor = NoDealExecutor(positions=[], orders=[])
+        now = pd.Timestamp("2026-01-01T13:05:00Z")
+        self.assertFalse(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertFalse(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertTrue(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertFalse(st["migration_pending"])
+        self.assertIsNone(st["blocked_reason"])
+        self.assertIsNone(st["quarantined_state_snapshot"])
+        self.assertEqual(st["last_consumed_signal_bar"], signal_bar)
+        self.assertIsNone(st["last_closed_at_utc"])
+        self.assertIsNone(st["last_closed_reason"])
+        self.assertEqual(rows[-1]["event"], "v206_quarantined_lifecycle_retired_without_close_deal")
+        self.assertEqual(rows[-1]["reason"], "same_account_proven_flat_history_none")
+        self.assertEqual(rows[-1].get("profit"), None)
+
+    def test_v206_no_deal_quarantine_does_not_clear_on_wrong_account(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        lane = runner.v206_lane
+        st = lane.state
+        signal_bar = "2026-01-01T12:59:00+00:00"
+        st.update({
+            "migration_pending": True, "migration_flat_confirmations": 0,
+            "blocked_reason": "v206_state_identity_mismatch",
+            "blocked_details": {"state_error": "open_lifecycle_container_conflict", "quarantined": True},
+            "quarantined_state_snapshot": {
+                "basket": [{"ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
+                    "entry_price": 2000.0, "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD",
+                    "owner_magic": 240206, "owner_comment": "s24_v206", "signal_bar_time": signal_bar}],
+                "pending_open": {"opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG", "lot": 0.01,
+                    "owner_symbol": "XAUUSD", "owner_magic": 240206, "owner_comment": "s24_v206",
+                    "signal_bar_time": signal_bar},
+                "pending_close": None,
+            },
+        })
+
+        class WrongAccountNoDealExecutor(RecordingExecutor):
+            def get_position_close_deal(self, *_args):
+                return False
+
+            def get_account_info(self):
+                result = dict(super().get_account_info())
+                result["login"] = int(result["login"]) + 1
+                return result
+
+        runner.executor = WrongAccountNoDealExecutor(positions=[], orders=[])
+        for _ in range(4):
+            self.assertFalse(lane._sync(pd.Timestamp("2026-01-01T13:05:00Z"), SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertTrue(st["migration_pending"])
+        self.assertEqual(st["migration_flat_confirmations"], 0)
+
     def test_invalid_persisted_core_close_identity_is_quarantined_and_fatal(self):
         params = params_copy()
         seed = s24.S24NoAdverseRunner(params)._default_state()
