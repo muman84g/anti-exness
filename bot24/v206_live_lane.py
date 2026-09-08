@@ -703,6 +703,16 @@ class V206LiveLane:
             identifier = int(state_pos.get("position_identifier") or ticket)
             opened_epoch = int(state_pos.get("open_time_epoch") or 0)
             lot = float(state_pos.get("lot") or 0.0)
+            state_signal_time = _utc(state_pos.get("signal_bar_time"))
+            pending_signal_time = _utc(pending.get("signal_bar_time"))
+            side = str(state_pos.get("side") or "")
+            opportunity_id = str(pending.get("opportunity_id") or "")
+            opportunity_suffix = f":{side}"
+            opportunity_signal_time = (
+                _utc(opportunity_id[len("v206:") : -len(opportunity_suffix)])
+                if opportunity_id.startswith("v206:") and opportunity_id.endswith(opportunity_suffix)
+                else None
+            )
             identity_ok = (
                 ticket > 0 and identifier > 0 and opened_epoch > 0 and _finite_positive(lot)
                 and str(state_pos.get("owner_symbol") or "") == self.symbol
@@ -711,12 +721,11 @@ class V206LiveLane:
                 and str(pending.get("owner_symbol") or "") == self.symbol
                 and int(pending.get("owner_magic") or 0) == int(self.cfg["magic"])
                 and str(pending.get("owner_comment") or "") == str(self.cfg["comment_prefix"])
-                and str(pending.get("side") or "") == str(state_pos.get("side") or "")
+                and str(pending.get("side") or "") == side
                 and math.isclose(float(pending.get("lot") or 0.0), lot, rel_tol=0.0, abs_tol=1e-9)
-                and str(pending.get("signal_bar_time") or "") == str(state_pos.get("signal_bar_time") or "")
-                and str(pending.get("opportunity_id") or "").endswith(
-                    f":{state_pos.get('signal_bar_time')}:{state_pos.get('side')}"
-                )
+                and state_signal_time is not None
+                and pending_signal_time == state_signal_time
+                and opportunity_signal_time == state_signal_time
             )
         except (TypeError, ValueError, OverflowError):
             return False

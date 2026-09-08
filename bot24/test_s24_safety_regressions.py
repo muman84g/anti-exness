@@ -2115,7 +2115,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
         runner._trade_row = lambda *_args, **_kwargs: None
         lane = runner.v206_lane
         st = lane.state
-        signal_bar = "2026-01-01T12:59:00+00:00"
+        signal_bar = "2026-01-01T21:59:00+09:00"
+        opportunity_signal_bar = "2026-01-01T12:59:00+00:00"
         position = {
             "ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
             "entry_price": 2000.0, "entry_time_utc": "2026-01-01T13:00:00+00:00",
@@ -2124,7 +2125,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
             "timeout_at_utc": "2026-01-01T13:30:00+00:00", "fixed_stop": 1999.5, "target": 2000.5,
         }
         pending = {
-            "opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG",
+            "opportunity_id": f"v206:{opportunity_signal_bar}:LONG", "side": "LONG",
             "signal_bar_time": signal_bar, "entry_due_utc": "2026-01-01T13:00:00+00:00",
             "entry_expiry_utc": "2026-01-01T13:02:00+00:00", "fixed_stop": 1999.5,
             "started_utc": "2026-01-01T13:00:00+00:00", "flat_confirmations": 0,
@@ -2162,7 +2163,8 @@ class S24SafetyRegressionTests(unittest.TestCase):
         runner._save_state = lambda: None
         lane = runner.v206_lane
         st = lane.state
-        signal_bar = "2026-01-01T12:59:00+00:00"
+        signal_bar = "2026-01-01T21:59:00+09:00"
+        opportunity_signal_bar = "2026-01-01T12:59:00+00:00"
         st.update({
             "migration_pending": True, "blocked_reason": "v206_state_identity_mismatch",
             "blocked_details": {"state_error": "open_lifecycle_container_conflict", "quarantined": True},
@@ -2170,7 +2172,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
                 "basket": [{"ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
                     "entry_price": 2000.0, "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD",
                     "owner_magic": 240206, "owner_comment": "s24_v206", "signal_bar_time": signal_bar}],
-                "pending_open": {"opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG", "lot": 0.01,
+                "pending_open": {"opportunity_id": f"v206:{opportunity_signal_bar}:LONG", "side": "LONG", "lot": 0.01,
                     "owner_symbol": "XAUUSD", "owner_magic": 240206, "owner_comment": "s24_v206",
                     "signal_bar_time": signal_bar},
                 "pending_close": None,
