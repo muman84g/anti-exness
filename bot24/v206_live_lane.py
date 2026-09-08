@@ -682,6 +682,101 @@ class V206LiveLane:
         self._log("v206_protection_repaired", ticket=int(position.ticket), side=side, price=float(result.fill), note=result.raw_response)
         return True
 
+    def _reconcile_quarantined_closed_lifecycle(self, positions: list[Any], orders: list[Any]) -> bool:
+        """Resolve one crash-after-fill lifecycle only from exact broker close evidence."""
+        st = self.state
+        if st.get("blocked_reason") != "v206_state_identity_mismatch" or not st.get("migration_pending"):
+            return False
+        details = st.get("blocked_details")
+        if not isinstance(details, dict) or str(details.get("state_error") or details.get("reason") or "") != "open_lifecycle_container_conflict":
+            return False
+        snapshot = st.get("quarantined_state_snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("pending_close") is not None:
+            return False
+        basket = snapshot.get("basket")
+        pending = snapshot.get("pending_open")
+        if not isinstance(basket, list) or len(basket) != 1 or not isinstance(basket[0], dict) or not isinstance(pending, dict):
+            return False
+        state_pos = basket[0]
+        try:
+            ticket = int(state_pos.get("ticket") or 0)
+            identifier = int(state_pos.get("position_identifier") or ticket)
+            opened_epoch = int(state_pos.get("open_time_epoch") or 0)
+            lot = float(state_pos.get("lot") or 0.0)
+            identity_ok = (
+                ticket > 0 and identifier > 0 and opened_epoch > 0 and _finite_positive(lot)
+                and str(state_pos.get("owner_symbol") or "") == self.symbol
+                and int(state_pos.get("owner_magic") or 0) == int(self.cfg["magic"])
+                and str(state_pos.get("owner_comment") or "") == str(self.cfg["comment_prefix"])
+                and str(pending.get("owner_symbol") or "") == self.symbol
+                and int(pending.get("owner_magic") or 0) == int(self.cfg["magic"])
+                and str(pending.get("owner_comment") or "") == str(self.cfg["comment_prefix"])
+                and str(pending.get("side") or "") == str(state_pos.get("side") or "")
+                and math.isclose(float(pending.get("lot") or 0.0), lot, rel_tol=0.0, abs_tol=1e-9)
+                and str(pending.get("signal_bar_time") or "") == str(state_pos.get("signal_bar_time") or "")
+                and str(pending.get("opportunity_id") or "").endswith(
+                    f":{state_pos.get('signal_bar_time')}:{state_pos.get('side')}"
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not identity_ok or positions or orders:
+            st["migration_flat_confirmations"] = 0
+            self._save()
+            return False
+        if self.runner.executor.confirm_position_absent(ticket) is not True:
+            st["migration_flat_confirmations"] = 0
+            self._save()
+            return False
+        deal = self.runner.executor.get_position_close_deal(identifier, max(1, opened_epoch - 60))
+        if deal is False:
+            deal = self.runner.executor.get_position_close_deal(identifier, 0)
+        try:
+            deal_ok = (
+                deal not in (None, False)
+                and int(deal.position_id) == identifier
+                and int(deal.deal) > 0
+                and str(deal.symbol) == self.symbol
+                and int(deal.magic) == int(self.cfg["magic"])
+                and int(deal.deal_time) >= opened_epoch
+                and _finite_positive(deal.price)
+                and math.isfinite(float(deal.net_profit))
+                and math.isclose(float(deal.exit_volume), lot, rel_tol=0.0, abs_tol=1e-9)
+            )
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            deal_ok = False
+        if not deal_ok:
+            st["migration_flat_confirmations"] = 0
+            self._save()
+            return False
+        st["migration_flat_confirmations"] = int(st.get("migration_flat_confirmations", 0)) + 1
+        if st["migration_flat_confirmations"] < FLAT_CONFIRMATIONS:
+            self._save()
+            return False
+        close_time = pd.Timestamp(int(deal.deal_time), unit="s", tz="UTC")
+        self._log(
+            "v206_quarantined_close_reconciled", required=True, ticket=ticket,
+            position_identifier=identifier, deal_id=int(deal.deal), side=state_pos.get("side"),
+            lot=lot, entry_price=float(state_pos.get("entry_price") or 0.0),
+            exit_price=float(deal.price), price=float(deal.price), profit=float(deal.net_profit),
+            reason="broker_history_proven_closed", signal_bar_time=state_pos.get("signal_bar_time"),
+            note=f"deal={int(deal.deal)}",
+        )
+        st["migration_pending"] = False
+        st["migration_flat_confirmations"] = FLAT_CONFIRMATIONS
+        st["quarantined_state_snapshot"] = None
+        st["blocked_reason"] = None
+        st["blocked_details"] = {}
+        st["manual_alert_last_signature"] = None
+        st["last_closed_at_utc"] = close_time.isoformat()
+        st["last_closed_side"] = state_pos.get("side")
+        st["last_closed_reason"] = "broker_history_proven_closed"
+        st["last_closed_signal_bar"] = state_pos.get("signal_bar_time")
+        st["last_consumed_signal_bar"] = state_pos.get("signal_bar_time")
+        st["cooldown_until_utc"] = (close_time + pd.Timedelta(minutes=int(self.cfg.get("cooldown", 5)))).isoformat()
+        self._save()
+        return True
+
     def _sync(self, quote_time: pd.Timestamp, info: Any, *, time_actions_allowed: bool = True) -> bool:
         st = self.state
         positions = self.runner.executor.get_positions(self.symbol, int(self.cfg["magic"]))
@@ -734,6 +829,8 @@ class V206LiveLane:
                 or quarantined.get("pending_open") is not None
                 or quarantined.get("pending_close") is not None
             ):
+                if self._reconcile_quarantined_closed_lifecycle(positions, orders):
+                    return True
                 details = dict(st.get("blocked_details") or {})
                 if "reason" in details:
                     details["state_error"] = details.pop("reason")

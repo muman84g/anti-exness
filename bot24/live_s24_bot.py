@@ -74,6 +74,7 @@ FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "live_time_close_failed",
     "live_time_close_unconfirmed",
 }
+CORE_PERMISSION_AUTO_CLEAR_REASON = "core_entry_trade_permission_rejected_repeatedly"
 CORE_RESOLVED_CLOSE_BLOCK_REASONS = {
     "live_time_close_failed",
     "live_time_close_unconfirmed",
@@ -2387,6 +2388,32 @@ class S24NoAdverseRunner:
         ):
             self._set_sync_block(strat, "duplicate_or_invalid_live_identity", recoverable=False)
             return False
+        flat_clear_reasons = set(FLAT_AUTO_CLEAR_SYNC_REASONS)
+        if (
+            st.get("sync_block_reason") == CORE_PERMISSION_AUTO_CLEAR_REASON
+            and not positions
+            and orders_available
+            and not orders
+        ):
+            account = self.executor.get_account_info()
+            symbol_info = self.executor.get_symbol_info(symbol)
+            permissions_ok = (
+                isinstance(account, dict)
+                and int(account.get("login") or 0) == int(MT5_LOGIN)
+                and str(account.get("server") or "") == str(MT5_SERVER)
+                and account.get("account_trade_allowed") is True
+                and account.get("account_trade_expert") is True
+                and account.get("terminal_trade_allowed") is True
+                and account.get("mql_trade_allowed") is True
+                and symbol_info is not None
+                and int(getattr(symbol_info, "trade_mode", -1)) == 4
+            )
+            if permissions_ok:
+                flat_clear_reasons.add(CORE_PERMISSION_AUTO_CLEAR_REASON)
+            else:
+                st["flat_clear_confirmation_count"] = 0
+                st["flat_clear_confirmation_reason"] = None
+                self._save_state()
         if clean_sync_block_if_flat(
             symbol_key=strat["id"],
             state=st,
@@ -2395,12 +2422,20 @@ class S24NoAdverseRunner:
             save_state=self._save_state,
             options=self.safety,
             audit=lambda _symbol, event, reason: self._trade_row(event, strat, reason=reason),
-            flat_auto_clear_reasons=FLAT_AUTO_CLEAR_SYNC_REASONS,
+            flat_auto_clear_reasons=flat_clear_reasons,
             confirm_position_absent=self.executor.confirm_position_absent,
-            required_flat_confirmations=3 if st.get("sync_block_reason") == "unresolved_open_action" else 2,
+            required_flat_confirmations=(
+                3
+                if st.get("sync_block_reason") in {
+                    "unresolved_open_action",
+                    CORE_PERMISSION_AUTO_CLEAR_REASON,
+                }
+                else 2
+            ),
         ):
             logging.info("S24 clean sync cleared: %s", strat["id"])
             self._clear_pending_open(strat)
+            st["entry_permission_reject_count"] = 0
             self._save_state()
         if orders and not unexpected_orders:
             self._set_sync_block(strat, "same_magic_unexpected_order", {"tickets": [int(o.ticket) for o in orders]}, recoverable=False)

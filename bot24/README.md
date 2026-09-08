@@ -180,7 +180,11 @@ receipt does not consume an otherwise valid core signal or v206 opportunity.
 It is retained for a retry only on a new broker quote at least 60 seconds later;
 polling the same quote cannot resubmit. Consecutive atomic permission rejections
 (10026/10027) are counted per lane and the third rejection creates a durable
-non-recoverable block and manual alert. Other atomic OPEN guards, including
+block and manual alert. That entry-only block clears automatically only after
+three consecutive bot-scoped flat position/order reads also prove the configured
+account identity, every account/terminal/MQL trade permission, and full symbol
+trade mode. A failed permission or inventory read resets the confirmation
+sequence. Other atomic OPEN guards, including
 account/mode/ownership/policy/symbol/margin and bridge inventory-query guards,
 clear only the proven no-fill submission receipt and immediately create a
 durable non-recoverable block and manual alert; they cannot silently wait for a
@@ -188,7 +192,12 @@ later signal. Any execution-bearing or malformed
 response retains the unresolved OPEN block. The independent v206 lane also
 validates the complete post-OPEN namespace before adopting a returned fill.
 Earlier V14 state gains empty retry/count fields without changing owned
-inventory. Partial retry identity, a retry outside the original signal validity
+inventory. The exact v206 crash-after-fill shape containing one matching basket
+row and pending-open receipt can recover without state editing only after the
+position is absent, the namespace is order-clean, and three consecutive reads
+find one ownership-, volume-, time-, and magic-matching CLOSEDEAL. Every other
+quarantined lifecycle shape or ambiguous broker-history result remains blocked.
+Partial retry identity, a retry outside the original signal validity
 window, or malformed counters fail closed instead of becoming executable.
 Persisted core/v206/shadow timestamps must remain ISO timestamp strings, and
 boolean or malformed financial/ownership fields cannot pass through numeric

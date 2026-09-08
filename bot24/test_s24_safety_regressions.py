@@ -1127,6 +1127,76 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(state["sync_block_reason"], "core_entry_trade_permission_rejected_repeatedly")
         self.assertIsNone(state["entry_retry_after_utc"])
 
+    def test_core_permission_block_auto_clears_only_after_three_clean_permission_syncs(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        state["sync_block_new_entries"] = True
+        state["sync_block_reason"] = "core_entry_trade_permission_rejected_repeatedly"
+        state["sync_block_recoverable"] = False
+        state["sync_block_details"] = {"count": 3}
+        state["entry_permission_reject_count"] = 3
+
+        class PermissionRestoredExecutor(RecordingExecutor):
+            def get_account_info(self):
+                return {
+                    "margin_mode": s24.HEDGING_MARGIN_MODE, "login": s24.MT5_LOGIN,
+                    "server": s24.MT5_SERVER, "account_trade_allowed": True,
+                    "account_trade_expert": True, "terminal_trade_allowed": True,
+                    "mql_trade_allowed": True,
+                }
+            def get_symbol_info(self, *_args, **_kwargs):
+                info = super().get_symbol_info("XAUUSD")
+                info.trade_mode = 4
+                return info
+
+        runner.executor = PermissionRestoredExecutor(positions=[], orders=[])
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        runner._sync_strategy(strategy)
+        runner._sync_strategy(strategy)
+        self.assertTrue(state["sync_block_new_entries"])
+        runner._sync_strategy(strategy)
+        self.assertFalse(state["sync_block_new_entries"])
+        self.assertEqual(state["entry_permission_reject_count"], 0)
+
+    def test_core_permission_block_does_not_clear_while_permission_is_disabled(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        state.update({
+            "sync_block_new_entries": True,
+            "sync_block_reason": "core_entry_trade_permission_rejected_repeatedly",
+            "sync_block_recoverable": False,
+            "sync_block_details": {"count": 3},
+            "entry_permission_reject_count": 3,
+        })
+
+        class PermissionDisabledExecutor(RecordingExecutor):
+            def get_account_info(self):
+                return {
+                    "margin_mode": s24.HEDGING_MARGIN_MODE, "login": s24.MT5_LOGIN,
+                    "server": s24.MT5_SERVER, "account_trade_allowed": False,
+                    "account_trade_expert": True, "terminal_trade_allowed": True,
+                    "mql_trade_allowed": True,
+                }
+            def get_symbol_info(self, *_args, **_kwargs):
+                info = super().get_symbol_info("XAUUSD")
+                info.trade_mode = 4
+                return info
+
+        runner.executor = PermissionDisabledExecutor(positions=[], orders=[])
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        for _ in range(4):
+            runner._sync_strategy(strategy)
+        self.assertTrue(state["sync_block_new_entries"])
+        self.assertEqual(state["flat_clear_confirmation_count"], 0)
+
     def test_core_execution_bearing_open_reject_remains_unresolved(self):
         params = params_copy()
         params["live_trading_enabled"] = True
@@ -2036,6 +2106,88 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(st["migration_flat_confirmations"], 2)
         self.assertEqual(st["blocked_reason"], "v206_state_identity_mismatch")
         self.assertTrue(st["blocked_details"]["active_lifecycle_quarantined"])
+
+    def test_v206_crash_after_fill_quarantine_auto_reconciles_from_exact_close_deal(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        st = lane.state
+        signal_bar = "2026-01-01T12:59:00+00:00"
+        position = {
+            "ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
+            "entry_price": 2000.0, "entry_time_utc": "2026-01-01T13:00:00+00:00",
+            "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": 240206,
+            "owner_comment": "s24_v206", "signal_bar_time": signal_bar,
+            "timeout_at_utc": "2026-01-01T13:30:00+00:00", "fixed_stop": 1999.5, "target": 2000.5,
+        }
+        pending = {
+            "opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG",
+            "signal_bar_time": signal_bar, "entry_due_utc": "2026-01-01T13:00:00+00:00",
+            "entry_expiry_utc": "2026-01-01T13:02:00+00:00", "fixed_stop": 1999.5,
+            "started_utc": "2026-01-01T13:00:00+00:00", "flat_confirmations": 0,
+            "lot": 0.01, "owner_symbol": "XAUUSD", "owner_magic": 240206,
+            "owner_comment": "s24_v206",
+        }
+        st.update({
+            "migration_pending": True, "migration_flat_confirmations": 0,
+            "blocked_reason": "v206_state_identity_mismatch",
+            "blocked_details": {"state_error": "open_lifecycle_container_conflict", "quarantined": True},
+            "quarantined_state_snapshot": {"basket": [position], "pending_open": pending, "pending_close": None},
+        })
+
+        class ClosedV206Executor(RecordingExecutor):
+            def get_position_close_deal(self, position_id, *_args):
+                return SimpleNamespace(
+                    deal=98206, position_id=position_id, symbol="XAUUSD", magic=240206,
+                    price=2002.0, deal_time=1767272520, exit_volume=0.01, net_profit=1.5,
+                )
+
+        runner.executor = ClosedV206Executor(positions=[], orders=[])
+        now = pd.Timestamp("2026-01-01T13:05:00Z")
+        self.assertFalse(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertFalse(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertTrue(lane._sync(now, SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertFalse(st["migration_pending"])
+        self.assertIsNone(st["blocked_reason"])
+        self.assertIsNone(st["quarantined_state_snapshot"])
+        self.assertEqual(st["last_closed_reason"], "broker_history_proven_closed")
+
+    def test_v206_quarantine_does_not_clear_on_wrong_magic_close_deal(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        lane = runner.v206_lane
+        st = lane.state
+        signal_bar = "2026-01-01T12:59:00+00:00"
+        st.update({
+            "migration_pending": True, "blocked_reason": "v206_state_identity_mismatch",
+            "blocked_details": {"state_error": "open_lifecycle_container_conflict", "quarantined": True},
+            "quarantined_state_snapshot": {
+                "basket": [{"ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
+                    "entry_price": 2000.0, "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD",
+                    "owner_magic": 240206, "owner_comment": "s24_v206", "signal_bar_time": signal_bar}],
+                "pending_open": {"opportunity_id": f"v206:{signal_bar}:LONG", "side": "LONG", "lot": 0.01,
+                    "owner_symbol": "XAUUSD", "owner_magic": 240206, "owner_comment": "s24_v206",
+                    "signal_bar_time": signal_bar},
+                "pending_close": None,
+            },
+        })
+
+        class WrongMagicExecutor(RecordingExecutor):
+            def get_position_close_deal(self, position_id, *_args):
+                return SimpleNamespace(deal=98206, position_id=position_id, symbol="XAUUSD", magic=999,
+                    price=2002.0, deal_time=1767272520, exit_volume=0.01, net_profit=1.5)
+
+        runner.executor = WrongMagicExecutor(positions=[], orders=[])
+        for _ in range(4):
+            self.assertFalse(lane._sync(pd.Timestamp("2026-01-01T13:05:00Z"), SimpleNamespace(bid=2001.9, ask=2002.0)))
+        self.assertTrue(st["migration_pending"])
+        self.assertEqual(st["migration_flat_confirmations"], 0)
+        self.assertEqual(st["blocked_reason"], "v206_state_identity_mismatch")
 
     def test_invalid_persisted_core_close_identity_is_quarantined_and_fatal(self):
         params = params_copy()
