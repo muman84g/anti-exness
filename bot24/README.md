@@ -1,5 +1,28 @@
 # Bot24 Visual No-Adverse C
 
+## 2026-09-10 UTC 13:30 corrected HL overlay
+
+The overlay `utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001`
+applies only to the existing `visual_no_adverse_c_target16` core.  When the UTC
+13:20 M1 open is at least 0.20% above the UTC 12:30 M1 open, every core LONG
+signal at 13:30-13:35 becomes SHORT through the core's ordinary capacity and
+execution path.  Later core LONG signals remain blocked until Bid or a completed
+M1 low reaches 0.20% below the UTC 13:30 M1 open. Existing SHORT signals and
+all exits are unchanged. Independent v206, RAD lane 207 and passive shadow
+logic are not modified by this overlay. Missing required evidence fails the
+affected core LONG closed. This is a local implementation, not deployment.
+
+## 2026-09-10 RAD 0.70 independent lane
+
+Bot24 now includes `range_autocorrelation_direction_rad070` as lane 207 with
+magic `240207` and comment namespace `s24_rad070`.  It evaluates only completed
+M30 buckets from confirmed M1 history, uses the frozen six-bar score and 0.70
+threshold, permits one 0.01-lot position, and applies an 18.0 price-distance SL,
+30.0 price-distance TP, and 360-minute maximum hold.  The existing core and
+v206 ownership, signals, sizing and exits are unchanged.  The matching bridge
+version is `2026-09-10-s24-rad070-v14`; compile and attach that EA before the
+updated runner can pass capability preflight.
+
 Close-ledger re-audit (2026-09-04): replay re-syncs readable evidence before
 consuming state; preflight rejects incomplete tails and duplicate/conflicting
 deal ownership. Core and v206 derived close-state changes share one rollback

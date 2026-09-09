@@ -1,5 +1,25 @@
 # Source Backtest
 
+## 2026-09-10 UTC 13:30 corrected HL local implementation
+
+- Policy/hash: `utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001` / `85831ad64224fad5e64a7959f4aa5f5d1ec512ece45c38bb49fdb931e89a4706`.
+- Evidence: `C:/Users/muuma/Downloads/codex-temp/bot23_bot24_utc1324_1335_review_20260909/REPORT_CORRECTED_HL_DEEP_DIVE_ja.md`.
+- Bot24 core delta: DEV +71.999 USD, Leakcheck 0.000 USD with no effective action, Forward +78.376 USD. The absent Leakcheck action is not positive confirmation.
+- Scope: only `visual_no_adverse_c_target16`; v206, RAD lane 207, passive shadow, existing SHORT and every exit remain unchanged.
+- Runtime definition: completed broker-Bid M1 opens at UTC 12:30/13:20/13:30, inversion at 13:30-13:35, then a 0.20% downside rearm. No CentOS/MT5 placement, restart or live order was performed here.
+
+## 2026-09-10 RAD 0.70 adoption evidence
+
+Frozen candidate `C4F_RAD_070` uses XAUUSD M30, lookback 6, cumulative absolute
+score threshold 0.70, SL 1800 pips (18.0 price units), TP 3000 pips (30.0 price
+units), maximum hold 12 M30 bars, and lot 0.01. Stress results were DEV 71
+trades / +306.807 / PF 1.571 / MDD 120.995, leakcheck 21 / +84.169 / PF 1.436 /
+MDD 78.988, and forward 18 / +101.871 / PF 1.799 / MDD 84.563. Forward calendar
+September was an incomplete interval; anchored seven-day results were +88.043,
++3.179, +35.069 and -24.420, with the last block only about two days. DEV exact
+entry overlap with existing core+v206 was 1/71 (five within the same M30 bucket),
+so the lane is treated as operationally independent rather than a duplicate.
+
 ## 2026-09-04 close-transaction durability re-audit
 
 Core/v206 derived close-state mutations now run under one rollback boundary,

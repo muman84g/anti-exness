@@ -29,6 +29,8 @@ TRADE_RETCODE_DONE = 10009
 S24_V206_POLICY = {240206: "s24_v206"}
 S24_CORE_MAGIC = 200024
 S24_CORE_COMMENT_PREFIX = "s24_no_adverse"
+S24_RAD_MAGIC = 240207
+S24_RAD_COMMENT_PREFIX = "s24_rad070"
 REQUIRED_SHARED_ACCOUNT_COMMANDS = {
     "ECHO", "CAPS", "ACCOUNT", "INFO", "HIST", "OPEN", "OPEN_R1", "REPAIR_R1", "CLOSE_R1",
     "POSITIONS", "POSITION", "ORDERS", "CLOSEDEAL", "CLOSE",
@@ -40,6 +42,13 @@ def _valid_core_comment(value: Any, *, allow_legacy: bool) -> bool:
     if allow_legacy and comment == S24_CORE_COMMENT_PREFIX:
         return True
     return re.fullmatch(rf"{re.escape(S24_CORE_COMMENT_PREFIX)}:[0-9a-f]{{10}}", comment) is not None
+
+
+def _valid_rad_comment(value: Any, *, allow_legacy: bool) -> bool:
+    comment = str(value or "")
+    if allow_legacy and comment == S24_RAD_COMMENT_PREFIX:
+        return True
+    return re.fullmatch(rf"{re.escape(S24_RAD_COMMENT_PREFIX)}:[0-9a-f]{{10}}", comment) is not None
 
 
 def _strict_int_text(value: Any) -> int:
@@ -336,7 +345,7 @@ class MT5Executor:
                 and math.isfinite(lot_value) and lot_value > 0.0
                 and math.isfinite(sl_value) and sl_value >= 0.0
                 and math.isfinite(tp_value) and tp_value >= 0.0
-                and sl_value == 0.0 and tp_value == 0.0
+                and ((sl_value == 0.0 and tp_value == 0.0) or (sl_value > 0.0 and tp_value > 0.0))
                 and 0 <= digits_value <= 10 and deviation_value >= 0 and magic_value > 0
                 and expected_login_value > 0 and expected_server_value
                 and all(token not in expected_server_value for token in ("|", ",", "\r", "\n"))
@@ -352,8 +361,10 @@ class MT5Executor:
             str(symbol) != "XAUUSD"
             or not math.isclose(lot_value, 0.01, rel_tol=0.0, abs_tol=1e-12)
             or deviation_value != 50
-            or magic_value != S24_CORE_MAGIC
-            or not _valid_core_comment(safe_comment, allow_legacy=False)
+            or not (
+                (magic_value == S24_CORE_MAGIC and sl_value == 0.0 and tp_value == 0.0 and _valid_core_comment(safe_comment, allow_legacy=False))
+                or (magic_value == S24_RAD_MAGIC and sl_value > 0.0 and tp_value > 0.0 and _valid_rad_comment(safe_comment, allow_legacy=False))
+            )
         ):
             self.last_order_error = "OPEN_POLICY_GUARD"
             return None
@@ -509,8 +520,11 @@ class MT5Executor:
         if (
             ticket_value <= 0 or deviation_value != 50 or expected_login_value <= 0
             or not expected_server_value or any(token in expected_server_value for token in ("|", ",", "\r", "\n"))
-            or expected_symbol_value != "XAUUSD" or expected_magic_value != S24_CORE_MAGIC
-            or not _valid_core_comment(expected_comment_value, allow_legacy=True)
+            or expected_symbol_value != "XAUUSD"
+            or not (
+                (expected_magic_value == S24_CORE_MAGIC and _valid_core_comment(expected_comment_value, allow_legacy=True))
+                or (expected_magic_value == S24_RAD_MAGIC and _valid_rad_comment(expected_comment_value, allow_legacy=True))
+            )
             or expected_identifier_value <= 0 or expected_type_value not in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}
             or not math.isfinite(expected_volume_value)
             or not math.isclose(expected_volume_value, 0.01, rel_tol=0.0, abs_tol=1e-12)

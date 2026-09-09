@@ -1036,7 +1036,7 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         self.assertEqual(
             params["candidate_id"],
-            "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008",
+            "bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009",
         )
         self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])

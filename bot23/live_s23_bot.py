@@ -66,6 +66,13 @@ from t0530_edge_overlay import (
     in_release_session as in_t0530_edge_release_session,
     latest_signal as latest_t0530_edge_signal,
 )
+from utc1330_hl_overlay import (
+    POLICY_ID as UTC1330_HL_POLICY_ID,
+    POLICY_PARAMS_HASH as UTC1330_HL_POLICY_PARAMS_HASH,
+    apply_policy as apply_utc1330_hl_policy,
+    config_error as utc1330_hl_config_error,
+    policy_note as utc1330_hl_policy_note,
+)
 try:
     from shadow_opportunity_observer import ShadowOpportunityObserver
 except ImportError:
@@ -89,7 +96,7 @@ EXPECTED_Q01_MAGICS = (230044,)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008"
+EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
 EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-close-claim-v33"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
@@ -676,6 +683,10 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
             or len(values) != len(set(values))
         ):
             raise ValueError(f"invalid expected magic config: {key}={values!r}")
+
+    hl_error = utc1330_hl_config_error(params.get("utc1330_hl"))
+    if hl_error is not None:
+        raise ValueError(f"invalid UTC13:30 HL config: {hl_error}")
 
     strategy_integer_fields = {
         "lane_id", "magic", "max_positions", "cooldown", "hold_minutes",
@@ -2309,6 +2320,9 @@ class S23HorizontalInventoryRunner:
                 if raw_side == "SHORT" and effective_side == "LONG":
                     variant = "za_late_short_reverse_long"
                     transform = "reverse_long"
+                elif raw_side == "LONG" and effective_side == "SHORT":
+                    variant = "za_utc1330_hl_inverted_short"
+                    transform = "utc1330_hl_invert_short"
         return {
             "strategy_group": group,
             "configured_signal_id": configured_signal_id,
@@ -5003,6 +5017,21 @@ class S23HorizontalInventoryRunner:
             return "LONG", policy
         policy["reason"] = "late_short_drop_threshold_not_met"
         return "SHORT", policy
+
+    def _apply_utc1330_hl_policy(
+        self,
+        bars: pd.DataFrame,
+        signal_time: Any,
+        side: str | None,
+        info: Any,
+    ) -> tuple[str | None, dict[str, Any]]:
+        return apply_utc1330_hl_policy(
+            bars,
+            signal_time,
+            side,
+            getattr(info, "bid", None),
+            self.params.get("utc1330_hl", {}),
+        )
 
     @staticmethod
     def _entry_policy_note(policy: dict[str, Any]) -> str:
@@ -10074,14 +10103,29 @@ class S23HorizontalInventoryRunner:
             )
         ):
             side, entry_policy = self._apply_entry_policy(raw_side, bars, info)
+            pre_hl_side = side
+            side, hl_policy = self._apply_utc1330_hl_policy(
+                bars, signal_bar, side, info,
+            )
+            final_policy_reason = (
+                str(hl_policy["reason"])
+                if pre_hl_side is not None and side is None
+                else str(entry_policy["reason"])
+            )
+            combined_policy_id = f"{entry_policy['policy_id']}+{hl_policy['policy_id']}"
+            combined_policy_note = (
+                f"{self._entry_policy_note(entry_policy)};"
+                f"{utc1330_hl_policy_note(hl_policy)}"
+            )
             release_time = signal_bar + pd.Timedelta(minutes=1)
             opportunity = {
-                "opportunity_id": f"{symbol}|{signal_bar_text}|{raw_side}|{side or 'BLOCKED'}|{entry_policy['policy_id']}",
+                "opportunity_id": f"{symbol}|{signal_bar_text}|{raw_side}|{side or 'BLOCKED'}|{combined_policy_id}",
                 "source": "za",
                 "side": side or raw_side,
                 "raw_side": raw_side,
                 "effective_side": side or "",
                 "entry_policy": entry_policy,
+                "utc1330_hl_policy": hl_policy,
                 "event_time": signal_bar_text,
                 "release_time": dt_text(release_time),
                 "available_time": dt_text(release_time),
@@ -10115,8 +10159,8 @@ class S23HorizontalInventoryRunner:
                     "opportunity_rejected",
                     primary,
                     side=raw_side,
-                    reason=str(entry_policy["reason"]),
-                    note=self._entry_policy_note(entry_policy),
+                    reason=final_policy_reason,
+                    note=combined_policy_note,
                     **self._opportunity_fields(opportunity),
                 )
                 self._observer_call(
@@ -10125,7 +10169,7 @@ class S23HorizontalInventoryRunner:
                     at=poll_time,
                     status="policy_rejected",
                     consumed_lane_id=None,
-                    reason=str(entry_policy["reason"]),
+                    reason=final_policy_reason,
                 )
                 self._save_state()
             else:
@@ -10146,7 +10190,7 @@ class S23HorizontalInventoryRunner:
                         primary,
                         side=side,
                         reason="stale_signal_skip",
-                        note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc};{self._entry_policy_note(entry_policy)}",
+                        note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc};{combined_policy_note}",
                         **self._opportunity_fields(opportunity),
                     )
                     self._observer_call(

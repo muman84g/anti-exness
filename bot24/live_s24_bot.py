@@ -62,12 +62,20 @@ from shadow_opportunity_observer import ShadowOpportunityObserver
 from shadow_state_tagger import ShadowStateTagger
 from time_regime_wrapper import EVALUATED, NO_ACTIVE_REGIME, TimeRegimeRouter, TimeRegimeStrategyWrapper
 from v206_live_lane import V206LiveLane, default_v206_state
+from utc1330_hl_overlay import (
+    POLICY_ID as UTC1330_HL_POLICY_ID,
+    POLICY_PARAMS_HASH as UTC1330_HL_POLICY_PARAMS_HASH,
+    apply_policy as apply_utc1330_hl_policy,
+    config_error as utc1330_hl_config_error,
+    policy_note as utc1330_hl_policy_note,
+)
 
 
 UTC = timezone.utc
 EXPECTED_S24_MAGIC = 200024
+EXPECTED_RAD_MAGIC = 240207
 EXPECTED_BRIDGE_NAME = "BotBridge_s24"
-EXPECTED_BRIDGE_VERSION = "2026-09-02-s24-core-atomic-v13"
+EXPECTED_BRIDGE_VERSION = "2026-09-10-s24-rad070-v14"
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
     "unresolved_open_action",
@@ -623,6 +631,26 @@ def add_features(bars: pd.DataFrame, point_size: float) -> pd.DataFrame:
     out["roll_high30"] = high.shift(1).rolling(30, min_periods=30).max()
     out["roll_low30"] = low.shift(1).rolling(30, min_periods=30).min()
     out["spread_points"] = ((out.get("AskOpen", out["Open"]) - out["Open"]) / point_size).clip(lower=0.0)
+    m30 = out[["Open", "High", "Low", "Close"]].resample("30min", label="left", closed="left").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    ).dropna()
+    span = (m30["High"] - m30["Low"]).replace(0.0, float("nan"))
+    corr = span.shift(1).rolling(6, min_periods=6).corr(span.shift(2))
+    move = m30["Close"].shift(1) - m30["Close"].shift(7)
+    scale = span.shift(1).rolling(6, min_periods=6).mean().replace(0.0, float("nan"))
+    direction = move.apply(lambda value: math.copysign(1.0, value) if value != 0.0 else 0.0)
+    score = direction * corr.clip(lower=0.0) * (move.abs() / scale)
+    rad_long = (score >= 0.70) & (m30["Close"] > m30["High"].shift(1))
+    rad_short = (score <= -0.70) & (m30["Close"] < m30["Low"].shift(1))
+    out["rad_score"] = float("nan")
+    out["rad_long"] = False
+    out["rad_short"] = False
+    for bar_start in m30.index:
+        signal_minute = bar_start + pd.Timedelta(minutes=29)
+        if signal_minute in out.index:
+            out.at[signal_minute, "rad_score"] = float(score.loc[bar_start]) if pd.notna(score.loc[bar_start]) else float("nan")
+            out.at[signal_minute, "rad_long"] = bool(rad_long.loc[bar_start])
+            out.at[signal_minute, "rad_short"] = bool(rad_short.loc[bar_start])
     return out
 
 
@@ -708,6 +736,9 @@ class S24NoAdverseRunner:
                 return f"{key}_not_boolean"
         if bool(params["enabled"]) and bool(params["live_trading_enabled"]) and bool(params["shadow_forward_enabled"]):
             return "execution_mode_contract"
+        hl_error = utc1330_hl_config_error(params.get("utc1330_hl"))
+        if hl_error is not None:
+            return f"utc1330_hl.{hl_error}"
         runner_cfg = params.get("runner_shadow")
         if not isinstance(runner_cfg, dict):
             return "runner_shadow_shape"
@@ -776,7 +807,7 @@ class S24NoAdverseRunner:
         if params.get("entry_time_routing") != expected_routing:
             return "entry_time_routing_contract"
         strategies = params.get("strategies")
-        if not isinstance(strategies, list) or len(strategies) != 1:
+        if not isinstance(strategies, list) or len(strategies) != 2:
             return "strategies_shape"
         expected_strategy = {
             "enabled": True, "id": "visual_no_adverse_c_target16", "spec_id": "visual_no_adverse_c:target16",
@@ -795,6 +826,24 @@ class S24NoAdverseRunner:
                     return f"strategy.{key}={observed!r}"
             elif observed != expected:
                 return f"strategy.{key}={observed!r}"
+        expected_rad = {
+            "enabled": True, "id": "range_autocorrelation_direction_rad070",
+            "spec_id": "range_autocorrelation_direction_line:threshold0.70",
+            "lane_id": 207, "magic": EXPECTED_RAD_MAGIC, "comment_prefix": "s24_rad070", "lot": 0.01,
+            "session_start_utc": 0, "session_end_utc": 24, "mode": "rad070_m30",
+            "impulse_bars": 6, "impulse_atr": 0.0, "add_atr": 0.0, "max_positions": 1,
+            "basket_target_usd": 30.0, "basket_stop_usd": 18.0, "max_hold_bars": 360,
+            "exit_clock": "poll", "cooldown": 0, "vol_min": 0.0,
+            "failure_to_progress_bars": 0, "failure_to_progress_peak_usd": 0.0, "reverse_on_fail": False,
+            "broker_stop_distance": 18.0, "broker_target_distance": 30.0,
+        }
+        for key, expected in expected_rad.items():
+            observed = strategies[1].get(key)
+            if isinstance(expected, float):
+                if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isclose(float(observed), expected, rel_tol=0.0, abs_tol=1e-12):
+                    return f"rad_strategy.{key}={observed!r}"
+            elif observed != expected:
+                return f"rad_strategy.{key}={observed!r}"
         return None
 
     def _build_entry_wrapper(self) -> tuple[TimeRegimeRouter, TimeRegimeStrategyWrapper]:
@@ -808,7 +857,7 @@ class S24NoAdverseRunner:
         enabled_strategies = {
             str(strat["id"]): strat
             for strat in self.params.get("strategies", [])
-            if bool(strat.get("enabled", True))
+            if bool(strat.get("enabled", True)) and str(strat.get("mode")) != "rad070_m30"
         }
         routed_ids = {
             strategy_id
@@ -2011,8 +2060,8 @@ class S24NoAdverseRunner:
             strategies.append(v206)
         magics = [int(row.get("magic") or 0) for row in strategies]
         prefixes = [str(row.get("comment_prefix") or "") for row in strategies]
-        if magics != [EXPECTED_S24_MAGIC, 240206]:
-            return f"invalid_magics={magics} expected={[EXPECTED_S24_MAGIC, 240206]}"
+        if magics != [EXPECTED_S24_MAGIC, EXPECTED_RAD_MAGIC, 240206]:
+            return f"invalid_magics={magics} expected={[EXPECTED_S24_MAGIC, EXPECTED_RAD_MAGIC, 240206]}"
         if len(magics) != len(set(magics)):
             return f"duplicate_magics={magics}"
         if any(not prefix.startswith("s24_") for prefix in prefixes) or len(prefixes) != len(set(prefixes)):
@@ -2036,6 +2085,13 @@ class S24NoAdverseRunner:
     def _strategy_signal_decision(self, row: pd.Series, strat: dict[str, Any]) -> tuple[str | None, str]:
         if float(row.get("spread_points", 0.0)) > float(self.params.get("max_entry_spread_points", 300.0)):
             return None, "spread_guard"
+        if str(strat.get("mode")) == "rad070_m30":
+            score = float(row.get("rad_score", math.nan))
+            if bool(row.get("rad_long", False)):
+                return "LONG", "rad070_long_signal"
+            if bool(row.get("rad_short", False)):
+                return "SHORT", "rad070_short_signal"
+            return None, "rad070_not_met" if math.isfinite(score) else "rad070_features_unavailable"
         atr30 = float(row.get("atr30", math.nan))
         vol_ratio = float(row.get("vol_ratio", math.nan))
         if not math.isfinite(atr30) or not math.isfinite(vol_ratio):
@@ -2065,6 +2121,8 @@ class S24NoAdverseRunner:
         return None, "no_signal"
 
     def _signal_decision(self, row: pd.Series, strat: dict[str, Any]) -> tuple[str | None, str]:
+        if str(strat.get("mode")) == "rad070_m30":
+            return self._strategy_signal_decision(row, strat)
         ts = pd.Timestamp(row.name)
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
@@ -2083,6 +2141,21 @@ class S24NoAdverseRunner:
     def _signal(self, row: pd.Series, strat: dict[str, Any]) -> str | None:
         side, _reason = self._signal_decision(row, strat)
         return side
+
+    def _apply_utc1330_hl_policy(
+        self,
+        bars: pd.DataFrame,
+        signal_time: Any,
+        side: str | None,
+        info: Any,
+    ) -> tuple[str | None, dict[str, Any]]:
+        return apply_utc1330_hl_policy(
+            bars,
+            signal_time,
+            side,
+            getattr(info, "bid", None),
+            self.params.get("utc1330_hl", {}),
+        )
 
     def _basket_pnl(self, strat: dict[str, Any], bid: float, ask: float) -> float:
         pnl = 0.0
@@ -3065,12 +3138,23 @@ class S24NoAdverseRunner:
             st["pending_open_started_utc"] = dt_text(quote_time)
             self._save_state()
             order_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
+            stop_distance = float(strat.get("broker_stop_distance", 0.0) or 0.0)
+            target_distance = float(strat.get("broker_target_distance", 0.0) or 0.0)
+            request_sl = 0.0
+            request_tp = 0.0
+            if stop_distance > 0.0 or target_distance > 0.0:
+                if not (stop_distance > 0.0 and target_distance > 0.0 and int(strat["max_positions"]) == 1):
+                    self._set_sync_block(strat, "fixed_exit_contract_invalid", recoverable=False)
+                    self._save_state()
+                    return
+                request_sl = normalize_price((bid - stop_distance) if side == "LONG" else (ask + stop_distance), digits)
+                request_tp = normalize_price((ask + target_distance) if side == "LONG" else (bid - target_distance), digits)
             ticket = self.executor.open_position(
                 symbol,
                 order_type,
                 lot,
-                0.0,
-                0.0,
+                request_sl,
+                request_tp,
                 deviation=int(self.params.get("deviation_points", 50)),
                 magic=int(strat["magic"]),
                 comment=order_comment,
@@ -3323,6 +3407,14 @@ class S24NoAdverseRunner:
             self._save_state()
             return
         side, signal_reason = self._signal_decision(now, strat)
+        raw_side = side
+        hl_policy: dict[str, Any] | None = None
+        if str(strat.get("id")) == "visual_no_adverse_c_target16" and side is not None:
+            side, hl_policy = self._apply_utc1330_hl_policy(
+                bars, now_bar, side, info,
+            )
+            if side != raw_side:
+                signal_reason = f"utc1330_hl:{hl_policy['reason']}"
         outcome = "signal" if side else (
             "not_evaluated"
             if signal_reason == "outside_session" or signal_reason.startswith("entry_routing_")
@@ -3340,7 +3432,10 @@ class S24NoAdverseRunner:
             side=side or "",
             reason=signal_reason,
             signal_bar_time=dt_text(now_bar),
-            note=f"outcome={outcome}",
+            note=(
+                f"outcome={outcome};raw_side={raw_side or ''};effective_side={side or ''};"
+                f"{utc1330_hl_policy_note(hl_policy) if hl_policy is not None else 'hl_policy=not_applicable'}"
+            ),
         )
         self._save_state()
         if not side:
@@ -3632,6 +3727,11 @@ def _run_self_test() -> None:
     runner._save_state = lambda: None
     self_test_bars = add_features(runner.dm.get_historical_data(), float(params["point_size"]))
     self_test_bars["spread_points"] = 30.0
+    # Keep this broad execution smoke test outside the HL qualifying state;
+    # dedicated overlay tests cover inversion and delayed rearm.
+    self_test_bars.loc[pd.Timestamp("2026-01-01 13:20:00", tz="UTC"), "Open"] = float(
+        self_test_bars.loc[pd.Timestamp("2026-01-01 12:30:00", tz="UTC"), "Open"]
+    )
     self_test_bars.iloc[-1, self_test_bars.columns.get_loc("Close")] = float(self_test_bars.iloc[-1]["roll_high30"]) + 1.0
     runner._get_m1 = lambda: self_test_bars.copy()
     rows: list[tuple[str, str, str]] = []

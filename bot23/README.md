@@ -1,5 +1,21 @@
 # Bot23 integrated inventory and independent session overlays
 
+## UTC 13:30 corrected HL overlay (2026-09-10 local implementation)
+
+The core ZA route now applies the frozen policy
+`utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001` after the existing
+late-Short policy.  A day qualifies when the UTC 13:20 M1 open is at least
+0.20% above the UTC 12:30 M1 open.  On a qualified day, every effective LONG
+signal from 13:30 inclusive through 13:35 is routed as SHORT through the normal
+lane/capacity checks.  From 13:36 onward, LONG remains blocked until Bid or a
+completed M1 low reaches 0.20% below the UTC 13:30 M1 open.  Existing SHORT
+signals and every exit remain unchanged.
+
+The calculation is reconstructed from completed broker-Bid M1 bars on every
+decision, so restart cannot silently reset qualification or rearm. Missing or
+invalid required price evidence blocks only the affected LONG decision.  This
+local implementation is not CentOS/MT5 deployment proof.
+
 ## CLOSE claim recovery v33 (2026-09-04 local re-audit)
 
 The EA must never execute a recovered CLOSE claim again. It returns the
@@ -50,7 +66,7 @@ while preserving valid quoted multiline fields.
 
 固定済み`Q01_variance_ratio_release`を、既存21レーンと分離したlane 22
 （magic 230044、comment `s23_q01_l1`）へ実装しています。ローカル候補は
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`です。Q01の判定は有効ですが、
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`です。Q01の判定は有効ですが、
 既存bot23の共通live設定とは別に`q01_live_trading_enabled=false`を固定し、Q01の実注文だけを
 停止しています。配置・再起動・bridge attach・実口座照合・注文実行は行っていません。
 
@@ -73,9 +89,21 @@ opportunity ID、group receipt、固定expiryを完全一致で検証し、破�
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
 （magic 230040-230043）へ移植しています。現在のローカル候補
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-v008`では
+`bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`では
 `t0530_edge_enabled=true`かつ`session_vwap_enabled=true`です。CentOS/MT5への配置、
 再起動、live/forward確認はこのローカル候補の範囲外です。
+
+## UTC 13:30 HL overlay（採用・ローカル有効）
+
+`utc1330_hl`は、UTC 12:30最初のBidからUTC 13:20最初のBidまでの上昇率が
+0.20%以上の日だけZA系Longを保護するentry overlayです。UTC 13:30以上13:36未満は
+有効Long signalを同じlane/capacityのままShortへ反転し、その後はUTC 13:30 anchorから
+0.20%下落するまでLong entryだけを停止します。既存Short signal、既存positionのexit、
+shadow raw evidenceは変更しません。
+
+このoverlayはsignal方向とentry許可だけを変えます。既存のTP/SL、lot、lane所有権、
+close処理、Q01/t0530/session-VWAPの独立仕様は変更しません。ローカルテスト通過は
+CentOS/MT5配置、再起動、実注文、またはlive成績の証明ではありません。
 
 確定M1の直前15本High/Lowを現在Closeが上抜けたときSHORT、下抜けたときLONGとし、
 availability（M1開始+1分）が`America/New_York`の05:30以上06:00未満にある

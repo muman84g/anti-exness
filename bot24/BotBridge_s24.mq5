@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s24"
-#define BRIDGE_VERSION "2026-09-02-s24-core-atomic-v13"
+#define BRIDGE_VERSION "2026-09-10-s24-rad070-v14"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,OPEN_R1,REPAIR_R1,CLOSE_R1,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s24.txt";
@@ -297,6 +297,24 @@ bool IsCoreComment(const string comment)
    return comment == "s24_no_adverse" || IsCurrentCoreComment(comment);
 }
 
+bool IsRADComment(const string comment)
+{
+   const string prefix = "s24_rad070:";
+   if(comment == "s24_rad070")
+      return true;
+   if(StringFind(comment, prefix) != 0 || StringLen(comment) != StringLen(prefix) + 10)
+      return false;
+   for(int index = StringLen(prefix); index < StringLen(comment); ++index)
+   {
+      ushort ch = StringGetCharacter(comment, index);
+      bool digit = (ch >= '0' && ch <= '9');
+      bool lower_hex = (ch >= 'a' && ch <= 'f');
+      if(!digit && !lower_hex)
+         return false;
+   }
+   return true;
+}
+
 bool IsCoreOpenPolicy(
    const string symbol,
    const int order_type,
@@ -307,7 +325,7 @@ bool IsCoreOpenPolicy(
    const string comment,
    const int deviation)
 {
-   return (
+   bool core = (
       symbol == "XAUUSD" &&
       (order_type == ORDER_TYPE_BUY || order_type == ORDER_TYPE_SELL) &&
       MathAbs(volume - 0.01) <= 0.000000001 &&
@@ -316,6 +334,15 @@ bool IsCoreOpenPolicy(
       IsCurrentCoreComment(comment) &&
       deviation == 50
    );
+   bool rad = (
+      symbol == "XAUUSD" &&
+      (order_type == ORDER_TYPE_BUY || order_type == ORDER_TYPE_SELL) &&
+      MathAbs(volume - 0.01) <= 0.000000001 &&
+      MathIsValidNumber(sl) && sl > 0.0 && MathIsValidNumber(tp) && tp > 0.0 &&
+      magic == 240207 && IsRADComment(comment) && deviation == 50 &&
+      ((order_type == ORDER_TYPE_BUY && sl < tp) || (order_type == ORDER_TYPE_SELL && sl > tp))
+   );
+   return core || rad;
 }
 
 bool SelectUniqueOwnedPosition(
@@ -771,7 +798,8 @@ string HandleCommand(const string command)
          if(PositionGetString(POSITION_SYMBOL) == symbol && PositionGetInteger(POSITION_MAGIC) == magic)
          {
             string owned_comment = PositionGetString(POSITION_COMMENT);
-            if(owned_comment != "s24_no_adverse" && !IsCoreComment(owned_comment))
+            if(!((magic == 200024 && IsCoreComment(owned_comment)) ||
+                 (magic == 240207 && IsRADComment(owned_comment))))
                return "ERR|OPEN_INVENTORY_GUARD";
             owned_positions++;
          }
@@ -807,6 +835,19 @@ string HandleCommand(const string command)
          !MathIsValidNumber(required_margin) || required_margin <= 0.0 ||
          AccountInfoDouble(ACCOUNT_MARGIN_FREE) < required_margin * 2.0)
          return "ERR|MARGIN_ADMISSION_GUARD";
+      if(magic == 240207)
+      {
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         double expected_sl = NormalizeDouble(
+            order_type == ORDER_TYPE_BUY ? admission_tick.bid - 18.0 : admission_tick.ask + 18.0,
+            digits);
+         double expected_tp = NormalizeDouble(
+            order_type == ORDER_TYPE_BUY ? admission_tick.ask + 30.0 : admission_tick.bid - 30.0,
+            digits);
+         if(point <= 0.0 || MathAbs(sl - expected_sl) > 100.0 * point || MathAbs(tp - expected_tp) > 100.0 * point)
+            return "ERR|OPEN_POLICY_GUARD";
+      }
       trade.SetExpertMagicNumber(magic);
       trade.SetDeviationInPoints(deviation);
       trade.SetTypeFillingBySymbol(symbol);
@@ -846,6 +887,13 @@ string HandleCommand(const string command)
       }
       if(exact_matches != 1 || position_ticket == 0 || position_identifier == 0 || open_time <= 0 || open_price <= 0.0)
          return StringFormat("ERR|OPEN_FILLED_UNRESOLVED|DEAL=%I64u|MATCHES=%d", deal, exact_matches);
+      if(magic == 240207 && PositionSelectByTicket(position_ticket))
+      {
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         if(point <= 0.0 || MathAbs(PositionGetDouble(POSITION_SL) - sl) > point * 0.5 ||
+            MathAbs(PositionGetDouble(POSITION_TP) - tp) > point * 0.5)
+            return StringFormat("ERR|OPEN_FILLED_UNRESOLVED|DEAL=%I64u|RAD_PROTECTION", deal);
+      }
       if(HistoryDealSelect(deal))
       {
          ulong deal_identifier = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
@@ -865,7 +913,7 @@ string HandleCommand(const string command)
       if(symbol != "XAUUSD" || !ValidInventoryQueryNumericField(parts))
          return "ERR|POSITIONS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
-      if(magic_filter != 200024 && magic_filter != 240206)
+      if(magic_filter != 200024 && magic_filter != 240206 && magic_filter != 240207)
          return "ERR|POSITIONS_POLICY_GUARD";
       string response = "OK";
       int matched = 0;
@@ -902,7 +950,7 @@ string HandleCommand(const string command)
       if(symbol != "XAUUSD" || !ValidInventoryQueryNumericField(parts))
          return "ERR|ORDERS_POLICY_GUARD";
       long magic_filter = StringToInteger(parts[2]);
-      if(magic_filter != 200024 && magic_filter != 240206)
+      if(magic_filter != 200024 && magic_filter != 240206 && magic_filter != 240207)
          return "ERR|ORDERS_POLICY_GUARD";
       string response = "OK";
       int matched = 0;
@@ -1015,7 +1063,9 @@ string HandleCommand(const string command)
       int expected_type = (int)StringToInteger(parts[9]);
       double expected_volume = StringToDouble(parts[10]);
       if(ticket == 0 || deviation != 50 || expected_symbol != "XAUUSD" ||
-         expected_magic != 200024 || !IsCoreComment(expected_comment) ||
+         (expected_magic != 200024 && expected_magic != 240207) ||
+         !((expected_magic == 200024 && IsCoreComment(expected_comment)) ||
+           (expected_magic == 240207 && IsRADComment(expected_comment))) ||
          expected_identifier == 0 ||
          (expected_type != POSITION_TYPE_BUY && expected_type != POSITION_TYPE_SELL) ||
          MathAbs(expected_volume - 0.01) > 0.000000001)

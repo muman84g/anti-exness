@@ -561,7 +561,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
             "side": None,
         })
         receipts = [row for row in rows if row[0] == "strategy_decision"]
-        self.assertEqual(len(receipts), 1)
+        self.assertEqual(len(receipts), len(params["strategies"]))
 
     def test_v206_history_outage_records_one_durable_not_evaluated_receipt(self):
         params = params_copy()
@@ -3083,7 +3083,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
 
         runner.run_once()
 
-        self.assertEqual(core_calls, [params["strategies"][0]["id"]])
+        self.assertEqual(core_calls, [row["id"] for row in params["strategies"]])
         self.assertFalse(runner.passive_shadow_runner_enabled)
         self.assertIn("shadow_runner_runtime", runner.passive_shadow_init_errors)
 
@@ -3107,7 +3107,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
 
         runner.run_once()
 
-        self.assertEqual(core_calls, [params["strategies"][0]["id"]])
+        self.assertEqual(core_calls, [row["id"] for row in params["strategies"]])
         self.assertFalse(runner.shadow_observer.enabled)
         self.assertIn("opportunity_observer_runtime", runner.passive_shadow_init_errors)
 

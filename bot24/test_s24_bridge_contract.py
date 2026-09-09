@@ -30,7 +30,7 @@ class S24BridgeContractTests(unittest.TestCase):
     def test_mql_bridge_exposes_identity_and_quote_timestamp(self):
         text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
         self.assertIn('#define BRIDGE_NAME "BotBridge_s24"', text)
-        self.assertIn('#define BRIDGE_VERSION "2026-09-02-s24-core-atomic-v13"', text)
+        self.assertIn('#define BRIDGE_VERSION "2026-09-10-s24-rad070-v14"', text)
         self.assertIn('input string InpCommandFile = "cmd_s24.txt";', text)
         self.assertIn('input string InpResponseFile = "res_s24.txt";', text)
         self.assertIn("ACCOUNT_LOGIN", text)
