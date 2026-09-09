@@ -476,6 +476,14 @@ class S24BridgeContractTests(unittest.TestCase):
         for name in (*expected, "v206_live_lane.py"):
             self.assertIn(f"./bot24/{name}:/app/bot24/{name}:ro", compose)
 
+    def test_utc1330_hl_overlay_is_mounted_for_bot24(self):
+        bot24 = Path(__file__).resolve().parent
+        compose = (bot24.parent / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "./bot24/utc1330_hl_overlay.py:/app/bot24/utc1330_hl_overlay.py:ro",
+            compose,
+        )
+
     def test_bot24_uses_fixed_local_credentials_without_unused_environment_wiring(self):
         bot24 = Path(__file__).resolve().parent
         config = (bot24 / "live_config.py").read_text(encoding="utf-8")

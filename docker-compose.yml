@@ -623,6 +623,7 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot23/live_config.py:/app/bot23/live_config.py:ro
       - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
+      - ./bot23/utc1330_hl_overlay.py:/app/bot23/utc1330_hl_overlay.py:ro
       - ./bot23/eu_entry_admission_clock.py:/app/bot23/eu_entry_admission_clock.py:ro
       - ./bot23/position_lifecycle_clock.py:/app/bot23/position_lifecycle_clock.py:ro
       - ./bot23/jst1300_pre_eu30_strategy.py:/app/bot23/jst1300_pre_eu30_strategy.py:ro
@@ -678,6 +679,7 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot24/live_config.py:/app/bot24/live_config.py:ro
       - ./bot24/live_s24_bot.py:/app/bot24/live_s24_bot.py:ro
+      - ./bot24/utc1330_hl_overlay.py:/app/bot24/utc1330_hl_overlay.py:ro
       - ./bot24/time_regime_wrapper.py:/app/bot24/time_regime_wrapper.py:ro
       - ./bot24/shadow_opportunity_observer.py:/app/bot24/shadow_opportunity_observer.py:ro
       - ./bot24/shadow_state_tagger.py:/app/bot24/shadow_state_tagger.py:ro

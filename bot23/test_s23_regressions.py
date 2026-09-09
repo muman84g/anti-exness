@@ -4546,6 +4546,10 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
             compose,
         )
         self.assertIn(
+            "./bot23/utc1330_hl_overlay.py:/app/bot23/utc1330_hl_overlay.py:ro",
+            compose,
+        )
+        self.assertIn(
             "./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro",
             compose,
         )
