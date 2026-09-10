@@ -1,5 +1,15 @@
 # Source Backtest
 
+## 2026-09-11 session-VWAP retirement
+
+- Current candidate: `bot23-t0530-edge-on-q01-hl-on-v010`.
+- Extended Forward tick result: 68 trades, PnL -74.786, PF 0.685, MTM MDD 160.456.
+- Decision: remove the session-VWAP signal from bot23. The strategy/config rows,
+  runtime signal/history/entry/exit/retry paths, Python and EA OPEN authorization,
+  dedicated module/tests, and Docker Compose mount were removed.
+- Current topology: 17 strategies. The older session-VWAP material below is retained
+  only as historical source evidence and does not describe executable behavior.
+
 ## 2026-09-10 UTC 13:30 corrected HL local implementation
 
 - Policy: `utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001`.
@@ -7,8 +17,8 @@
 - Evidence: `C:/Users/muuma/Downloads/codex-temp/bot23_bot24_utc1324_1335_review_20260909/REPORT_CORRECTED_HL_DEEP_DIVE_ja.md`.
 - Definition: qualify on UTC 12:30 to 13:20 Bid-M1-open rise of at least 0.20%; invert each effective LONG signal at 13:30-13:35 to SHORT; after 13:35 block LONG until a 0.20% fall from the 13:30 Bid-M1 open. Existing SHORT and exits are unchanged.
 - Portfolio result: DEV +173.224 USD versus control and Forward +146.157 USD; Leakcheck -38.195 USD versus control. Bot23's own deltas were DEV +101.225, Leakcheck -38.195 and Forward +67.781 USD. This mixed independent-period evidence is a guarded user-authorized local adoption, not proof of stable edge.
-- Runtime scope: core ZA routing only, after the existing late-Short transform and before ordinary lane/capacity/execution guards. Q01, session-VWAP, t0530 and their exits are unchanged.
-- Candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`. No CentOS/MT5 placement, restart or live order was performed here.
+- Runtime scope: core ZA routing only, after the existing late-Short transform and before ordinary lane/capacity/execution guards. Q01 and t0530 are unchanged.
+- Candidate: `bot23-t0530-edge-on-q01-hl-on-v010`. No CentOS/MT5 placement, restart or live order was performed here.
 
 ## 2026-09-04 CLOSE claim recovery v33
 
@@ -56,7 +66,7 @@ alone does not prove that a quoted close row is complete.
 - Feed gap: a quote interval over 300 seconds closes at the first arrival quote. Feed-gap and fixed-hold exits do not defer for wide spread. Exact market-closed no-fill retains a durable close intent and retries from fresh broker quote time.
 - Ownership: independent lane 22, magic 230044, comment `s23_q01_l1`; Q01 does not reuse any existing basket or signal identity.
 - Evidence status: fixed DEV/Leakcheck/Forward tick evidence is inherited from the frozen research package. This local port verifies implementation parity and lifecycle safety; it does not create a fresh holdout or live-runtime result.
-- Local candidate: `bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`; bridge `2026-09-04-s23-close-claim-v33`.
+- Local candidate: `bot23-t0530-edge-on-q01-hl-on-v010`; bridge `2026-09-04-s23-close-claim-v33`.
 - Runtime boundary: no CentOS/MT5 placement, restart, attachment, account access, state repair, or order execution was performed.
 
 ## 2026-08-31 t0530 edge-break best integration
@@ -67,9 +77,9 @@ alone does not prove that a quoted close row is complete.
 - Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
 - Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
 - Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
-- Runtime boundary: the later local candidate is `bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`; Q01, t0530 edge, session-VWAP and the corrected HL overlay are locally enabled; no CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+- Runtime boundary: the later local candidate is `bot23-t0530-edge-on-q01-hl-on-v010`; Q01 evaluation, t0530 edge and the corrected HL overlay remain locally enabled; session-VWAP is removed. No CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
 
-## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate
+## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate (historical; removed 2026-09-11)
 
 - Policy: `ny0530_0830_session_vwap_extension_fade_q90_20d_atr60_h15_cap5_v001`
 - Params SHA-256: `b47b8d7d26094681fe559f6daf9c7e2bb1f4cd610527b0a69c5426c20a7a2a65`
@@ -129,13 +139,13 @@ alone does not prove that a quoted close row is complete.
   for ZA and fixed-hold positions before elapsed lifecycle checks.
 - Adoption state (2026-09-03): user authorized local bot23 integration after the
   fixed parent was compared across DEV, known/reused Leakcheck, and retrospective
-  Forward. Current local config has `session_vwap_enabled=true`; no deployment,
+  Forward. This was the former local candidate; session-VWAP is now removed. No deployment,
   restart, bridge attachment, account access, or live order was performed.
 - Updated portfolio evidence:
   `backtest/output/backtest235/BOT23_SESSION_VWAP_FORWARD_PORTFOLIO_REPORT_20260903_ja.md`.
   The Forward label remains retrospective/known rather than a fresh independent
   holdout; no post-result parameter tuning was performed.
-- Evaluation identity: all 22 lanes retain explicit `spec_id` and `signal_id`.
+- Historical evaluation identity: all former 22 lanes had explicit `spec_id` and `signal_id`.
   A separate `s23_signal_evaluation.csv` records group/lane/spec/signal/variant,
   raw/effective direction, transform, opportunity, ticket/deal, and confirmed PnL.
   ZA variants are separately labeled as primary, late-SHORT reverse-LONG, and

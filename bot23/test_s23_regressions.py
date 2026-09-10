@@ -207,7 +207,9 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         source = Path(__file__).with_name("BotBridge_s23.mq5").read_text(encoding="utf-8")
         owned = source.split("bool IsOwnedMagic(", 1)[1].split("}", 1)[0]
         query = source.split("bool IsInventoryQueryMagic(", 1)[1].split("}", 1)[0]
-        self.assertIn("return magic >= 230023 && magic <= 230044;", owned)
+        self.assertIn("magic >= 230023 && magic <= 230034", owned)
+        self.assertIn("magic >= 230040 && magic <= 230044", owned)
+        self.assertNotIn("230035", owned)
         self.assertNotIn("200023", owned)
         self.assertIn("return IsOwnedMagic(magic) || magic == 200023;", query)
         self.assertEqual(live_s23_bot.LEGACY_S23_MAGICS, (200023,))
@@ -246,15 +248,15 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 expected_login=123456,
                 expected_server="Expected-Server",
                 expected_symbol="XAUUSD",
-                expected_magic=230035,
-                expected_comment="s23_sv_l1",
+                expected_magic=230040,
+                expected_comment="s23_ed_l1",
                 expected_identifier=8803,
             )
         self.assertFalse(result)
         self.assertEqual(result.status, "ACCOUNT_IDENTITY_GUARD")
         self.assertTrue(
             send.call_args.args[0].endswith(
-                "|50|123456|Expected-Server|XAUUSD|230035|s23_sv_l1|8803"
+                "|50|123456|Expected-Server|XAUUSD|230040|s23_ed_l1|8803"
             )
         )
 
@@ -284,7 +286,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             self.assertIsNone(
                 executor.open_position(
                     "XAUUSD", ORDER_TYPE_BUY, 0.01, 0.0, 0.0,
-                    deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                    deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                     expected_login=123456, expected_server="Expected-Server",
                     expected_owned_positions=0,
                 )
@@ -296,13 +298,13 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
     def test_open_policy_rejects_every_noncanonical_field_before_bridge_write(self):
         canonical = {
             "symbol": "XAUUSD", "order_type": ORDER_TYPE_BUY, "lot": 0.01,
-            "sl": 0.0, "tp": 0.0, "deviation": 50, "magic": 230035,
-            "comment": "s23_sv_l1", "digits": 3, "expected_login": 123456,
+            "sl": 0.0, "tp": 0.0, "deviation": 50, "magic": 230040,
+            "comment": "s23_ed_l1", "digits": 3, "expected_login": 123456,
             "expected_server": "Expected-Server", "expected_owned_positions": 0,
         }
         mutations = (
             {"symbol": "XAUUSD.a"}, {"lot": 0.02}, {"deviation": 51},
-            {"magic": 999999}, {"comment": "s23_sv_l2"},
+            {"magic": 999999}, {"comment": "s23_ed_l2"},
             {"sl": 1999.0}, {"tp": 2001.0},
         )
         for mutation in mutations:
@@ -319,12 +321,12 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         canonical = {
             "ticket": 7703, "deviation": 50, "expected_login": 123456,
             "expected_server": "Expected-Server", "expected_symbol": "XAUUSD",
-            "expected_magic": 230035, "expected_comment": "s23_sv_l1",
+            "expected_magic": 230040, "expected_comment": "s23_ed_l1",
             "expected_identifier": 8803,
         }
         mutations = (
             {"expected_symbol": "XAUUSD.a"}, {"expected_magic": 999999},
-            {"expected_comment": "s23_sv_l2"}, {"expected_identifier": 0},
+            {"expected_comment": "s23_ed_l2"}, {"expected_identifier": 0},
             {"expected_server": "Expected-Server\rspoof"},
             {"expected_server": "Expected-Server\nspoof"},
         )
@@ -446,17 +448,17 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         )
 
     def test_executor_parses_bridge_order_record_shape(self):
-        response = "OK|7701,XAUUSD,4,0.01,2000.500,1999.000,2002.000,230035,s23_sv_l1|END,1"
+        response = "OK|7701,XAUUSD,4,0.01,2000.500,1999.000,2002.000,230040,s23_ed_l1|END,1"
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
-            orders = live_executor.MT5Executor().get_orders("XAUUSD", 230035)
+            orders = live_executor.MT5Executor().get_orders("XAUUSD", 230040)
         self.assertIsNotNone(orders)
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0].ticket, 7701)
-        self.assertEqual(orders[0].magic, 230035)
-        self.assertEqual(orders[0].comment, "s23_sv_l1")
+        self.assertEqual(orders[0].magic, 230040)
+        self.assertEqual(orders[0].comment, "s23_ed_l1")
 
     def test_executor_requires_complete_inventory_frame_and_declared_count(self):
-        record = "7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1"
+        record = "7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1"
         executor = live_executor.MT5Executor()
         for response in (
             "OK",
@@ -467,18 +469,18 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             with self.subTest(response=response), patch.object(
                 live_executor.ea_bridge, "send_command", return_value=response,
             ):
-                self.assertIsNone(executor.get_positions("XAUUSD", 230035))
+                self.assertIsNone(executor.get_positions("XAUUSD", 230040))
         with patch.object(
             live_executor.ea_bridge, "send_command", return_value="OK|END,0",
         ):
-            self.assertEqual(executor.get_positions("XAUUSD", 230035), [])
+            self.assertEqual(executor.get_positions("XAUUSD", 230040), [])
 
     def test_position_record_preserves_broker_fill_milliseconds(self):
-        record = "7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1"
+        record = "7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1"
         with patch.object(
             live_executor.ea_bridge, "send_command", return_value=f"OK|{record}|END,1",
         ):
-            positions = live_executor.MT5Executor().get_positions("XAUUSD", 230035)
+            positions = live_executor.MT5Executor().get_positions("XAUUSD", 230040)
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0].open_time_msc, 1782888600123)
 
@@ -575,38 +577,6 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             self.assertEqual(bridge.send_command("ECHO|", timeout=0.15), "ERR|RESPONSE_BUSY")
             self.assertFalse(Path(bridge.cmd_file).exists())
 
-    def test_ny0530_mtm_mdd_applies_explicit_lot_contract_multiplier(self):
-        research_root = Path(
-            os.environ.get("BOTTER_RESEARCH_ROOT", str(Path(__file__).parents[2]))
-        )
-        runner_path = (
-            research_root / "backtest" / "output" / "backtest227" /
-            "candidates" / "xau-ny0530-0830-structural-screen-v001" /
-            "run_xau-ny0530-0830-structural-screen-v001.py"
-        )
-        if not runner_path.is_file():
-            self.skipTest(
-                "external backtest227 source is unavailable; set BOTTER_RESEARCH_ROOT "
-                "to a checkout that contains the research artifact"
-            )
-        source = runner_path.read_text(encoding="utf-8")
-        function = source.split("def mtm_mdd_scan", 1)[1].split("def ", 1)[0]
-        self.assertIn("value_multiplier", function)
-        self.assertIn("unrealized_price_delta * value_multiplier", function)
-        simulate = source.split("def simulate", 1)[1].split("def mtm_mdd_scan", 1)[0]
-        self.assertIn("effective_maximum_entry_delay_seconds()", simulate)
-        self.assertIn("raw_entry_spread_points > MAX_ENTRY_SPREAD_POINTS", simulate)
-        self.assertIn('"effective_maximum_entry_delay_seconds"', source)
-        self.assertIn('"max_entry_spread_points"', source)
-        self.assertIn("CONFIG = load_candidate_config(CONFIG_PATH)", source)
-        self.assertIn("parse_constant=_reject_config_constant", source)
-        self.assertIn(".incomplete-", source)
-        self.assertIn("args.run_dir.replace(final_run_dir)", source)
-
-        live_contract_source = runner_path.with_name("run_session_vwap_live_contract_dev.py").read_text(encoding="utf-8")
-        self.assertIn("parent.base.load_candidate_config(args.config)", live_contract_source)
-        self.assertIn(".incomplete-", live_contract_source)
-        self.assertIn("args.run_dir.replace(final_run_dir)", live_contract_source)
 
     def test_ea_claims_correlated_request_durably_and_disables_unused_mutations(self):
         source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
@@ -681,9 +651,9 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 self.assertIsNone(executor.get_position(7701))
 
     def test_executor_rejects_invalid_position_type(self):
-        response = "OK|7702,XAUUSD,99,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1"
+        response = "OK|7702,XAUUSD,99,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1"
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
-            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230035))
+            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230040))
 
     def test_executor_rejects_extended_fixed_schema_frames(self):
         executor = live_executor.MT5Executor()
@@ -691,8 +661,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             ("caps", "OK|CAPS|BotBridge_s23|version|ECHO,CAPS|extra", executor.get_bridge_capabilities),
             ("account", "OK|2|RETAIL_HEDGING|1|1|1|1|123456|Expected-Server|USD|extra", executor.get_account_info),
             ("info", "OK|2000.030|2000.000|1000|0.001|0.01|100.0|0.01|0.1|0.001|100|3|0|1782888600123|4|1|extra", lambda: executor.get_symbol_info("XAUUSD")),
-            ("position", "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1,foreign|END,1", lambda: executor.get_positions("XAUUSD", 230035)),
-            ("order", "OK|7701,XAUUSD,4,0.01,2000.500,0,0,230035,s23_sv_l1,foreign|END,1", lambda: executor.get_orders("XAUUSD", 230035)),
+            ("position", "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1,foreign|END,1", lambda: executor.get_positions("XAUUSD", 230040)),
+            ("order", "OK|7701,XAUUSD,4,0.01,2000.500,0,0,230040,s23_ed_l1,foreign|END,1", lambda: executor.get_orders("XAUUSD", 230040)),
         )
         for name, response, call in cases:
             with self.subTest(name=name), patch.object(
@@ -714,31 +684,31 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
 
     def test_executor_does_not_normalize_inventory_identity_fields(self):
         responses = (
-            "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1 |END,1",
-            "OK| 7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,1782888600123,8802,s23_sv_l1|END,1",
-            "OK|7701,XAUUSD,4,0.01,2000.500,0,0,230035,s23_sv_l1 |END,1",
+            "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1 |END,1",
+            "OK| 7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,1782888600123,8802,s23_ed_l1|END,1",
+            "OK|7701,XAUUSD,4,0.01,2000.500,0,0,230040,s23_ed_l1 |END,1",
         )
         for response in responses:
             with self.subTest(response=response), patch.object(
                 live_executor.ea_bridge, "send_command", return_value=response,
             ):
                 if ",4," in response:
-                    self.assertIsNone(live_executor.MT5Executor().get_orders("XAUUSD", 230035))
+                    self.assertIsNone(live_executor.MT5Executor().get_orders("XAUUSD", 230040))
                 else:
-                    self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230035))
+                    self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230040))
 
     def test_executor_rejects_legacy_position_record_without_identifier(self):
-        response = "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600,8802,s23_sv_l1"
+        response = "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600,8802,s23_ed_l1"
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
-            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230035))
+            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230040))
 
     def test_executor_does_not_accept_malformed_close_as_confirmed(self):
         response = "OK|7703|0.01|2000.500|0|1.25|0|10009"
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
             result = live_executor.MT5Executor().close_position(
                 7703, 50, expected_login=123456, expected_server="Expected-Server",
-                expected_symbol="XAUUSD", expected_magic=230035,
-                expected_comment="s23_sv_l1", expected_identifier=8803,
+                expected_symbol="XAUUSD", expected_magic=230040,
+                expected_comment="s23_ed_l1", expected_identifier=8803,
             )
         self.assertFalse(result)
         self.assertEqual(result.status, "MALFORMED_OK")
@@ -752,7 +722,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         ):
             ticket = executor.open_position(
                 "XAUUSD", ORDER_TYPE_BUY, 0.01, 0.0, 0.0,
-                deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                 expected_login=123456, expected_server="Expected-Server",
                 expected_owned_positions=0,
             )
@@ -766,8 +736,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         ):
             result = executor.close_position(
                 7703, 50, expected_login=123456, expected_server="Expected-Server",
-                expected_symbol="XAUUSD", expected_magic=230035,
-                expected_comment="s23_sv_l1", expected_identifier=8803,
+                expected_symbol="XAUUSD", expected_magic=230040,
+                expected_comment="s23_ed_l1", expected_identifier=8803,
             )
         self.assertFalse(result)
         self.assertEqual(result.status, "MALFORMED_OK")
@@ -785,8 +755,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             ):
                 result = executor.close_position(
                     7703, 50, expected_login=123456, expected_server="Expected-Server",
-                    expected_symbol="XAUUSD", expected_magic=230035,
-                    expected_comment="s23_sv_l1", expected_identifier=8803,
+                    expected_symbol="XAUUSD", expected_magic=230040,
+                    expected_comment="s23_ed_l1", expected_identifier=8803,
                 )
                 self.assertFalse(result)
                 self.assertEqual(result.status, "IPC_NOT_PUBLISHED")
@@ -801,8 +771,8 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         ):
             ambiguous = executor.close_position(
                 7703, 50, expected_login=123456, expected_server="Expected-Server",
-                expected_symbol="XAUUSD", expected_magic=230035,
-                expected_comment="s23_sv_l1", expected_identifier=8803,
+                expected_symbol="XAUUSD", expected_magic=230040,
+                expected_comment="s23_ed_l1", expected_identifier=8803,
             )
         self.assertEqual(ambiguous.status, "FAILED")
         self.assertFalse(
@@ -827,7 +797,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 "OK|7703.0|501|2000.500|10009",
                 lambda: executor.open_position(
                     "XAUUSD", 0, 0.01, 0.0, 0.0,
-                    deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                    deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                     expected_login=123456, expected_server="Expected-Server",
                     expected_owned_positions=0,
                 ),
@@ -837,13 +807,13 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 "OK|7703.0|0.01|2000.500|2001.000|0.50|501|10009",
                 lambda: executor.close_position(
                     7703, 50, expected_login=123456, expected_server="Expected-Server",
-                    expected_symbol="XAUUSD", expected_magic=230035,
-                    expected_comment="s23_sv_l1", expected_identifier=8803,
+                    expected_symbol="XAUUSD", expected_magic=230040,
+                    expected_comment="s23_ed_l1", expected_identifier=8803,
                 ),
             ),
             (
                 "close_deal",
-                "OK|FOUND|501.0|7703|XAUUSD|230035|client|2001.000|0.50|0|0|0|1782888600|0.01",
+                "OK|FOUND|501.0|7703|XAUUSD|230040|client|2001.000|0.50|0|0|0|1782888600|0.01",
                 lambda: executor.get_position_close_deal(7703, 1782880000),
             ),
         )
@@ -868,7 +838,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                 self.assertIsNone(
                     executor.open_position(
                         "XAUUSD", 0, 0.01, 0.0, 0.0,
-                        deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                        deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                         expected_login=123456, expected_server="Expected-Server",
                         expected_owned_positions=0,
                     )
@@ -885,9 +855,9 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
                     self.assertIsNone(live_executor.MT5Executor().get_symbol_info("XAUUSD"))
 
     def test_executor_rejects_fractional_position_open_epoch(self):
-        response = "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230035,1782888600.5,1782888600123,8802,s23_sv_l1"
+        response = "OK|7702,XAUUSD,0,0.01,2000.500,0,0,1.25,230040,1782888600.5,1782888600123,8802,s23_ed_l1"
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
-            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230035))
+            self.assertIsNone(live_executor.MT5Executor().get_positions("XAUUSD", 230040))
 
     def test_executor_rejects_nonfinite_open_confirmation_payload(self):
         response = "OK|7704|9904|nan|10009"
@@ -895,7 +865,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         with patch.object(live_executor.ea_bridge, "send_command", return_value=response):
             ticket = executor.open_position(
                 "XAUUSD", ORDER_TYPE_BUY, 0.01, 0.0, 0.0,
-                deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                 expected_login=123456, expected_server="Expected-Server",
                 expected_owned_positions=0,
             )
@@ -933,7 +903,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         with patch.object(live_executor.ea_bridge, "send_command") as send:
             ticket = executor.open_position(
                 "XAUUSD", ORDER_TYPE_BUY, math.nan, 0.0, 0.0,
-                deviation=50, magic=230035, comment="s23_sv_l1", digits=3,
+                deviation=50, magic=230040, comment="s23_ed_l1", digits=3,
                 expected_login=123456, expected_server="Expected-Server",
                 expected_owned_positions=0,
             )
@@ -1036,7 +1006,7 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         self.assertEqual(
             params["candidate_id"],
-            "bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009",
+            "bot23-t0530-edge-on-q01-hl-on-v010",
         )
         self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])
@@ -1050,10 +1020,45 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
             + params["expected_midday_magics"]
             + params["expected_pre_eu30_magics"]
             + params["expected_trend_recovery_magics"]
-            + params["expected_session_vwap_magics"]
             + params["expected_t0530_edge_magics"]
         )
         self.assertTrue(previous_magics.isdisjoint(params["expected_q01_magics"]))
+
+    def test_removed_session_vwap_namespaces_cannot_submit_orders(self):
+        self.assertTrue(set(range(230035, 230040)).isdisjoint(live_executor.S23_OPEN_POLICY))
+        bridge_source = Path(live_s23_bot.__file__).with_name("BotBridge_s23.mq5").read_text(
+            encoding="utf-8",
+        )
+        self.assertNotIn("s23_sv_", bridge_source)
+        self.assertNotIn("magic >= 230035 && magic <= 230039", bridge_source)
+
+    def test_removed_session_vwap_state_is_pruned_on_upgrade(self):
+        params = json.loads(json.dumps(load_params()))
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            seed = S23HorizontalInventoryRunner(params)
+        state = seed._default_state()
+        for index, strategy_id in enumerate(sorted(live_s23_bot.RETIRED_STRATEGY_IDS), start=13):
+            state["strategies"][strategy_id] = {
+                "lane_id": index, "basket": [], "basket_sequence": 0,
+                "current_basket_id": None,
+            }
+        state["routing"].update({
+            "session_vwap_policy_id": "retired",
+            "session_vwap_params_hash": "retired",
+            "session_vwap_last_evaluated_bar": None,
+            "session_vwap_last_unavailable_bar": None,
+        })
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle)
+            state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                upgraded = S23HorizontalInventoryRunner(params)
+            self.assertTrue(upgraded._retired_state_pruned)
+            self.assertTrue(live_s23_bot.RETIRED_STRATEGY_IDS.isdisjoint(upgraded.state["strategies"]))
+            self.assertFalse(any(key.startswith("session_vwap_") for key in upgraded.state["routing"]))
+        finally:
+            os.unlink(state_path)
 
     def test_q01_waits_for_completed_m5_release(self):
         runner, _strategy, _state = make_runner(live=True)
@@ -1626,7 +1631,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
         mutations = (
             lambda p: p.__setitem__("live_trading_enabled", "false"),
             lambda p: p["safety"].__setitem__("stale_signal_guard", "true"),
-            lambda p: p["session_vwap_strategies"][0].__setitem__("enabled", "false"),
+            lambda p: p["t0530_edge_strategies"][0].__setitem__("enabled", "false"),
             lambda p: p["eu_entry_admission_clock"].__setitem__("routing_enabled", "true"),
         )
         for mutate in mutations:
@@ -1647,8 +1652,6 @@ class Bot23ZARegressionTests(unittest.TestCase):
             lambda p: p.__setitem__("bot_log_max_bytes", True),
             lambda p: p.__setitem__("trade_permission_retry_seconds", 0),
             lambda p: p.__setitem__("new_basket_blocked_hours_utc", [14, 14]),
-            lambda p: p["session_vwap_history"].__setitem__("page_bars", 5001),
-            lambda p: p["session_vwap_history"].__setitem__("retry_seconds", [5, 0]),
         )
         for mutate in mutations:
             params = json.loads(json.dumps(load_params()))
@@ -1661,8 +1664,8 @@ class Bot23ZARegressionTests(unittest.TestCase):
         mutations = (
             lambda p: p.__setitem__("lane_count", "4"),
             lambda p: p.__setitem__("morning_session_max_positions", True),
-            lambda p: p.__setitem__("session_vwap_quantile", float("inf")),
-            lambda p: p["expected_session_vwap_magics"].__setitem__(0, "230035"),
+            lambda p: p.__setitem__("q01_vr_threshold", float("inf")),
+            lambda p: p["expected_t0530_edge_magics"].__setitem__(0, "230040"),
             lambda p: p["strategies"][0].__setitem__("magic", "230023"),
             lambda p: p["morning_session_strategies"][0].__setitem__("hold_minutes", 15.0),
             lambda p: p["midday_session_strategies"][0].__setitem__("lot", "0.01"),
@@ -1685,7 +1688,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
                 "id": "extra_disabled_lane",
             }),
             lambda p: p["midday_session_strategies"][0].pop("hold_minutes"),
-            lambda p: p["session_vwap_strategies"][0].__setitem__("unused_typo", 1),
+            lambda p: p["t0530_edge_strategies"][0].__setitem__("unused_typo", 1),
             lambda p: p["pre_eu30_session_strategies"][0].__setitem__("pre_eu30_lane_id", 2),
         )
         for mutate in mutations:
@@ -1817,7 +1820,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         with patch.object(live_s23_bot.os.path, "exists", return_value=False):
             baseline = S23HorizontalInventoryRunner(params)
-        session_id = params["session_vwap_strategies"][0]["id"]
+        session_id = params["t0530_edge_strategies"][0]["id"]
         za_id = params["strategies"][0]["id"]
         corruptions = (
             lambda state: state["strategies"].pop(session_id),
@@ -1839,7 +1842,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
             ),
             lambda state: state["routing"].pop("trend_recovery"),
             lambda state: state["routing"].pop("long_target_rearm_request_utc"),
-            lambda state: state["routing"].pop("session_vwap_params_hash"),
+            lambda state: state["routing"].pop("t0530_edge_params_hash"),
             lambda state: state["routing"].pop("entry_policy_params_hash"),
             lambda state: (
                 state["routing"].pop("entry_policy_id"),
@@ -1849,8 +1852,8 @@ class Bot23ZARegressionTests(unittest.TestCase):
                 }),
             ),
             lambda state: (
-                state["routing"].pop("session_vwap_policy_id"),
-                state["routing"].pop("session_vwap_params_hash"),
+                state["routing"].pop("t0530_edge_policy_id"),
+                state["routing"].pop("t0530_edge_params_hash"),
                 state["strategies"].pop(session_id),
             ),
         )
@@ -1878,13 +1881,12 @@ class Bot23ZARegressionTests(unittest.TestCase):
         with patch.object(live_s23_bot.os.path, "exists", return_value=False):
             baseline = S23HorizontalInventoryRunner(params)
         state = baseline._default_state()
-        session_ids = [row["id"] for row in params["session_vwap_strategies"]]
+        session_ids = [row["id"] for row in params["t0530_edge_strategies"]]
         for strategy_id in session_ids:
             state["strategies"].pop(strategy_id)
-        state["routing"].pop("session_vwap_policy_id")
-        state["routing"].pop("session_vwap_params_hash")
-        state["routing"].pop("session_vwap_last_evaluated_bar")
-        state["routing"].pop("session_vwap_last_unavailable_bar")
+        state["routing"].pop("t0530_edge_policy_id")
+        state["routing"].pop("t0530_edge_params_hash")
+        state["routing"].pop("t0530_edge_last_evaluated_bar")
         with tempfile.NamedTemporaryFile(
             "w", suffix=".json", delete=False, encoding="utf-8",
         ) as handle:
@@ -1893,7 +1895,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
         try:
             with patch.object(live_s23_bot, "STATE_FILE", path):
                 loaded = S23HorizontalInventoryRunner(params)
-            self.assertTrue(loaded._session_vwap_state_migrated)
+            self.assertTrue(loaded._t0530_edge_state_migrated)
             self.assertTrue(all(strategy_id in loaded.state["strategies"] for strategy_id in session_ids))
             self.assertFalse(any(
                 loaded._st(strategy).get("sync_block_reason") == "state_identity_mismatch"
@@ -4460,7 +4462,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         with patch.object(live_s23_bot.os.path, "exists", return_value=False):
             seed = S23HorizontalInventoryRunner(params)
-        session_id = params["session_vwap_strategies"][0]["id"]
+        session_id = params["t0530_edge_strategies"][0]["id"]
         corruptions = {
             "overlay_lane": lambda state: state["strategies"].__setitem__(session_id, []),
             "routing_root": lambda state: state.__setitem__("routing", []),
@@ -4487,43 +4489,6 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                     self.assertTrue(state["sync_block_new_entries"])
                     self.assertEqual(state["sync_block_reason"], "state_identity_mismatch")
 
-    def test_live_session_entry_does_not_substitute_host_time_for_missing_broker_quote_time(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        bars = pd.DataFrame(
-            {
-                "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                "Close": [2000.1], "Volume": [10],
-            },
-            index=pd.DatetimeIndex([signal_bar]),
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=bars, ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "live session entry must not use host time when broker quote time is missing"
-        )
-        readiness = {
-            int(row["lane_id"]): True
-            for row in runner.params["session_vwap_strategies"]
-        }
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot, "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ),
-            patch.object(live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)),
-        ):
-            runner._process_session_vwap_entries(
-                SimpleNamespace(bid=2000.0, ask=2000.1),
-                pd.Timestamp("2026-07-01T09:30:01Z"),
-                readiness,
-            )
-
-        self.assertIsNone(runner.state["routing"]["session_vwap_last_evaluated_bar"])
 
     def test_compose_mounts_both_clock_modules_for_bot23(self):
         compose_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml"))
@@ -4541,10 +4506,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
             "./bot23/jst1300_pre_eu30_strategy.py:/app/bot23/jst1300_pre_eu30_strategy.py:ro",
             compose,
         )
-        self.assertIn(
-            "./bot23/session_vwap_overlay.py:/app/bot23/session_vwap_overlay.py:ro",
-            compose,
-        )
+        self.assertNotIn("session_vwap_overlay.py", compose)
         self.assertIn(
             "./bot23/utc1330_hl_overlay.py:/app/bot23/utc1330_hl_overlay.py:ro",
             compose,
@@ -4583,21 +4545,6 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
                 violations.append(f"startup_fixed_{field}_missing")
         self.assertEqual([], violations, "fixed credential contract violations")
 
-    def test_disabled_session_vwap_overlay_never_fetches_or_evaluates(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = False
-        self.assertFalse(runner.params["session_vwap_enabled"])
-        runner._session_vwap_snapshot = SimpleNamespace(reason="stale_test_value")
-        runner.session_vwap_history.advance = lambda *_args, **_kwargs: self.fail(
-            "disabled session-VWAP must not fetch history"
-        )
-        info = SimpleNamespace(bid=2000.0, ask=2000.1, quote_time_msc=1)
-
-        runner._refresh_session_vwap_history(info, pd.Timestamp("2026-07-01T09:30:01Z"))
-        runner._process_session_vwap_entries(info, pd.Timestamp("2026-07-01T09:30:01Z"), {})
-
-        self.assertIsNone(runner._session_vwap_snapshot)
-        self.assertIsNone(runner.state["routing"]["session_vwap_last_evaluated_bar"])
 
     def test_all_lane_families_apply_daily_loss_at_final_open_guard(self):
         runner, _za, _state = make_runner(live=False)
@@ -4656,27 +4603,6 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(len(state["basket"]), 1)
         self.assertEqual(state["sync_block_reason"], "live_origin_inventory_requires_live_close")
 
-    def test_disabled_session_lane_still_syncs_and_monitors_owned_basket(self):
-        runner, _za, _state = make_runner(live=False)
-        strat = runner.params["session_vwap_strategies"][0]
-        strat["enabled"] = False
-        runner._st(strat)["basket"] = [{"shadow": True}]
-        synced = []
-        monitored = []
-        runner._sync_strategy = lambda candidate: (synced.append(candidate["id"]) or True)
-        runner._monitor_session_vwap_position = lambda candidate, *_args: (
-            monitored.append(candidate["id"]) or False
-        )
-        at = pd.Timestamp("2026-07-01T12:31:00Z")
-        info = SimpleNamespace(
-            bid=100.0, ask=100.03, quote_time_msc=int(at.timestamp() * 1000),
-        )
-
-        readiness = runner._process_session_vwap_exits(info, at)
-
-        self.assertIn(strat["id"], synced)
-        self.assertIn(strat["id"], monitored)
-        self.assertFalse(readiness[int(strat["lane_id"])])
 
     def test_failed_reconciliation_alert_is_retried_until_delivered(self):
         runner, strat, state = make_runner(live=False)
@@ -4973,1441 +4899,6 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         finally:
             os.unlink(state_path)
 
-    def test_session_vwap_state_migration_preserves_existing_inventory(self):
-        seed, za, _state = make_runner(live=False)
-        state = seed._default_state()
-        state["strategies"][za["id"]]["basket"] = [{"ticket": 12345}]
-        state["strategies"][za["id"]]["basket_sequence"] = 1
-        state["strategies"][za["id"]]["current_basket_id"] = "L1-B000001"
-        for strat in seed.params["session_vwap_strategies"]:
-            state["strategies"].pop(strat["id"])
-        state["routing"].pop("session_vwap_policy_id")
-        state["routing"].pop("session_vwap_params_hash")
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
-            json.dump(state, handle)
-            state_path = handle.name
-        try:
-            with patch.object(live_s23_bot, "STATE_FILE", state_path):
-                migrated = S23HorizontalInventoryRunner(seed.params)
-            self.assertEqual(migrated._st(za)["basket"], [{"ticket": 12345}])
-            self.assertTrue(migrated._session_vwap_state_migrated)
-            for strat in migrated.params["session_vwap_strategies"]:
-                self.assertEqual(migrated._st(strat)["basket"], [])
-        finally:
-            os.unlink(state_path)
-
-    def test_session_vwap_identity_mismatch_blocks_only_private_lanes(self):
-        seed, za, _state = make_runner(live=False)
-        state = seed._default_state()
-        state["routing"]["session_vwap_params_hash"] = "foreign"
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
-            json.dump(state, handle)
-            state_path = handle.name
-        try:
-            with patch.object(live_s23_bot, "STATE_FILE", state_path):
-                loaded = S23HorizontalInventoryRunner(seed.params)
-            self.assertFalse(loaded._st(za)["sync_block_new_entries"])
-            for strat in loaded.params["session_vwap_strategies"]:
-                self.assertTrue(loaded._st(strat)["sync_block_new_entries"])
-                self.assertEqual(
-                    loaded._st(strat)["sync_block_reason"],
-                    "session_vwap_policy_identity_mismatch",
-                )
-        finally:
-            os.unlink(state_path)
-
-    def test_session_vwap_continuity_failure_does_not_consume_signal_bar(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        idx = pd.DatetimeIndex(
-            [pd.Timestamp("2026-06-10T09:29:00Z"), pd.Timestamp("2026-07-01T09:29:00Z")]
-        )
-        sparse = pd.DataFrame(
-            {
-                "Open": [2000.0, 2001.0],
-                "High": [2000.2, 2001.2],
-                "Low": [1999.8, 2000.8],
-                "Close": [2000.0, 2001.0],
-                "Volume": [10, 10],
-            },
-            index=idx,
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=sparse,
-            ready=True,
-            fresh=True,
-            reason="ready",
-            failures=0,
-            retry_after_seconds=0.0,
-        )
-        runner.session_vwap_history.ready = True
-        runner.session_vwap_history.next_start_pos = 12345
-        runner._open_entry = lambda *_args, **_kwargs: self.fail("sparse history must not reach OPEN")
-        info = SimpleNamespace(
-            bid=2001.0,
-            ask=2001.2,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:30:01Z").timestamp() * 1000),
-        )
-        readiness = {int(row["lane_id"]): True for row in runner.params["session_vwap_strategies"]}
-        runner._process_session_vwap_entries(
-            info,
-            pd.Timestamp("2026-07-01T09:30:01Z"),
-            readiness,
-        )
-        routing = runner.state["routing"]
-        self.assertIsNone(routing["session_vwap_last_evaluated_bar"])
-        self.assertEqual(routing["session_vwap_last_unavailable_bar"], "2026-07-01T09:29:00+00:00")
-        self.assertFalse(runner.session_vwap_history.ready)
-        self.assertEqual(runner.session_vwap_history.next_start_pos, 0)
-
-    def test_session_vwap_future_decision_receipt_blocks_older_bar_replay(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(
-                {
-                    "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                    "Close": [2000.1], "Volume": [10],
-                },
-                index=pd.DatetimeIndex([signal_bar]),
-            ),
-            ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        future_receipt = dt_text(signal_bar + pd.Timedelta(minutes=5))
-        runner.state["routing"]["session_vwap_last_evaluated_bar"] = future_receipt
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "an older bar must not pass a future durable receipt"
-        )
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:30:01Z").timestamp() * 1000),
-        )
-        readiness = {
-            int(row["lane_id"]): True
-            for row in runner.params["session_vwap_strategies"]
-        }
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot, "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ) as signal_mock,
-            patch.object(live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)),
-        ):
-            runner._process_session_vwap_entries(
-                info, pd.Timestamp("2026-07-01T09:30:01Z"), readiness,
-            )
-
-        signal_mock.assert_not_called()
-        self.assertEqual(
-            runner.state["routing"]["session_vwap_last_evaluated_bar"],
-            future_receipt,
-        )
-        for strat in runner.params["session_vwap_strategies"]:
-            self.assertTrue(runner._st(strat)["sync_block_new_entries"])
-            self.assertEqual(
-                runner._st(strat)["sync_block_reason"],
-                "session_vwap_decision_receipt_future",
-            )
-
-    def test_session_vwap_signal_exception_does_not_commit_decision_receipt(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(
-                {
-                    "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                    "Close": [2000.1], "Volume": [10],
-                },
-                index=pd.DatetimeIndex([signal_bar]),
-            ),
-            ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:30:01Z").timestamp() * 1000),
-        )
-        readiness = {
-            int(row["lane_id"]): True
-            for row in runner.params["session_vwap_strategies"]
-        }
-        events = []
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot,
-                "latest_session_vwap_signal",
-                side_effect=ValueError("session_volume_nonpositive"),
-            ),
-        ):
-            runner._process_session_vwap_entries(
-                info, pd.Timestamp("2026-07-01T09:30:01Z"), readiness,
-            )
-
-        self.assertIsNone(runner.state["routing"]["session_vwap_last_evaluated_bar"])
-        self.assertFalse(runner.session_vwap_history.ready)
-        self.assertTrue(any(
-            event == "session_vwap_decision"
-            and fields.get("reason") == "not_evaluated_signal_error"
-            for event, fields in events
-        ))
-
-    def test_session_vwap_retry_only_lane_stays_ready_past_session_end_until_expiry(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        runner._st(strat)["session_vwap_retry_opportunity"] = {"preserved": True}
-        runner._sync_strategy = lambda candidate: candidate is strat
-        runner._monitor_session_vwap_position = lambda *_args, **_kwargs: False
-        after_session = pd.Timestamp("2026-07-01T12:30:30Z")
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(after_session.timestamp() * 1000),
-        )
-
-        readiness = runner._process_session_vwap_exits(info, after_session)
-
-        self.assertTrue(readiness[int(strat["lane_id"])])
-        for other in runner.params["session_vwap_strategies"][1:]:
-            self.assertFalse(readiness[int(other["lane_id"])])
-
-    def test_session_vwap_completed_revision_blocks_all_private_lanes(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        runner.session_vwap_history.advance = lambda *_args, **_kwargs: SimpleNamespace(
-            bars=pd.DataFrame(), ready=True, fresh=False,
-            reason="completed_bar_revision_conflict", failures=1,
-            retry_after_seconds=5.0,
-        )
-        at = pd.Timestamp("2026-07-01T09:30:01Z")
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(at.timestamp() * 1000),
-        )
-
-        runner._refresh_session_vwap_history(info, at)
-
-        for strat in runner.params["session_vwap_strategies"]:
-            self.assertEqual(
-                runner._st(strat)["sync_block_reason"],
-                "session_vwap_completed_bar_revision_conflict",
-            )
-
-    def test_session_vwap_future_m1_does_not_advance_decision_receipt(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(
-                {
-                    "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                    "Close": [2000.1], "Volume": [10],
-                },
-                index=pd.DatetimeIndex([signal_bar]),
-            ),
-            ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        readiness = {
-            int(row["lane_id"]): True
-            for row in runner.params["session_vwap_strategies"]
-        }
-        info = SimpleNamespace(
-            bid=2000.0,
-            ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:29:30Z").timestamp() * 1000),
-        )
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot, "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ),
-        ):
-            runner._process_session_vwap_entries(
-                info, pd.Timestamp("2026-07-01T09:29:30Z"), readiness,
-            )
-
-        self.assertIsNone(runner.state["routing"]["session_vwap_last_evaluated_bar"])
-
-    def test_session_vwap_trade_permission_reject_retries_same_signal_after_cooldown(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        # Keep the retry pending across the next completed M1 so this test
-        # verifies that a newer bar cannot replace the saved signal identity.
-        runner.params["trade_permission_retry_seconds"] = 90.0
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        executor = CountingExecutor()
-        executor.last_order_error = "ERR|10027|DEAL=0"
-        runner.executor = executor
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        bars = pd.DataFrame(
-            {
-                "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                "Close": [2000.1], "Volume": [10],
-            },
-            index=pd.DatetimeIndex([signal_bar]),
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=bars, ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:30:01Z").timestamp() * 1000),
-        )
-        readiness = {int(row["lane_id"]): True for row in runner.params["session_vwap_strategies"]}
-        with (
-            patch.object(
-                live_s23_bot,
-                "utc_now",
-                return_value=pd.Timestamp("2026-07-01T09:30:01Z").to_pydatetime(),
-            ),
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot,
-                "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ) as signal_mock,
-            patch.object(live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)),
-        ):
-            runner._process_session_vwap_entries(info, pd.Timestamp("2026-07-01T09:30:01Z"), readiness)
-            self.assertEqual(executor.open_calls, 1)
-            self.assertIsNotNone(state["open_retry_after_utc"])
-            self.assertEqual(
-                runner.state["routing"]["session_vwap_last_evaluated_bar"],
-                dt_text(signal_bar),
-            )
-            self.assertEqual(
-                state["session_vwap_retry_opportunity"]["signal_bar_time"],
-                dt_text(signal_bar),
-            )
-
-            newer_bar = pd.Timestamp("2026-07-01T09:30:00Z")
-            newer_bars = pd.concat(
-                [
-                    bars,
-                    pd.DataFrame(
-                        {
-                            "Open": [2000.1], "High": [2000.3], "Low": [1999.9],
-                            "Close": [2000.2], "Volume": [11],
-                        },
-                        index=pd.DatetimeIndex([newer_bar]),
-                    ),
-                ]
-            )
-            runner._session_vwap_snapshot = SimpleNamespace(
-                bars=newer_bars, ready=True, fresh=True, reason="ready", failures=0,
-                retry_after_seconds=0.0,
-            )
-            info.quote_time_msc = int(pd.Timestamp("2026-07-01T09:31:01Z").timestamp() * 1000)
-            signal_mock.return_value = (None, pd.Series({"Z": 0.1, "Q90": 1.2}))
-            runner._process_session_vwap_entries(info, pd.Timestamp("2026-07-01T09:31:01Z"), readiness)
-            self.assertEqual(executor.open_calls, 1)
-            self.assertEqual(
-                state["session_vwap_retry_opportunity"]["signal_bar_time"],
-                dt_text(signal_bar),
-            )
-
-            restarted, _za2, _state2 = make_runner(live=True)
-            restarted.params["session_vwap_enabled"] = True
-            restarted.state = json.loads(json.dumps(runner.state))
-            restarted._session_vwap_snapshot = runner._session_vwap_snapshot
-            restarted.executor = executor
-            restarted_state = restarted._st(strat)
-            restarted_state["open_retry_after_utc"] = "2026-07-01T09:30:00+00:00"
-            restarted._process_session_vwap_entries(
-                info,
-                pd.Timestamp("2026-07-01T09:31:31Z"),
-                readiness,
-            )
-            self.assertEqual(executor.open_calls, 2)
-            self.assertEqual(
-                restarted_state["session_vwap_retry_opportunity"]["signal_bar_time"],
-                dt_text(signal_bar),
-            )
-
-    def test_session_vwap_does_not_reuse_same_direction_signal_known_at_close(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["basket"] = [{"side": "LONG", "lot": 0.01, "entry_price": 2000.0}]
-        close_request_bar = pd.Timestamp("2026-07-01T09:45:00Z")
-        confirmed_close = pd.Timestamp("2026-07-01T09:47:03Z")
-        runner._clear_basket_state(
-            strat,
-            "session_vwap_fixed_hold",
-            dt_text(close_request_bar),
-            closed_at_utc=confirmed_close,
-        )
-        self.assertEqual(state["last_closed_side"], "LONG")
-        self.assertEqual(state["last_closed_at_utc"], dt_text(confirmed_close))
-        # This bar became available after the close request, but before the
-        # broker-confirmed close. It must not escape through another lane.
-        signal_bar = pd.Timestamp("2026-07-01T09:46:00Z")
-        bars = pd.DataFrame(
-            {
-                "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                "Close": [2000.1], "Volume": [10],
-            },
-            index=pd.DatetimeIndex([signal_bar]),
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=bars, ready=True, fresh=True, reason="ready", failures=0,
-            retry_after_seconds=0.0,
-        )
-        events = []
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "same-direction signal known at close must not reopen"
-        )
-        info = SimpleNamespace(
-            bid=2000.0, ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:47:04Z").timestamp() * 1000),
-        )
-        readiness = {int(row["lane_id"]): True for row in runner.params["session_vwap_strategies"]}
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot,
-                "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ),
-            patch.object(live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)),
-        ):
-            runner._process_session_vwap_entries(
-                info,
-                pd.Timestamp("2026-07-01T09:47:04Z"),
-                readiness,
-            )
-        reasons = [fields.get("reason") for event, fields in events if event == "session_vwap_decision"]
-        self.assertIn("stale_same_direction_after_close", reasons)
-        self.assertFalse(state["basket"])
-
-    def test_session_vwap_malformed_close_ledger_fails_closed(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["last_closed_side"] = "LONG"
-        state["last_closed_at_utc"] = "not-a-timestamp"
-        signal_bar = pd.Timestamp("2026-07-01T09:46:00Z")
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(
-                {
-                    "Open": [2000.0], "High": [2000.2], "Low": [1999.8],
-                    "Close": [2000.1], "Volume": [10],
-                },
-                index=pd.DatetimeIndex([signal_bar]),
-            ),
-            ready=True,
-            fresh=True,
-            reason="ready",
-            failures=0,
-            retry_after_seconds=0.0,
-        )
-        events = []
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "malformed same-direction close ledger must not reopen"
-        )
-        info = SimpleNamespace(
-            bid=2000.0,
-            ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:47:04Z").timestamp() * 1000),
-        )
-        readiness = {
-            int(row["lane_id"]): True
-            for row in runner.params["session_vwap_strategies"]
-        }
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(
-                live_s23_bot,
-                "latest_session_vwap_signal",
-                return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2})),
-            ),
-            patch.object(
-                live_s23_bot,
-                "stale_signal_decision",
-                return_value=SimpleNamespace(stale=False),
-            ),
-        ):
-            runner._process_session_vwap_entries(
-                info,
-                pd.Timestamp("2026-07-01T09:47:04Z"),
-                readiness,
-            )
-
-        reasons = [
-            fields.get("reason")
-            for event, fields in events
-            if event == "session_vwap_decision"
-        ]
-        self.assertIn("last_closed_state_invalid", reasons)
-        self.assertFalse(state["basket"])
-
-    def test_session_vwap_malformed_close_side_invalidates_ledger(self):
-        runner, _za, _state = make_runner(live=False)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["last_closed_side"] = "SIDEWAYS"
-        state["last_closed_at_utc"] = "2026-07-01T09:47:03Z"
-
-        cutoff, invalid = runner._session_vwap_closed_cutoff("LONG")
-
-        self.assertIsNone(cutoff)
-        self.assertTrue(invalid)
-
-    def test_session_vwap_numeric_close_time_invalidates_ledger(self):
-        runner, _za, _state = make_runner(live=False)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["last_closed_side"] = "LONG"
-        state["last_closed_at_utc"] = 123
-
-        cutoff, invalid = runner._session_vwap_closed_cutoff(
-            "LONG", pd.Timestamp("2026-07-01T09:47:04Z")
-        )
-
-        self.assertIsNone(cutoff)
-        self.assertTrue(invalid)
-
-    def test_session_vwap_future_close_ledger_is_invalid(self):
-        runner, _za, _state = make_runner(live=False)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["last_closed_side"] = "LONG"
-        state["last_closed_at_utc"] = "2026-07-02T09:47:03Z"
-
-        cutoff, invalid = runner._session_vwap_closed_cutoff(
-            "LONG", pd.Timestamp("2026-07-01T09:47:04Z")
-        )
-
-        self.assertIsNone(cutoff)
-        self.assertTrue(invalid)
-
-    def test_session_vwap_live_close_deal_blocks_signal_reuse_across_lanes(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        position_id = 8816
-        close_request_bar = pd.Timestamp("2026-07-01T09:45:00Z")
-        confirmed_close = pd.Timestamp("2026-07-01T09:47:03Z")
-        state["basket"] = [{
-            "ticket": 9916,
-            "position_identifier": position_id,
-            "side": "LONG",
-            "lot": float(strat["lot"]),
-            "entry_price": 2000.0,
-            "entry_time_utc": "2026-07-01T09:30:02+00:00",
-            "open_time_epoch": int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-            "owner_symbol": "XAUUSD",
-            "owner_magic": int(strat["magic"]),
-            "owner_comment": strat["comment_prefix"],
-            "opportunity_id": "prior-long",
-            "shadow": False,
-        }]
-        bind_owned_basket_identity(strat, state)
-        state["pending_close_reason"] = "session_vwap_fixed_hold"
-        state["pending_close_signal_bar"] = dt_text(close_request_bar)
-        executor = CountingExecutor()
-        executor.close_deal = SimpleNamespace(
-            position_id=position_id,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            net_profit=1.25,
-            price=2000.2,
-            deal=77116,
-            exit_volume=0.01,
-            deal_time=int(confirmed_close.timestamp()),
-        )
-        runner.executor = executor
-        events = []
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-
-        self.assertTrue(runner._sync_strategy(strat))
-        self.assertEqual(state["last_closed_side"], "LONG")
-        self.assertEqual(parse_ts(state["last_closed_at_utc"]), confirmed_close)
-
-        signal_bar = pd.Timestamp("2026-07-01T09:46:00Z")
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(
-                {"Open": [2000.0], "High": [2000.2], "Low": [1999.8], "Close": [2000.1], "Volume": [10]},
-                index=pd.DatetimeIndex([signal_bar]),
-            ),
-            ready=True,
-            fresh=True,
-            reason="ready",
-            failures=0,
-            retry_after_seconds=0.0,
-        )
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "signal available before the live close deal must not reopen in another lane"
-        )
-        info = SimpleNamespace(
-            bid=2000.0,
-            ask=2000.1,
-            quote_time_msc=int(pd.Timestamp("2026-07-01T09:47:04Z").timestamp() * 1000),
-        )
-        readiness = {int(row["lane_id"]): True for row in runner.params["session_vwap_strategies"]}
-        with (
-            patch.object(live_s23_bot, "session_vwap_entry_history_issue", return_value=None),
-            patch.object(live_s23_bot, "latest_session_vwap_signal", return_value=("LONG", pd.Series({"Z": 1.5, "Q90": 1.2}))),
-            patch.object(live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)),
-        ):
-            runner._process_session_vwap_entries(
-                info,
-                pd.Timestamp("2026-07-01T09:47:04Z"),
-                readiness,
-            )
-        reasons = [fields.get("reason") for event, fields in events if event == "session_vwap_decision"]
-        self.assertIn("stale_same_direction_after_close", reasons)
-
-    def test_session_vwap_restart_adopts_one_exact_pending_open_fill(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        opportunity_id = "XAUUSD|2026-07-01T09:29:00+00:00|session_vwap_extension_fade|LONG"
-        opportunity = {
-            "opportunity_id": opportunity_id,
-            "source": "session_vwap_extension_fade",
-            "side": "LONG",
-            "raw_side": "LONG",
-            "effective_side": "LONG",
-            "event_time": "2026-07-01T09:29:00+00:00",
-            "release_time": "2026-07-01T09:30:00+00:00",
-            "available_time": "2026-07-01T09:30:00+00:00",
-        }
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = "2026-07-01T09:30:01+00:00"
-        state.update({
-            "pending_open_expires_utc": "2026-07-01T09:32:00+00:00",
-            "pending_open_side": "LONG", "pending_open_lot": float(strat["lot"]),
-            "pending_open_symbol": "XAUUSD", "pending_open_magic": int(strat["magic"]),
-            "pending_open_comment": str(strat["comment_prefix"]),
-            "pending_open_signal_bar": "2026-07-01T09:29:00+00:00",
-            "pending_open_reverse_used": False, "pending_open_expected_positions": 0,
-        })
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": opportunity,
-            "signal_bar_time": "2026-07-01T09:29:00+00:00",
-            "expires_utc": "2026-07-01T09:32:00+00:00",
-            "note": "session_vwap_retry",
-        }
-        ticket = 9913
-        position = SimpleNamespace(
-            ticket=ticket,
-            identifier=8813,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertTrue(runner._sync_strategy(strat))
-        self.assertEqual(len(state["basket"]), 1)
-        self.assertEqual(state["basket"][0]["position_identifier"], 8813)
-        self.assertEqual(state["basket"][0]["opportunity_id"], opportunity_id)
-        self.assertIsNone(state["pending_open_opportunity_id"])
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-
-    def test_session_vwap_restart_rejects_fill_when_basket_sequence_is_invalid(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        release_time = signal_bar + pd.Timedelta(minutes=1)
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state.update({
-            "basket_sequence": "broken",
-            "pending_open_opportunity_id": opportunity_id,
-            "pending_open_started_utc": "2026-07-01T09:30:01+00:00",
-            "pending_open_expires_utc": "2026-07-01T09:32:00+00:00",
-            "pending_open_side": "LONG", "pending_open_lot": float(strat["lot"]),
-            "pending_open_symbol": "XAUUSD", "pending_open_magic": int(strat["magic"]),
-            "pending_open_comment": str(strat["comment_prefix"]),
-            "pending_open_signal_bar": "2026-07-01T09:29:00+00:00",
-            "pending_open_reverse_used": False, "pending_open_expected_positions": 0,
-            "session_vwap_retry_opportunity": {
-                "opportunity": {
-                    "opportunity_id": opportunity_id,
-                    "source": "session_vwap_extension_fade",
-                    "side": "LONG",
-                    "raw_side": "LONG",
-                    "effective_side": "LONG",
-                    "event_time": dt_text(signal_bar),
-                    "release_time": dt_text(release_time),
-                    "available_time": dt_text(release_time),
-                },
-                "signal_bar_time": dt_text(signal_bar),
-                "expires_utc": dt_text(release_time + pd.Timedelta(minutes=2)),
-                "note": "session_vwap_retry",
-            },
-        })
-        executor = CountingExecutor()
-        executor.positions = [SimpleNamespace(
-            ticket=9914,
-            identifier=8814,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-
-    def test_session_vwap_restart_rejects_coercible_numeric_receipt_timestamps(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        release_time = signal_bar + pd.Timedelta(minutes=1)
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = int((release_time + pd.Timedelta(seconds=1)).value)
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": int(signal_bar.value),
-                "release_time": int(release_time.value),
-                "available_time": int(release_time.value),
-            },
-            "signal_bar_time": int(signal_bar.value),
-            "expires_utc": int((release_time + pd.Timedelta(minutes=2)).value),
-            "note": "session_vwap_retry",
-        }
-        position = SimpleNamespace(
-            ticket=9914,
-            identifier=8814,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int((release_time + pd.Timedelta(seconds=2)).timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-
-    def test_session_vwap_restart_rejects_pending_started_after_signal_expiry(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = "2026-07-01T09:40:01+00:00"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-                "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(signal_bar + pd.Timedelta(minutes=3)),
-            "note": "session_vwap_retry",
-        }
-        position = SimpleNamespace(
-            ticket=9922,
-            identifier=8822,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:40:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-
-    def test_session_vwap_restart_rejects_tampered_pending_opportunity_identity(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = "2026-07-01T09:30:01+00:00"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "tampered_source",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-                "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(signal_bar + pd.Timedelta(minutes=3)),
-            "note": "session_vwap_retry",
-        }
-        position = SimpleNamespace(
-            ticket=9921,
-            identifier=8821,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-
-    def test_session_vwap_retry_rejects_side_that_disagrees_with_opportunity_id(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "SHORT",
-                "raw_side": "SHORT",
-                "effective_side": "SHORT",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-                "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(signal_bar + pd.Timedelta(minutes=3)),
-            "note": "session_vwap_retry",
-        }
-        routed = []
-        events = []
-        runner._open_entry = lambda _strat, side, *_args, **_kwargs: (routed.append(side) or False)
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-        info = SimpleNamespace(bid=2000.0, ask=2000.1)
-
-        runner._process_session_vwap_retries(
-            info,
-            pd.Timestamp("2026-07-01T09:30:30Z"),
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertEqual(routed, [])
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-        reasons = [fields.get("reason") for event, fields in events if event == "session_vwap_decision"]
-        self.assertIn("retry_state_invalid", reasons)
-
-    def test_session_vwap_non_object_retry_state_is_durably_discarded(self):
-        runner, _za, _state = make_runner(live=False)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        state["session_vwap_retry_opportunity"] = "corrupt-retry"
-        events = []
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-
-        runner._process_session_vwap_retries(
-            SimpleNamespace(bid=2000.0, ask=2000.1),
-            pd.Timestamp("2026-07-01T09:30:30Z"),
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-        self.assertTrue(any(
-            event == "session_vwap_decision"
-            and fields.get("reason") == "retry_state_invalid"
-            for event, fields in events
-        ))
-
-    def test_session_vwap_retry_rejects_numeric_future_open_cooldown(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        release_time = signal_bar + pd.Timedelta(minutes=1)
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(release_time),
-                "available_time": dt_text(release_time),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(release_time + pd.Timedelta(minutes=2)),
-            "note": "session_vwap_retry",
-        }
-        state["open_retry_after_utc"] = int(
-            (release_time + pd.Timedelta(days=1)).value
-        )
-        routed = []
-        events = []
-        runner._open_entry = lambda *_args, **_kwargs: (routed.append(True) or False)
-        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
-
-        runner._process_session_vwap_retries(
-            SimpleNamespace(bid=2000.0, ask=2000.1),
-            release_time + pd.Timedelta(seconds=30),
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertEqual(routed, [])
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-        reasons = [fields.get("reason") for event, fields in events if event == "session_vwap_decision"]
-        self.assertIn("open_retry_state_invalid", reasons)
-
-    def test_session_vwap_retry_is_not_submitted_before_signal_release(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:31:00Z")
-        release_time = signal_bar + pd.Timedelta(minutes=1)
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(release_time),
-                "available_time": dt_text(release_time),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(release_time + pd.Timedelta(minutes=2)),
-            "note": "session_vwap_retry",
-        }
-        routed = []
-        runner._open_entry = lambda *_args, **_kwargs: (routed.append(True) or False)
-
-        runner._process_session_vwap_retries(
-            SimpleNamespace(bid=2000.0, ask=2000.1),
-            pd.Timestamp("2026-07-01T09:31:30Z"),
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertEqual(routed, [])
-        self.assertIsNotNone(state["session_vwap_retry_opportunity"])
-
-    def test_session_vwap_retry_expiry_uses_broker_quote_clock_when_host_lags(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-                "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(signal_bar + pd.Timedelta(minutes=3)),
-            "note": "session_vwap_retry",
-        }
-        broker_time = pd.Timestamp("2026-07-01T09:33:00Z")
-        host_time = pd.Timestamp("2026-07-01T09:31:00Z")
-        info = SimpleNamespace(
-            bid=2000.0,
-            ask=2000.1,
-            quote_time_msc=int(broker_time.timestamp() * 1000),
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(), ready=False, fresh=False, reason="not_ready",
-            failures=0, retry_after_seconds=0.0,
-        )
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "broker-expired retry must not reach OPEN when the host clock lags"
-        )
-
-        runner._process_session_vwap_entries(
-            info,
-            host_time,
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-
-    def test_session_vwap_retry_expiry_uses_host_clock_when_broker_quote_is_stale(self):
-        runner, _za, _state = make_runner(live=True)
-        runner.params["session_vwap_enabled"] = True
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {
-                "opportunity_id": opportunity_id,
-                "source": "session_vwap_extension_fade",
-                "side": "LONG",
-                "raw_side": "LONG",
-                "effective_side": "LONG",
-                "event_time": dt_text(signal_bar),
-                "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-                "available_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-            },
-            "signal_bar_time": dt_text(signal_bar),
-            "expires_utc": dt_text(signal_bar + pd.Timedelta(minutes=3)),
-            "note": "session_vwap_retry",
-        }
-        broker_time = pd.Timestamp("2026-07-01T09:30:30Z")
-        host_time = pd.Timestamp("2026-07-01T09:40:00Z")
-        info = SimpleNamespace(
-            bid=2000.0,
-            ask=2000.1,
-            quote_time_msc=int(broker_time.timestamp() * 1000),
-        )
-        runner._session_vwap_snapshot = SimpleNamespace(
-            bars=pd.DataFrame(), ready=False, fresh=False, reason="not_ready",
-            failures=0, retry_after_seconds=0.0,
-        )
-        runner._open_entry = lambda *_args, **_kwargs: self.fail(
-            "a host-expired retry must not use an old broker quote to reach OPEN"
-        )
-
-        runner._process_session_vwap_entries(
-            info,
-            host_time,
-            {int(strat["lane_id"]): True},
-        )
-
-        self.assertIsNone(state["session_vwap_retry_opportunity"])
-
-    def test_session_vwap_trade_permission_cooldown_starts_from_broker_execution_time(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        executor = CountingExecutor()
-        executor.last_order_error = "ERR|10027|DEAL=0"
-        runner.executor = executor
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        broker_time = pd.Timestamp("2026-07-01T09:30:05Z")
-        host_time = broker_time + pd.Timedelta(seconds=1)
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        opportunity = {
-            "opportunity_id": opportunity_id,
-            "source": "session_vwap_extension_fade",
-            "side": "LONG",
-            "event_time": dt_text(signal_bar),
-            "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-        }
-        price_row = pd.Series(
-            {"Open": 2000.0, "Close": 2000.1, "AskOpen": 2000.15},
-            name=signal_bar,
-        )
-        info = SimpleNamespace(
-            bid=2000.1,
-            ask=2000.15,
-            quote_time_msc=int(broker_time.timestamp() * 1000),
-        )
-
-        with patch.object(live_s23_bot, "utc_now", return_value=host_time.to_pydatetime()):
-            self.assertTrue(
-                runner._open_entry(
-                    strat,
-                    "LONG",
-                    price_row,
-                    info,
-                    execution_time=broker_time,
-                    opportunity=opportunity,
-                    apply_portfolio_rearm=False,
-                    use_confirmed_fill_time=True,
-                )
-            )
-
-        self.assertEqual(
-            parse_ts(state["open_retry_after_utc"]),
-            broker_time + pd.Timedelta(seconds=30),
-        )
-
-    def test_session_vwap_initial_open_rejects_confirmed_position_lot_mismatch(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        opportunity = {
-            "opportunity_id": opportunity_id,
-            "source": "session_vwap_extension_fade",
-            "side": "LONG",
-            "event_time": dt_text(signal_bar),
-            "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-        }
-        position = SimpleNamespace(
-            ticket=9918,
-            identifier=8818,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]) * 2.0,
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        def confirm_mismatched_position(*_args, **_kwargs):
-            executor.open_calls += 1
-            executor.positions = [position]
-            return 9918
-        executor.open_position = confirm_mismatched_position
-        runner.executor = executor
-        price_row = pd.Series(
-            {"Open": 2000.0, "Close": 2000.1, "AskOpen": 2000.15},
-            name=signal_bar,
-        )
-        submit_time = pd.Timestamp("2026-07-01T09:30:02Z")
-        info = SimpleNamespace(
-            bid=2000.1,
-            ask=2000.15,
-            quote_time_msc=int(submit_time.timestamp() * 1000),
-        )
-
-        with patch.object(live_s23_bot, "utc_now", return_value=submit_time.to_pydatetime()):
-            self.assertTrue(
-                runner._open_entry(
-                    strat,
-                    "LONG",
-                    price_row,
-                    info,
-                    execution_time=submit_time,
-                    opportunity=opportunity,
-                    apply_portfolio_rearm=False,
-                    use_confirmed_fill_time=True,
-                )
-            )
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-        self.assertEqual(state["sync_block_reason"], "open_confirmation_mismatch")
-
-    def test_session_vwap_initial_open_accepts_exact_position_in_submission_window(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        submit_time = pd.Timestamp("2026-07-01T09:30:01Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        opportunity = {
-            "opportunity_id": opportunity_id,
-            "source": "session_vwap_extension_fade",
-            "side": "LONG",
-            "event_time": dt_text(signal_bar),
-            "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-        }
-        position = SimpleNamespace(
-            ticket=9920,
-            identifier=8820,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int((submit_time + pd.Timedelta(seconds=1)).timestamp()),
-        )
-        executor = CountingExecutor()
-        def confirm_exact_position(*_args, **_kwargs):
-            executor.open_calls += 1
-            executor.positions = [position]
-            return 9920
-        executor.open_position = confirm_exact_position
-        runner.executor = executor
-        price_row = pd.Series(
-            {"Open": 2000.0, "Close": 2000.1, "AskOpen": 2000.15},
-            name=signal_bar,
-        )
-        info = SimpleNamespace(
-            bid=2000.1,
-            ask=2000.15,
-            quote_time_msc=int(submit_time.timestamp() * 1000),
-        )
-
-        with patch.object(live_s23_bot, "utc_now", return_value=submit_time.to_pydatetime()):
-            self.assertTrue(
-                runner._open_entry(
-                    strat,
-                    "LONG",
-                    price_row,
-                    info,
-                    execution_time=submit_time,
-                    opportunity=opportunity,
-                    apply_portfolio_rearm=False,
-                    use_confirmed_fill_time=True,
-                )
-            )
-        self.assertEqual(len(state["basket"]), 1)
-        self.assertEqual(state["basket"][0]["position_identifier"], 8820)
-        self.assertEqual(state["basket"][0]["lot"], float(strat["lot"]))
-        self.assertIsNone(state["pending_open_opportunity_id"])
-
-    def test_session_vwap_ambiguous_open_does_not_adopt_old_same_lane_position(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        signal_bar = pd.Timestamp("2026-07-01T09:29:00Z")
-        opportunity_id = f"XAUUSD|{dt_text(signal_bar)}|session_vwap_extension_fade|LONG"
-        opportunity = {
-            "opportunity_id": opportunity_id,
-            "source": "session_vwap_extension_fade",
-            "side": "LONG",
-            "event_time": dt_text(signal_bar),
-            "release_time": dt_text(signal_bar + pd.Timedelta(minutes=1)),
-        }
-        old_position = SimpleNamespace(
-            ticket=9919,
-            identifier=8819,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T08:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.last_order_error = "NO_RESPONSE"
-        def expose_old_position_after_ambiguous_open(*_args, **_kwargs):
-            executor.open_calls += 1
-            executor.positions = [old_position]
-            return None
-        executor.open_position = expose_old_position_after_ambiguous_open
-        runner.executor = executor
-        price_row = pd.Series(
-            {"Open": 2000.0, "Close": 2000.1, "AskOpen": 2000.15},
-            name=signal_bar,
-        )
-        submit_time = pd.Timestamp("2026-07-01T09:30:02Z")
-        info = SimpleNamespace(
-            bid=2000.1,
-            ask=2000.15,
-            quote_time_msc=int(submit_time.timestamp() * 1000),
-        )
-
-        with patch.object(live_s23_bot, "utc_now", return_value=submit_time.to_pydatetime()):
-            self.assertTrue(
-                runner._open_entry(
-                    strat,
-                    "LONG",
-                    price_row,
-                    info,
-                    execution_time=submit_time,
-                    opportunity=opportunity,
-                    apply_portfolio_rearm=False,
-                    use_confirmed_fill_time=True,
-                )
-            )
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-        self.assertEqual(state["sync_block_reason"], "open_confirmation_mismatch")
-
-    def test_session_vwap_restart_does_not_adopt_lot_mismatch(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        opportunity_id = "XAUUSD|2026-07-01T09:29:00+00:00|session_vwap_extension_fade|LONG"
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = "2026-07-01T09:30:01+00:00"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {"opportunity_id": opportunity_id, "side": "LONG"},
-            "signal_bar_time": "2026-07-01T09:29:00+00:00",
-            "expires_utc": "2026-07-01T09:32:00+00:00",
-            "note": "session_vwap_retry",
-        }
-        position = SimpleNamespace(
-            ticket=9914,
-            identifier=8814,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]) * 2.0,
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-
-    def test_session_vwap_restart_does_not_adopt_old_position_from_same_lane(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        opportunity_id = "XAUUSD|2026-07-01T09:29:00+00:00|session_vwap_extension_fade|LONG"
-        state["pending_open_opportunity_id"] = opportunity_id
-        state["pending_open_started_utc"] = "2026-07-01T09:30:01+00:00"
-        state["session_vwap_retry_opportunity"] = {
-            "opportunity": {"opportunity_id": opportunity_id, "side": "LONG"},
-            "signal_bar_time": "2026-07-01T09:29:00+00:00",
-            "expires_utc": "2026-07-01T09:32:00+00:00",
-            "note": "session_vwap_retry",
-        }
-        position = SimpleNamespace(
-            ticket=9915,
-            identifier=8815,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T08:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertFalse(runner._sync_strategy(strat))
-        self.assertFalse(state["basket"])
-        self.assertEqual(state["sync_block_reason"], "live_positions_without_state")
-        self.assertEqual(state["pending_open_opportunity_id"], opportunity_id)
-
-    def test_session_vwap_restart_adoption_retains_unrelated_policy_block(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        opportunity_id = "XAUUSD|2026-07-01T09:29:00+00:00|session_vwap_extension_fade|LONG"
-        state.update({
-            "pending_open_opportunity_id": opportunity_id,
-            "pending_open_started_utc": "2026-07-01T09:30:01+00:00",
-            "pending_open_expires_utc": "2026-07-01T09:32:00+00:00",
-            "pending_open_side": "LONG", "pending_open_lot": float(strat["lot"]),
-            "pending_open_symbol": "XAUUSD", "pending_open_magic": int(strat["magic"]),
-            "pending_open_comment": str(strat["comment_prefix"]),
-            "pending_open_signal_bar": "2026-07-01T09:29:00+00:00",
-            "pending_open_reverse_used": False, "pending_open_expected_positions": 0,
-            "session_vwap_retry_opportunity": {
-                "opportunity": {
-                    "opportunity_id": opportunity_id,
-                    "source": "session_vwap_extension_fade",
-                    "side": "LONG",
-                    "raw_side": "LONG",
-                    "effective_side": "LONG",
-                    "event_time": "2026-07-01T09:29:00+00:00",
-                    "release_time": "2026-07-01T09:30:00+00:00",
-                    "available_time": "2026-07-01T09:30:00+00:00",
-                },
-                "signal_bar_time": "2026-07-01T09:29:00+00:00",
-                "expires_utc": "2026-07-01T09:32:00+00:00",
-                "note": "session_vwap_retry",
-            },
-            "sync_block_new_entries": True,
-            "sync_block_reason": "session_vwap_policy_identity_mismatch",
-            "sync_block_recoverable": False,
-            "sync_block_details": {"observed_policy_id": "old-policy"},
-        })
-        position = SimpleNamespace(
-            ticket=9917,
-            identifier=8817,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            comment=strat["comment_prefix"],
-            type=ORDER_TYPE_BUY,
-            volume=float(strat["lot"]),
-            open_price=2000.15,
-            open_time=int(pd.Timestamp("2026-07-01T09:30:02Z").timestamp()),
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        runner.executor = executor
-
-        self.assertTrue(runner._sync_strategy(strat), "exact owned exposure must remain exit-monitorable")
-        self.assertEqual(len(state["basket"]), 1)
-        self.assertTrue(state["sync_block_new_entries"])
-        self.assertEqual(state["sync_block_reason"], "session_vwap_policy_identity_mismatch")
-        self.assertFalse(state["sync_block_recoverable"])
-
-        executor.positions = []
-        executor.close_deal = SimpleNamespace(
-            position_id=8817,
-            symbol="XAUUSD",
-            magic=int(strat["magic"]),
-            net_profit=1.0,
-            price=2000.25,
-            deal=77117,
-            exit_volume=0.01,
-            deal_time=int(pd.Timestamp("2026-07-01T09:47:03Z").timestamp()),
-        )
-        state["pending_close_reason"] = "session_vwap_fixed_hold"
-        state["pending_close_signal_bar"] = "2026-07-01T09:47:00+00:00"
-
-        self.assertFalse(
-            runner._sync_strategy(strat),
-            "flat close confirmation must not convert an unrelated policy block into entry readiness",
-        )
-        self.assertFalse(state["basket"])
-        self.assertTrue(state["sync_block_new_entries"])
-        self.assertEqual(state["sync_block_reason"], "session_vwap_policy_identity_mismatch")
 
     def test_midday_ownership_namespace_is_exact_and_disjoint(self):
         runner, _strategy, _state = make_runner(live=False)
@@ -6735,43 +5226,6 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         self.assertEqual(state["pending_close_reason"], "midday_fixed_hold")
         self.assertFalse(state["sync_block_new_entries"])
 
-    def test_session_vwap_market_closed_10018_uses_fixed_hold_retry_path(self):
-        runner, _za, _state = make_runner(live=True)
-        strat = runner.params["session_vwap_strategies"][0]
-        state = runner._st(strat)
-        entered = pd.Timestamp("2026-08-28 09:30:30", tz="UTC")
-        due = entered + pd.Timedelta(minutes=15)
-        ticket = 9813
-        state["basket"] = [{
-            "ticket": ticket, "position_identifier": ticket, "side": "LONG", "lot": 0.01,
-            "entry_price": 100.0, "entry_time_utc": dt_text(entered),
-            "open_time_epoch": int(entered.timestamp()), "owner_symbol": "XAUUSD",
-            "owner_magic": int(strat["magic"]), "owner_comment": strat["comment_prefix"],
-        }]
-        bind_owned_basket_identity(strat, state)
-        position = SimpleNamespace(
-            ticket=ticket, identifier=ticket, symbol="XAUUSD", magic=int(strat["magic"]),
-            comment=strat["comment_prefix"], type=ORDER_TYPE_BUY, volume=0.01,
-        )
-        executor = CountingExecutor()
-        executor.positions = [position]
-        executor.close_position = lambda ticket, _deviation, **_kwargs: (
-            executor.close_calls.append(int(ticket))
-            or live_executor.CloseResult(False, "MARKET_CLOSED", retcode=10018)
-        )
-        runner.executor = executor
-        quote = SimpleNamespace(
-            bid=100.0, ask=100.03, quote_time_msc=int(due.timestamp() * 1000),
-        )
-
-        self.assertTrue(runner._monitor_session_vwap_position(strat, quote, due))
-        self.assertEqual(executor.close_calls, [ticket])
-        self.assertFalse(state["sync_block_new_entries"])
-        self.assertIsNone(state["pending_close_reason"])
-        self.assertEqual(
-            state["time_close_retry_after_utc"],
-            dt_text(due + pd.Timedelta(seconds=60)),
-        )
 
     def test_midday_capacity_one_blocks_second_position(self):
         runner, _za, _state = make_runner(live=False)
@@ -7871,8 +6325,8 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         with patch.object(live_executor.ea_bridge, "send_command", return_value="ERR|10018|DEAL=0|LAST=0"):
             result = live_executor.MT5Executor().close_position(
                 12345, expected_login=123456, expected_server="Expected-Server",
-                expected_symbol="XAUUSD", expected_magic=230035,
-                expected_comment="s23_sv_l1", expected_identifier=8803,
+                expected_symbol="XAUUSD", expected_magic=230040,
+                expected_comment="s23_ed_l1", expected_identifier=8803,
             )
         self.assertFalse(result)
         self.assertEqual(result.status, "MARKET_CLOSED")
@@ -7922,7 +6376,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         runner, _strategy, _state = make_runner(live=False)
         runner.dm.connect = lambda: True
         runner.executor = live_s23_bot.FakeExecutor()
-        runner._session_vwap_state_migrated = True
+        runner._retired_state_pruned = True
         missing_csv = os.path.join(tempfile.gettempdir(), "s23_missing_migration_save_audit.csv")
         if os.path.exists(missing_csv):
             os.unlink(missing_csv)
@@ -7934,7 +6388,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         ):
             self.assertFalse(runner.connect_and_preflight())
 
-        self.assertTrue(runner._session_vwap_state_migrated)
+        self.assertTrue(runner._retired_state_pruned)
         self.assertIn("migrated state could not be persisted", "\n".join(captured.output))
 
     def test_first_consuming_router_preserves_primary_then_uses_next_lane(self):
@@ -11513,8 +9967,7 @@ class Bot23TrendRecoveryRegressionTests(unittest.TestCase):
 class SignalEvaluationAttributionTests(unittest.TestCase):
     def test_every_lane_has_explicit_signal_identity(self):
         runner, _strategy, _state = make_runner(live=False)
-        self.assertTrue(runner.params["session_vwap_enabled"])
-        self.assertEqual(len(runner._all_strategies()), 22)
+        self.assertEqual(len(runner._all_strategies()), 17)
         for strategy in runner._all_strategies():
             with self.subTest(strategy=strategy["id"]):
                 self.assertTrue(str(strategy.get("spec_id") or ""))

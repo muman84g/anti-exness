@@ -62,11 +62,21 @@ Strategy parameters, credentials and runtime state are unchanged.
 The repeated audit also rejects malformed CSV quoting before close replay,
 while preserving valid quoted multiline fields.
 
+## 2026-09-11 current candidate
+
+Current candidate is `bot23-t0530-edge-on-q01-hl-on-v010`. The NY 05:30-08:30
+session-VWAP strategy was removed after the extended Forward-tick replay fell to
+68 trades, PnL -74.786, PF 0.685 and MTM MDD 160.456. Its five strategy rows,
+signal/history implementation, runtime entry/exit/retry paths, Python and EA OPEN
+allowlists, dedicated tests, and Docker Compose mount are no longer present.
+The current runtime topology has 17 strategies. Historical sections below describe
+the removed candidate only and are not an activation or deployment instruction.
+
 ## Q01 completed-M5 variance-ratio release（採用・ローカル有効）
 
 固定済み`Q01_variance_ratio_release`を、既存21レーンと分離したlane 22
 （magic 230044、comment `s23_q01_l1`）へ実装しています。ローカル候補は
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`です。Q01の判定は有効ですが、
+`bot23-t0530-edge-on-q01-hl-on-v010`です。Q01の判定は有効ですが、
 既存bot23の共通live設定とは別に`q01_live_trading_enabled=false`を固定し、Q01の実注文だけを
 停止しています。配置・再起動・bridge attach・実口座照合・注文実行は行っていません。
 
@@ -89,8 +99,8 @@ opportunity ID、group receipt、固定expiryを完全一致で検証し、破�
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
 （magic 230040-230043）へ移植しています。現在のローカル候補
-`bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009`では
-`t0530_edge_enabled=true`かつ`session_vwap_enabled=true`です。CentOS/MT5への配置、
+`bot23-t0530-edge-on-q01-hl-on-v010`では
+`t0530_edge_enabled=true`です。CentOS/MT5への配置、
 再起動、live/forward確認はこのローカル候補の範囲外です。
 
 ## UTC 13:30 HL overlay（採用・ローカル有効）
@@ -102,7 +112,7 @@ opportunity ID、group receipt、固定expiryを完全一致で検証し、破�
 shadow raw evidenceは変更しません。
 
 このoverlayはsignal方向とentry許可だけを変えます。既存のTP/SL、lot、lane所有権、
-close処理、Q01/t0530/session-VWAPの独立仕様は変更しません。ローカルテスト通過は
+close処理、Q01/t0530の独立仕様は変更しません。ローカルテスト通過は
 CentOS/MT5配置、再起動、実注文、またはlive成績の証明ではありません。
 
 確定M1の直前15本High/Lowを現在Closeが上抜けたときSHORT、下抜けたときLONGとし、
@@ -116,11 +126,11 @@ DEV全ティック再集計では研究mid、現行HIST相当Bid、新実装が1
 時刻・方向とも一致しました。この一致はDEV内の実装同一性証拠であり、独立holdoutや
 CentOS/MT5実稼働証拠への昇格ではありません。
 
-## NY 05:30-08:30 session-VWAP overlay（採用・ローカル有効）
+## NY 05:30-08:30 session-VWAP overlay（履歴・2026-09-11削除済み）
 
 DEVで固定した`session_vwap_extension_fade`を、既存12レーンとは分離した
 lane 13-17（magic 230035-230039）へ実装しています。ユーザーの採用判断により
-ローカル設定は`session_vwap_enabled=true`です。配置・再起動・MT5接続は別作業です。
+この節は過去候補の記録です。現行設定・runner・bridge・Composeには存在しません。
 
 判定はbroker UTCのM1開始時刻に1分を加えた確定・利用可能時刻を
 `America/New_York`へ変換し、現地05:30以上08:30未満だけを対象にします。
@@ -331,11 +341,6 @@ affected ticket. The episode cannot rearm from its own exits.
 | PE 2 | 230032 | `s23_pe_l2` |
 | PE 3 | 230033 | `s23_pe_l3` |
 | TR 1 | 230034 | `s23_tr_l1` |
-| SV 1 | 230035 | `s23_sv_l1` |
-| SV 2 | 230036 | `s23_sv_l2` |
-| SV 3 | 230037 | `s23_sv_l3` |
-| SV 4 | 230038 | `s23_sv_l4` |
-| SV 5 | 230039 | `s23_sv_l5` |
 | ED 1 | 230040 | `s23_ed_l1` |
 | ED 2 | 230041 | `s23_ed_l2` |
 | ED 3 | 230042 | `s23_ed_l3` |

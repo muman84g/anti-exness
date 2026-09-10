@@ -53,13 +53,6 @@ from jst1300_pre_eu30_strategy import (
     in_entry_session as in_pre_eu30_entry_session,
     signal_sides as pre_eu30_signal_sides,
 )
-from session_vwap_overlay import (
-    POLICY_ID as SESSION_VWAP_POLICY_ID,
-    PagedM1History,
-    entry_history_issue as session_vwap_entry_history_issue,
-    in_entry_session as in_session_vwap_entry_session,
-    latest_signal as latest_session_vwap_signal,
-)
 from t0530_edge_overlay import (
     POLICY_ID as T0530_EDGE_POLICY_ID,
     POLICY_PARAMS_HASH as T0530_EDGE_POLICY_PARAMS_HASH,
@@ -89,14 +82,15 @@ EXPECTED_MORNING_MAGICS = (230027, 230028, 230029)
 EXPECTED_MIDDAY_MAGICS = (230030,)
 EXPECTED_PRE_EU30_MAGICS = (230031, 230032, 230033)
 EXPECTED_TREND_RECOVERY_MAGICS = (230034,)
-EXPECTED_SESSION_VWAP_MAGICS = (230035, 230036, 230037, 230038, 230039)
-EXPECTED_SESSION_VWAP_PARAMS_HASH = "b47b8d7d26094681fe559f6daf9c7e2bb1f4cd610527b0a69c5426c20a7a2a65"
 EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_Q01_MAGICS = (230044,)
+RETIRED_STRATEGY_IDS = frozenset(
+    f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)
+)
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-integrated-session-vwap-on-t0530-edge-on-q01-hl-on-v009"
+EXPECTED_CANDIDATE_ID = "bot23-t0530-edge-on-q01-hl-on-v010"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
 EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-close-claim-v33"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
@@ -359,7 +353,6 @@ _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "midday_session_enabled",
     "pre_eu30_session_enabled",
     "trend_recovery_enabled",
-    "session_vwap_enabled",
     "t0530_edge_enabled",
     "q01_variance_release_enabled",
     "q01_live_trading_enabled",
@@ -372,7 +365,6 @@ _STRATEGY_CONFIG_COLLECTIONS = (
     "midday_session_strategies",
     "pre_eu30_session_strategies",
     "trend_recovery_strategies",
-    "session_vwap_strategies",
     "t0530_edge_strategies",
     "q01_variance_release_strategies",
 )
@@ -383,7 +375,6 @@ _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "midday_session_strategies": ("jst1113_round_sweep_lane_1",),
     "pre_eu30_session_strategies": tuple(f"jst1300_pre_eu30_lane_{index}" for index in range(1, 4)),
     "trend_recovery_strategies": ("reverse_long_stop_trend_lane_1",),
-    "session_vwap_strategies": tuple(f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)),
     "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
     "q01_variance_release_strategies": ("q01_variance_release_lane_1",),
 }
@@ -413,9 +404,6 @@ _STATE_GENERATION_CONTRACTS = (
     ("pre_eu30_policy_id", "pre_eu30_policy_params_hash", "pre_eu30_session_strategies", ()),
     ("trend_recovery_policy_id", "trend_recovery_params_hash", "trend_recovery_strategies", (
         "trend_recovery",
-    )),
-    ("session_vwap_policy_id", "session_vwap_params_hash", "session_vwap_strategies", (
-        "session_vwap_last_evaluated_bar", "session_vwap_last_unavailable_bar",
     )),
     ("t0530_edge_policy_id", "t0530_edge_params_hash", "t0530_edge_strategies", (
         "t0530_edge_last_evaluated_bar",
@@ -459,10 +447,6 @@ _STRATEGY_KEYS_BY_COLLECTION = {
         "lot", "max_positions", "cooldown", "hold_minutes", "ticket_target_usd",
         "ticket_stop_usd", "target_atr_mult", "stop_atr_mult",
         "adaptive_fixed_exit_atr_threshold", "tp_multiplier", "sl_multiplier",
-    }),
-    "session_vwap_strategies": frozenset({
-        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
-        "lot", "hold_minutes", "max_positions", "cooldown",
     }),
     "t0530_edge_strategies": frozenset({
         "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
@@ -614,25 +598,6 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
     ) or len(blocked_hours) != len(set(blocked_hours)):
         raise ValueError(f"invalid blocked-hours config: {blocked_hours!r}")
 
-    history = params.get("session_vwap_history")
-    if not isinstance(history, dict):
-        raise ValueError("invalid session-VWAP history config container")
-    for key, minimum in (("page_bars", 1), ("refresh_bars", 2)):
-        value = history.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= 5000:
-            raise ValueError(f"invalid session-VWAP history integer: {key}={value!r}")
-    retry_seconds = history.get("retry_seconds")
-    if not isinstance(retry_seconds, list) or not retry_seconds:
-        raise ValueError("invalid session-VWAP retry schedule")
-    for value in retry_seconds:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or float(value) <= 0.0
-        ):
-            raise ValueError(f"invalid session-VWAP retry delay: {value!r}")
-
     exact_top_level_integers = (
         "lane_count", "late_short_lookback_completed_m1_bars",
         "long_target_portfolio_rearm_minutes", "inventory_range_max_wait_minutes",
@@ -641,8 +606,6 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "midday_session_start_utc", "midday_session_end_utc",
         "midday_session_max_positions", "pre_eu30_session_max_positions",
         "trend_recovery_entry_window_minutes", "trend_recovery_max_total_entries",
-        "session_vwap_lookback_calendar_days", "session_vwap_atr_period",
-        "session_vwap_hold_minutes", "session_vwap_max_positions",
         "t0530_edge_lookback_bars", "t0530_edge_hold_minutes",
         "t0530_edge_max_positions", "t0530_edge_max_signal_delay_minutes",
         "q01_variance_horizon_bars", "q01_variance_window_bars",
@@ -657,7 +620,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
 
     exact_top_level_numbers = (
         "late_short_drop_threshold", "inventory_range_return_depth_fraction",
-        "session_vwap_quantile", "q01_vr_threshold", "q01_max_raw_spread_price",
+        "q01_vr_threshold", "q01_max_raw_spread_price",
     )
     for key in exact_top_level_numbers:
         value = params.get(key)
@@ -671,7 +634,6 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
     expected_magic_keys = (
         "expected_magics", "expected_morning_magics", "expected_midday_magics",
         "expected_pre_eu30_magics", "expected_trend_recovery_magics",
-        "expected_session_vwap_magics",
         "expected_t0530_edge_magics",
         "expected_q01_magics",
     )
@@ -1008,18 +970,6 @@ class S23HorizontalInventoryRunner:
         self.shadow_enabled = params.get("shadow_forward_enabled", True)
         self.safety = LiveSafetyOptions(**params.get("safety", {}))
         self.dm = MT5DataManager(self.safety)
-        history = dict(params.get("session_vwap_history") or {})
-        self.session_vwap_history = PagedM1History(
-            self.dm,
-            symbol=str(params.get("mt5_symbol", params["symbol"])),
-            timeframe=int(params.get("m1_timeframe", 1)),
-            broker_timezone=str(params.get("broker_timezone", "UTC")),
-            page_bars=int(history.get("page_bars", 5000)),
-            refresh_bars=int(history.get("refresh_bars", 10)),
-            coverage_days=int(params.get("session_vwap_lookback_calendar_days", 20)),
-            retry_seconds=tuple(history.get("retry_seconds", [5, 15, 30, 60])),
-        )
-        self._session_vwap_snapshot: Any = None
         self.executor = MT5Executor()
         self._suppress_manual_alerts = False
         self._entry_policy_state_migrated = False
@@ -1029,7 +979,7 @@ class S23HorizontalInventoryRunner:
         self._midday_session_state_migrated = False
         self._pre_eu30_session_state_migrated = False
         self._trend_recovery_state_migrated = False
-        self._session_vwap_state_migrated = False
+        self._retired_state_pruned = False
         self._t0530_edge_state_migrated = False
         self._q01_state_migrated = False
         self.state = self._load_state()
@@ -1142,9 +1092,6 @@ class S23HorizontalInventoryRunner:
     def _trend_recovery_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("trend_recovery_strategies", []))
 
-    def _session_vwap_strategies(self) -> list[dict[str, Any]]:
-        return list(self.params.get("session_vwap_strategies", []))
-
     def _t0530_edge_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("t0530_edge_strategies", []))
 
@@ -1165,7 +1112,6 @@ class S23HorizontalInventoryRunner:
             + self._midday_strategies()
             + self._pre_eu30_strategies()
             + self._trend_recovery_strategies()
-            + self._session_vwap_strategies()
             + self._t0530_edge_strategies()
             + self._q01_strategies()
         )
@@ -1334,10 +1280,6 @@ class S23HorizontalInventoryRunner:
                 "pre_eu30_policy_params_hash": str(self.params.get("pre_eu30_session_params_hash", PRE_EU30_POLICY_PARAMS_HASH)),
                 "trend_recovery_policy_id": str(self.params.get("trend_recovery_policy_id", EXPECTED_TREND_RECOVERY_POLICY_ID)),
                 "trend_recovery_params_hash": str(self.params.get("trend_recovery_params_hash", EXPECTED_TREND_RECOVERY_PARAMS_HASH)),
-                "session_vwap_policy_id": str(self.params.get("session_vwap_policy_id", SESSION_VWAP_POLICY_ID)),
-                "session_vwap_params_hash": str(self.params.get("session_vwap_params_hash", EXPECTED_SESSION_VWAP_PARAMS_HASH)),
-                "session_vwap_last_evaluated_bar": None,
-                "session_vwap_last_unavailable_bar": None,
                 "t0530_edge_policy_id": str(self.params.get("t0530_edge_policy_id", T0530_EDGE_POLICY_ID)),
                 "t0530_edge_params_hash": str(self.params.get("t0530_edge_params_hash", T0530_EDGE_POLICY_PARAMS_HASH)),
                 "t0530_edge_last_evaluated_bar": None,
@@ -1432,7 +1374,6 @@ class S23HorizontalInventoryRunner:
                     "pending_open_basket_atr30": None,
                     "pending_open_reverse_used": None,
                     "pending_open_expected_positions": None,
-                    "session_vwap_retry_opportunity": None,
                     "t0530_edge_retry_opportunity": None,
                     "q01_retry_opportunity": None,
                     "q01_last_quote_msc": None,
@@ -1480,6 +1421,20 @@ class S23HorizontalInventoryRunner:
             and observed_version == default["version"]
         )
         strategies = observed.get("strategies")
+        if isinstance(strategies, dict):
+            removed = sorted(RETIRED_STRATEGY_IDS.intersection(strategies))
+            for strategy_id in removed:
+                strategies.pop(strategy_id, None)
+            raw_retired_routing = observed.get("routing")
+            if isinstance(raw_retired_routing, dict):
+                for key in (
+                    "session_vwap_policy_id", "session_vwap_params_hash",
+                    "session_vwap_last_evaluated_bar", "session_vwap_last_unavailable_bar",
+                ):
+                    raw_retired_routing.pop(key, None)
+            if removed:
+                self._retired_state_pruned = True
+                logging.warning("S23 removed retired strategy state: %s", ",".join(removed))
         expected_strategy_ids = {str(s["id"]) for s in self._all_strategies()}
         expected_lane_ids = {str(s["id"]): int(s["lane_id"]) for s in self._all_strategies()}
         unknown_strategy_ids = (
@@ -1653,8 +1608,6 @@ class S23HorizontalInventoryRunner:
         observed_pre_eu30_policy_hash = observed_routing.get("pre_eu30_policy_params_hash")
         observed_trend_policy_id = observed_routing.get("trend_recovery_policy_id")
         observed_trend_policy_hash = observed_routing.get("trend_recovery_params_hash")
-        observed_session_vwap_policy_id = observed_routing.get("session_vwap_policy_id")
-        observed_session_vwap_policy_hash = observed_routing.get("session_vwap_params_hash")
         observed_t0530_edge_policy_id = observed_routing.get("t0530_edge_policy_id")
         observed_t0530_edge_policy_hash = observed_routing.get("t0530_edge_params_hash")
         observed_q01_policy_id = observed_routing.get("q01_policy_id")
@@ -1859,33 +1812,6 @@ class S23HorizontalInventoryRunner:
                     "observed_policy_hash": observed_trend_policy_hash,
                     "expected_policy_id": expected_trend_policy_id,
                     "expected_policy_hash": expected_trend_policy_hash,
-                }
-        expected_session_vwap_policy_id = str(self.params.get("session_vwap_policy_id", SESSION_VWAP_POLICY_ID))
-        expected_session_vwap_policy_hash = str(self.params.get("session_vwap_params_hash", EXPECTED_SESSION_VWAP_PARAMS_HASH))
-        if observed_session_vwap_policy_id is None and observed_session_vwap_policy_hash is None:
-            routing["session_vwap_policy_id"] = expected_session_vwap_policy_id
-            routing["session_vwap_params_hash"] = expected_session_vwap_policy_hash
-            self._session_vwap_state_migrated = True
-            logging.warning(
-                "S23 session-VWAP state initialized to %s; existing strategy state was preserved",
-                expected_session_vwap_policy_id,
-            )
-        elif (
-            observed_session_vwap_policy_id != expected_session_vwap_policy_id
-            or observed_session_vwap_policy_hash != expected_session_vwap_policy_hash
-        ):
-            for strat in self._session_vwap_strategies():
-                lane_state = state["strategies"][strat["id"]]
-                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
-                    continue
-                lane_state["sync_block_new_entries"] = True
-                lane_state["sync_block_reason"] = "session_vwap_policy_identity_mismatch"
-                lane_state["sync_block_recoverable"] = False
-                lane_state["sync_block_details"] = {
-                    "observed_policy_id": observed_session_vwap_policy_id,
-                    "observed_policy_hash": observed_session_vwap_policy_hash,
-                    "expected_policy_id": expected_session_vwap_policy_id,
-                    "expected_policy_hash": expected_session_vwap_policy_hash,
                 }
         expected_t0530_edge_policy_id = str(self.params.get("t0530_edge_policy_id", T0530_EDGE_POLICY_ID))
         expected_t0530_edge_policy_hash = str(self.params.get("t0530_edge_params_hash", T0530_EDGE_POLICY_PARAMS_HASH))
@@ -2276,8 +2202,6 @@ class S23HorizontalInventoryRunner:
             return "jst1300_pre_eu30"
         if lane_id == 12:
             return "trend_recovery"
-        if 13 <= lane_id <= 17:
-            return "session_vwap"
         if 18 <= lane_id <= 21:
             return "t0530_edge"
         if lane_id == 22:
@@ -4430,7 +4354,7 @@ class S23HorizontalInventoryRunner:
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
                 return self._preflight_reject("broker_quote_clock_unavailable")
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._session_vwap_state_migrated or self._t0530_edge_state_migrated:
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated:
             try:
                 self._save_state()
             except Exception:
@@ -4443,7 +4367,7 @@ class S23HorizontalInventoryRunner:
             self._midday_session_state_migrated = False
             self._pre_eu30_session_state_migrated = False
             self._trend_recovery_state_migrated = False
-            self._session_vwap_state_migrated = False
+            self._retired_state_pruned = False
             self._t0530_edge_state_migrated = False
         return True
 
@@ -4650,38 +4574,6 @@ class S23HorizontalInventoryRunner:
         drift = {key: {"actual": trend[0].get(key), "expected": value} for key, value in expected_trend.items() if trend[0].get(key) != value}
         if drift:
             return f"invalid_trend_recovery_lane_contract:{json.dumps(drift, sort_keys=True)}"
-        if str(self.params.get("session_vwap_policy_id") or "") != SESSION_VWAP_POLICY_ID:
-            return "invalid_session_vwap_policy_id"
-        if str(self.params.get("session_vwap_params_hash") or "") != EXPECTED_SESSION_VWAP_PARAMS_HASH:
-            return "invalid_session_vwap_params_hash"
-        if str(self.params.get("session_vwap_session_timezone") or "") != "America/New_York":
-            return "invalid_session_vwap_timezone"
-        if str(self.params.get("session_vwap_session_start") or "") != "05:30" or str(self.params.get("session_vwap_session_end") or "") != "08:30":
-            return "invalid_session_vwap_window"
-        if int(self.params.get("session_vwap_lookback_calendar_days") or 0) != 20:
-            return "invalid_session_vwap_lookback"
-        if int(self.params.get("session_vwap_atr_period") or 0) != 60:
-            return "invalid_session_vwap_atr_period"
-        if not math.isclose(float(self.params.get("session_vwap_quantile") or 0.0), 0.90, rel_tol=0.0, abs_tol=1e-12):
-            return "invalid_session_vwap_quantile"
-        if int(self.params.get("session_vwap_hold_minutes") or 0) != 15 or int(self.params.get("session_vwap_max_positions") or 0) != 5:
-            return "invalid_session_vwap_lifecycle"
-        session_vwap = [row for row in self._session_vwap_strategies() if bool(row.get("enabled", True))]
-        session_vwap_magics = [int(row.get("magic") or 0) for row in session_vwap]
-        configured_session_vwap_magics = tuple(int(value) for value in self.params.get("expected_session_vwap_magics", []))
-        if tuple(session_vwap_magics) != EXPECTED_SESSION_VWAP_MAGICS or configured_session_vwap_magics != EXPECTED_SESSION_VWAP_MAGICS:
-            return "invalid_session_vwap_magics"
-        if [int(row.get("lane_id") or 0) for row in session_vwap] != [13, 14, 15, 16, 17]:
-            return "invalid_session_vwap_lane_ids"
-        for index, row in enumerate(session_vwap, start=1):
-            expected = {
-                "spec_id": SESSION_VWAP_POLICY_ID, "signal_id": "session_vwap_extension_fade",
-                "comment_prefix": f"s23_sv_l{index}", "lot": 0.01, "hold_minutes": 15,
-                "max_positions": 1, "cooldown": 0,
-            }
-            lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
-            if lane_drift:
-                return f"invalid_session_vwap_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
         if str(self.params.get("t0530_edge_policy_id") or "") != T0530_EDGE_POLICY_ID:
             return "invalid_t0530_edge_policy_id"
         if str(self.params.get("t0530_edge_params_hash") or "") != T0530_EDGE_POLICY_PARAMS_HASH:
@@ -4763,8 +4655,8 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_q01_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + session_vwap_magics + t0530_edge_magics + q01_magics
-        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + session_vwap + t0530_edge + q01]
+        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
             return "duplicate_combined_ownership_namespace"
         admission_clock = self.params.get("eu_entry_admission_clock")
@@ -5066,255 +4958,6 @@ class S23HorizontalInventoryRunner:
             deal = self.executor.get_position_close_deal(position_id, 0)
         return deal
 
-    def _session_vwap_retry_identity(self, retry: Any) -> dict[str, Any]:
-        """Validate the complete persisted identity before retry or adoption."""
-        opportunity = retry.get("opportunity") if isinstance(retry, dict) else None
-        opportunity = opportunity if isinstance(opportunity, dict) else {}
-        raw_signal_bar = retry.get("signal_bar_time") if isinstance(retry, dict) else None
-        raw_event_time = opportunity.get("event_time")
-        raw_release_time = opportunity.get("release_time")
-        raw_available_time = opportunity.get("available_time")
-        raw_expires = retry.get("expires_utc") if isinstance(retry, dict) else None
-        signal_bar = parse_ts(raw_signal_bar) if isinstance(raw_signal_bar, str) else None
-        event_time = parse_ts(raw_event_time) if isinstance(raw_event_time, str) else None
-        release_time = parse_ts(raw_release_time) if isinstance(raw_release_time, str) else None
-        available_time = parse_ts(raw_available_time) if isinstance(raw_available_time, str) else None
-        expires = parse_ts(raw_expires) if isinstance(raw_expires, str) else None
-        side = str(opportunity.get("side") or "").upper()
-        raw_side = str(opportunity.get("raw_side") or "").upper()
-        effective_side = str(opportunity.get("effective_side") or "").upper()
-        opportunity_id = str(opportunity.get("opportunity_id") or "")
-        source = str(opportunity.get("source") or "")
-        expected_release = signal_bar + pd.Timedelta(minutes=1) if signal_bar is not None else None
-        expected_expiry = (
-            expected_release + pd.Timedelta(
-                minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
-            )
-            if expected_release is not None
-            else None
-        )
-        symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
-        expected_id = (
-            f"{symbol}|{dt_text(signal_bar)}|session_vwap_extension_fade|{side}"
-            if signal_bar is not None and side in {"LONG", "SHORT"}
-            else ""
-        )
-        valid = bool(
-            isinstance(retry, dict)
-            and isinstance(retry.get("opportunity"), dict)
-            and signal_bar is not None
-            and event_time == signal_bar
-            and expected_release is not None
-            and release_time == expected_release
-            and available_time == expected_release
-            and expires == expected_expiry
-            and side in {"LONG", "SHORT"}
-            and raw_side == side
-            and effective_side == side
-            and source == "session_vwap_extension_fade"
-            and opportunity_id == expected_id
-        )
-        return {
-            "valid": valid,
-            "opportunity": opportunity,
-            "signal_bar": signal_bar,
-            "release_time": release_time,
-            "expires": expires,
-            "side": side,
-            "opportunity_id": opportunity_id,
-        }
-
-    def _session_vwap_closed_cutoff(
-        self,
-        side: str,
-        at_utc: datetime | pd.Timestamp | None = None,
-    ) -> tuple[pd.Timestamp | None, bool]:
-        cutoffs: list[pd.Timestamp] = []
-        invalid = False
-        reference = None
-        if at_utc is not None:
-            reference = pd.Timestamp(at_utc)
-            reference = reference.tz_localize("UTC") if reference.tzinfo is None else reference.tz_convert("UTC")
-        for row in self._session_vwap_strategies():
-            state = self._st(row)
-            raw_closed_side = state.get("last_closed_side")
-            raw_closed_at = state.get("last_closed_at_utc")
-            closed_side = str(raw_closed_side or "")
-            if closed_side not in {"", "LONG", "SHORT"}:
-                invalid = True
-                continue
-            if not closed_side:
-                if raw_closed_at is not None:
-                    invalid = True
-                continue
-            if closed_side != side:
-                continue
-            closed_at = (
-                parse_ts(raw_closed_at)
-                if isinstance(raw_closed_at, str)
-                else None
-            )
-            if closed_at is None or (reference is not None and closed_at > reference):
-                invalid = True
-                continue
-            cutoffs.append(closed_at)
-        return (max(cutoffs) if cutoffs else None), invalid
-
-    def _recover_session_vwap_pending_open(
-        self,
-        strat: dict[str, Any],
-        positions: list[Any],
-        *,
-        orders_available: bool,
-    ) -> bool:
-        """Adopt one exactly identified fill after a crash-before-basket-save."""
-        st = self._st(strat)
-        basket_sequence = st.get("basket_sequence")
-        if (
-            isinstance(basket_sequence, bool)
-            or not isinstance(basket_sequence, int)
-            or basket_sequence < 0
-        ):
-            return False
-        retry = st.get("session_vwap_retry_opportunity")
-        identity = self._session_vwap_retry_identity(retry)
-        opportunity = identity["opportunity"]
-        pending_id = str(st.get("pending_open_opportunity_id") or "")
-        pending_symbol = st.get("pending_open_symbol")
-        pending_magic = st.get("pending_open_magic")
-        pending_comment = st.get("pending_open_comment")
-        pending_side = st.get("pending_open_side")
-        pending_lot = st.get("pending_open_lot")
-        pending_signal_bar = st.get("pending_open_signal_bar")
-        pending_reverse_used = st.get("pending_open_reverse_used")
-        pending_expires = parse_ts(st.get("pending_open_expires_utc"))
-        pending_expected_positions = st.get("pending_open_expected_positions")
-        opportunity_id = str(identity["opportunity_id"])
-        side = str(identity["side"])
-        release_time = identity["release_time"]
-        expires = identity["expires"]
-        raw_pending_started = st.get("pending_open_started_utc")
-        pending_started = (
-            parse_ts(raw_pending_started)
-            if isinstance(raw_pending_started, str)
-            else None
-        )
-        if (
-            len(positions) != 1
-            or not identity["valid"]
-            or not pending_id
-            or pending_id != opportunity_id
-            or pending_started is None
-            or release_time is None
-            or expires is None
-            or pending_started < release_time
-            or pending_started > expires
-            or strat not in self._session_vwap_strategies()
-            or pending_symbol != str(self.params.get("mt5_symbol", self.params["symbol"]))
-            or isinstance(pending_magic, bool) or pending_magic != int(strat["magic"])
-            or pending_comment != str(strat["comment_prefix"])
-            or pending_side != side
-            or pending_signal_bar != str((retry or {}).get("signal_bar_time") or "")
-            or pending_reverse_used is not False
-            or isinstance(pending_lot, bool)
-            or not isinstance(pending_lot, (int, float))
-            or not math.isclose(float(pending_lot), float(strat.get("lot", self.params.get("default_lot", 0.01))), rel_tol=0.0, abs_tol=1e-9)
-            or pending_expires is None or pending_expires != expires
-            or isinstance(pending_expected_positions, bool)
-            or pending_expected_positions != 0
-        ):
-            return False
-        position = positions[0]
-        live_identity = self._live_position_identity(position)
-        if live_identity is None:
-            return False
-        position_ticket, position_id = live_identity
-        expected_type = ORDER_TYPE_BUY if side == "LONG" else ORDER_TYPE_SELL
-        expected_lot = float(strat.get("lot", self.params.get("default_lot", 0.01)))
-        raw_open_time_epoch = getattr(position, "open_time", None)
-        if (
-            isinstance(raw_open_time_epoch, bool)
-            or not isinstance(raw_open_time_epoch, int)
-        ):
-            return False
-        open_time_epoch = raw_open_time_epoch
-        open_time_msc = int(getattr(position, "open_time_msc", open_time_epoch * 1000) or 0)
-        open_time = pd.Timestamp(open_time_msc, unit="ms", tz="UTC") if open_time_msc > 0 else None
-        try:
-            observed_lot = float(position.volume)
-            observed_price = float(position.open_price)
-            observed_type = int(position.type)
-        except (TypeError, ValueError, OverflowError, AttributeError):
-            return False
-        if (
-            position_id <= 0
-            or open_time is None
-            or open_time < pending_started.floor("s") - pd.Timedelta(seconds=2)
-            or open_time > pending_started + pd.Timedelta(
-                minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
-            )
-            or open_time > expires
-            or str(position.symbol) != pending_symbol
-            or int(position.magic) != pending_magic
-            or str(position.comment or "") != pending_comment
-            or observed_type != expected_type
-            or not math.isclose(observed_lot, expected_lot, rel_tol=0.0, abs_tol=1e-9)
-            or not math.isfinite(observed_price)
-            or observed_price <= 0.0
-        ):
-            return False
-        st["basket_sequence"] = basket_sequence + 1
-        st["current_basket_id"] = f"L{int(strat['lane_id'])}-B{int(st['basket_sequence']):06d}"
-        st["basket"] = [{
-            "ticket": position_ticket,
-            "position_identifier": position_id,
-            "side": side,
-            "lot": observed_lot,
-            "entry_price": observed_price,
-            "entry_time_utc": dt_text(open_time),
-            "open_time_epoch": open_time_epoch,
-            "owner_symbol": str(position.symbol),
-            "owner_magic": int(position.magic),
-            "owner_comment": str(position.comment or ""),
-            "lane_id": int(strat["lane_id"]),
-            "basket_id": st["current_basket_id"],
-            "opportunity_id": opportunity_id,
-            "shadow": False,
-        }]
-        st["last_add_price"] = observed_price
-        st["last_signal_bar"] = str(retry.get("signal_bar_time") or "")
-        st["basket_peak_pnl_usd"] = None
-        st["frozen_basket_atr30"] = None
-        st["reverse_used"] = False
-        self._clear_pending_open(strat)
-        st["session_vwap_retry_opportunity"] = None
-        recovery_clearable_reasons = {
-            None,
-            "positions_unavailable_after_open",
-            "orders_unavailable",
-            "open_success_position_not_confirmed",
-            "ambiguous_open_result",
-            "ambiguous_open_result_positions",
-            "unresolved_open_action",
-            "live_positions_without_state",
-        }
-        if orders_available and st.get("sync_block_reason") in recovery_clearable_reasons:
-            self._set_sync_block(strat, None)
-        self._save_state()
-        self._trade_row(
-            "position_lifecycle_recovered",
-            strat,
-            opportunity_id=opportunity_id,
-            ticket=position_ticket,
-            position_identifier=position_id,
-            side=side,
-            lot=observed_lot,
-            entry_price=observed_price,
-            reason="session_vwap_confirmed_fill_adopted_after_restart",
-            signal_bar_time=st["last_signal_bar"],
-            note="unique symbol/magic/comment/side/lot/pending-window match",
-        )
-        return True
 
     def _recover_generic_pending_open(
         self,
@@ -5576,13 +5219,8 @@ class S23HorizontalInventoryRunner:
         if (
             positions
             and unresolved_open
-            and (
-                self._recover_session_vwap_pending_open(
-                    strat, positions, orders_available=orders_available,
-                )
-                or self._recover_generic_pending_open(
-                    strat, positions, orders_available=orders_available,
-                )
+            and self._recover_generic_pending_open(
+                strat, positions, orders_available=orders_available,
             )
         ):
             state_basket = list(st.get("basket") or [])
@@ -7884,459 +7522,6 @@ class S23HorizontalInventoryRunner:
     def _monitor_pre_eu30_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         return self._monitor_fixed_hold_position(strat, info, poll_time, "pre_eu30_fixed_hold")
 
-    def _monitor_session_vwap_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
-        return self._monitor_fixed_hold_position(strat, info, poll_time, "session_vwap_fixed_hold")
-
-    def _session_vwap_quote_time(
-        self, info: Any, poll_time: datetime | pd.Timestamp,
-    ) -> pd.Timestamp | None:
-        return self._broker_quote_time(info, poll_time)
-
-    def _refresh_session_vwap_history(self, info: Any, poll_time: pd.Timestamp) -> None:
-        """Advance history acquisition without admitting an order."""
-        if not bool(self.params.get("session_vwap_enabled", False)):
-            self._session_vwap_snapshot = None
-            return
-        quote_time = self._session_vwap_quote_time(info, poll_time)
-        if quote_time is None:
-            self._session_vwap_snapshot = None
-            return
-        self._session_vwap_snapshot = self.session_vwap_history.advance(quote_time)
-        if self._session_vwap_snapshot.reason == "completed_bar_revision_conflict":
-            details = {
-                "quote_time": dt_text(quote_time),
-                "history_reason": self._session_vwap_snapshot.reason,
-            }
-            for strat in self._session_vwap_strategies():
-                self._set_sync_block(
-                    strat,
-                    "session_vwap_completed_bar_revision_conflict",
-                    details,
-                    recoverable=False,
-                )
-            self._save_state()
-
-    def _process_session_vwap_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
-        readiness: dict[int, bool] = {}
-        quote_time = self._session_vwap_quote_time(info, poll_time)
-        session_active = bool(
-            self.params.get("session_vwap_enabled", False)
-            and quote_time is not None
-            and in_session_vwap_entry_session(quote_time)
-        )
-        for strat in self._session_vwap_strategies():
-            entry_enabled = bool(strat.get("enabled", True))
-            lane_id = int(strat["lane_id"])
-            st = self._st(strat)
-            needs_reconciliation = bool(
-                session_active or st.get("basket") or st.get("pending_open_opportunity_id")
-                or st.get("pending_close_reason") or st.get("sync_block_new_entries")
-                or st.get("session_vwap_retry_opportunity")
-            )
-            if not needs_reconciliation:
-                readiness[lane_id] = False
-                continue
-            if not self._sync_strategy(strat):
-                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="session_vwap_sync_block")
-                self._save_state()
-                readiness[lane_id] = False
-                continue
-            exit_blocked = self._monitor_session_vwap_position(strat, info, poll_time)
-            readiness[lane_id] = entry_enabled and not exit_blocked
-        return readiness
-
-    def _process_session_vwap_retries(
-        self,
-        info: Any,
-        admission_time: pd.Timestamp,
-        readiness: dict[int, bool],
-        *,
-        execution_time: pd.Timestamp | None = None,
-    ) -> None:
-        """Retry persisted, previously submitted session-VWAP opportunities.
-
-        The original signal identity is lane-local so a newer completed M1 or
-        a runner restart cannot silently replace it. Ambiguous OPEN outcomes
-        remain blocked by pending_open/sync state and are never resent until a
-        later owned-inventory reconciliation proves the lane safe again.
-        """
-        point = float(self.params.get("point_size", 0.001))
-        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
-        spread_cap = float(self.params.get("max_entry_spread_points", 300.0))
-        for strat in self._session_vwap_strategies():
-            if not bool(strat.get("enabled", True)):
-                continue
-            st = self._st(strat)
-            retry = st.get("session_vwap_retry_opportunity")
-            if retry is None:
-                continue
-            if not isinstance(retry, dict):
-                st["session_vwap_retry_opportunity"] = None
-                self._trade_row(
-                    "session_vwap_decision",
-                    strat,
-                    reason="retry_state_invalid",
-                    note=f"non_object_retry={retry!r};discarded",
-                )
-                self._save_state()
-                continue
-            identity = self._session_vwap_retry_identity(retry)
-            opportunity = identity["opportunity"]
-            signal_bar = identity["signal_bar"]
-            release_time = identity["release_time"]
-            expires = identity["expires"]
-            side = str(identity["side"])
-            opportunity_id = str(identity["opportunity_id"])
-            invalid = not bool(identity["valid"])
-            if not invalid and admission_time < release_time:
-                # A canonical persisted retry may be loaded before its M1 is
-                # executable after a clock rollback. Preserve it untouched
-                # until the original release boundary is reached.
-                continue
-            closed_cutoff, closed_state_invalid = self._session_vwap_closed_cutoff(side, admission_time)
-            stale_after_close = bool(
-                not invalid
-                and not closed_state_invalid
-                and closed_cutoff is not None
-                and release_time <= closed_cutoff
-            )
-            if invalid or closed_state_invalid or admission_time > expires or stale_after_close:
-                st["session_vwap_retry_opportunity"] = None
-                self._trade_row(
-                    "session_vwap_decision",
-                    strat,
-                    opportunity_id=opportunity_id,
-                    side=side,
-                    reason=(
-                        "retry_state_invalid" if invalid
-                        else "last_closed_state_invalid" if closed_state_invalid
-                        else "stale_same_direction_after_close" if stale_after_close
-                        else "retry_expired"
-                    ),
-                    signal_bar_time=dt_text(signal_bar) if signal_bar is not None else retry.get("signal_bar_time"),
-                )
-                self._save_state()
-                continue
-            if any(
-                str(pos.get("opportunity_id") or "") == opportunity_id
-                for pos in self._basket_rows(strat)
-            ):
-                st["session_vwap_retry_opportunity"] = None
-                self._save_state()
-                continue
-            if (
-                st.get("pending_open_opportunity_id")
-                or st.get("sync_block_new_entries")
-                or not readiness.get(int(strat["lane_id"]), False)
-                or spread_points > spread_cap
-            ):
-                continue
-            raw_retry_after = st.get("open_retry_after_utc")
-            retry_after = (
-                parse_ts(raw_retry_after)
-                if isinstance(raw_retry_after, str)
-                else None
-            )
-            if raw_retry_after is not None and retry_after is None:
-                st["session_vwap_retry_opportunity"] = None
-                self._trade_row(
-                    "session_vwap_decision",
-                    strat,
-                    opportunity_id=opportunity_id,
-                    side=side,
-                    reason="open_retry_state_invalid",
-                    signal_bar_time=dt_text(signal_bar),
-                    note=f"previous_retry={raw_retry_after!r};retry_discarded",
-                )
-                self._save_state()
-                continue
-            if retry_after is not None and admission_time < retry_after:
-                continue
-            price_row = pd.Series(
-                {"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)},
-                name=signal_bar,
-            )
-            opened = self._open_entry(
-                strat,
-                side,
-                price_row,
-                info,
-                note=str(retry.get("note") or "session_vwap_retry"),
-                execution_time=execution_time if execution_time is not None else admission_time,
-                admission_time=admission_time,
-                opportunity=opportunity,
-                apply_portfolio_rearm=False,
-                use_confirmed_fill_time=True,
-            )
-            confirmed_open = any(
-                str(pos.get("opportunity_id") or "") == opportunity_id
-                for pos in self._basket_rows(strat)
-            )
-            if confirmed_open:
-                st["session_vwap_retry_opportunity"] = None
-                decision_reason = "entry_opened_from_retry"
-            elif st.get("pending_open_opportunity_id") or st.get("sync_block_new_entries"):
-                decision_reason = "entry_action_unconfirmed"
-            elif st.get("open_retry_after_utc"):
-                decision_reason = "entry_retry_scheduled"
-            else:
-                st["session_vwap_retry_opportunity"] = None
-                decision_reason = "entry_retry_not_opened" if not opened else "entry_action_unconfirmed"
-            self._trade_row(
-                "session_vwap_decision",
-                strat,
-                opportunity_id=opportunity_id,
-                side=side,
-                reason=decision_reason,
-                signal_bar_time=dt_text(signal_bar),
-            )
-            self._save_state()
-
-    def _process_session_vwap_entries(self, info: Any, poll_time: pd.Timestamp, readiness: dict[int, bool]) -> None:
-        if not bool(self.params.get("session_vwap_enabled", False)):
-            return
-        host_time = pd.Timestamp(poll_time)
-        host_time = host_time.tz_localize("UTC") if host_time.tzinfo is None else host_time.tz_convert("UTC")
-        quote_time = self._session_vwap_quote_time(info, poll_time)
-        if quote_time is None:
-            return
-        # Admission must fail closed if either the host poll clock or the
-        # broker quote clock proves the signal expired.  Broker time remains
-        # the execution/submission clock used to confirm the resulting fill.
-        admission_time = max(host_time, quote_time)
-        self._process_session_vwap_retries(
-            info, admission_time, readiness, execution_time=quote_time,
-        )
-        snapshot = self._session_vwap_snapshot
-        if snapshot is None:
-            snapshot = self.session_vwap_history.advance(quote_time)
-            self._session_vwap_snapshot = snapshot
-        routing = self.state["routing"]
-        unavailable_bar = dt_text(quote_time.floor("min") - pd.Timedelta(minutes=1))
-        primary = self._session_vwap_strategies()[0]
-        if not snapshot.ready or not snapshot.fresh or snapshot.bars.empty:
-            if routing.get("session_vwap_last_unavailable_bar") != unavailable_bar:
-                routing["session_vwap_last_unavailable_bar"] = unavailable_bar
-                self._trade_row(
-                    "session_vwap_decision", primary, reason="not_evaluated_data_unavailable",
-                    signal_bar_time=unavailable_bar,
-                    note=f"history={snapshot.reason};failures={snapshot.failures};retry_after={snapshot.retry_after_seconds:.1f}s",
-                )
-                self._save_state()
-            return
-        price_row = snapshot.bars.iloc[-1]
-        signal_bar = parse_ts(price_row.name)
-        if signal_bar is None:
-            return
-        release_time = signal_bar + pd.Timedelta(minutes=1)
-        if admission_time < release_time:
-            return
-        if not in_session_vwap_entry_session(release_time):
-            return
-        history_issue = session_vwap_entry_history_issue(
-            snapshot.bars,
-            quote_time,
-            coverage_days=int(self.params.get("session_vwap_lookback_calendar_days", 20)),
-            atr_period=int(self.params.get("session_vwap_atr_period", 60)),
-        )
-        if history_issue is not None:
-            self.session_vwap_history.request_rebackfill()
-            unavailable_bar = dt_text(signal_bar)
-            if routing.get("session_vwap_last_unavailable_bar") != unavailable_bar:
-                routing["session_vwap_last_unavailable_bar"] = unavailable_bar
-                self._trade_row(
-                    "session_vwap_decision",
-                    primary,
-                    reason="not_evaluated_data_unavailable",
-                    signal_bar_time=unavailable_bar,
-                    note=f"history={history_issue}",
-                )
-                self._save_state()
-            return
-        signal_bar_text = dt_text(signal_bar)
-        previous_evaluated = routing.get("session_vwap_last_evaluated_bar")
-        if previous_evaluated is not None and (
-            not isinstance(previous_evaluated, str)
-            or parse_ts(previous_evaluated) is None
-        ):
-            details = {
-                "previous_last_evaluated_bar": repr(previous_evaluated),
-                "current_signal_bar": signal_bar_text,
-            }
-            for strat in self._session_vwap_strategies():
-                self._set_sync_block(
-                    strat,
-                    "session_vwap_decision_receipt_state_invalid",
-                    details,
-                    recoverable=False,
-                )
-            self._trade_row(
-                "session_vwap_decision",
-                primary,
-                reason="decision_receipt_state_invalid",
-                signal_bar_time=signal_bar_text,
-                note=f"previous_last_evaluated_bar={previous_evaluated!r};current_bar_not_consumed",
-            )
-            self._save_state()
-            return
-        previous_evaluated_bar = (
-            parse_ts(previous_evaluated)
-            if isinstance(previous_evaluated, str)
-            else None
-        )
-        if (
-            previous_evaluated_bar is not None
-            and previous_evaluated_bar >= signal_bar
-        ):
-            if previous_evaluated_bar > signal_bar:
-                details = {
-                    "previous_last_evaluated_bar": dt_text(previous_evaluated_bar),
-                    "current_signal_bar": signal_bar_text,
-                    "broker_quote_time": dt_text(quote_time),
-                }
-                for strat in self._session_vwap_strategies():
-                    self._set_sync_block(
-                        strat,
-                        "session_vwap_decision_receipt_future",
-                        details,
-                        recoverable=False,
-                    )
-                self._trade_row(
-                    "session_vwap_decision",
-                    primary,
-                    reason="decision_receipt_future",
-                    signal_bar_time=signal_bar_text,
-                    note=json.dumps(details, ensure_ascii=True, sort_keys=True),
-                )
-                self._save_state()
-            return
-        try:
-            side, signal_row = latest_session_vwap_signal(
-                snapshot.bars,
-                quantile=float(self.params.get("session_vwap_quantile", 0.90)),
-                lookback_days=int(self.params.get("session_vwap_lookback_calendar_days", 20)),
-            )
-        except (TypeError, ValueError, OverflowError, FloatingPointError, pd.errors.DataError) as exc:
-            self.session_vwap_history.request_rebackfill()
-            if routing.get("session_vwap_last_unavailable_bar") != signal_bar_text:
-                routing["session_vwap_last_unavailable_bar"] = signal_bar_text
-                self._trade_row(
-                    "session_vwap_decision",
-                    primary,
-                    reason="not_evaluated_signal_error",
-                    signal_bar_time=signal_bar_text,
-                    note=f"{type(exc).__name__}:{exc}",
-                )
-                self._save_state()
-            return
-        # Commit the durable receipt only after the complete signal calculation
-        # has produced an outcome. A calculation failure must retry this bar.
-        routing["session_vwap_last_evaluated_bar"] = signal_bar_text
-        self._save_state()
-        if side is None:
-            self._trade_row("session_vwap_decision", primary, reason="no_signal", signal_bar_time=signal_bar_text)
-            return
-        opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|session_vwap_extension_fade|{side}"
-        total_positions = sum(len(self._basket_rows(row)) for row in self._session_vwap_strategies())
-        point = float(self.params.get("point_size", 0.001))
-        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
-        stale = stale_signal_decision(
-            str(price_row.name), timeframe_hours=1.0 / 60.0,
-            max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
-            now_utc=admission_time,
-            options=self.safety,
-        )
-        common_reason = ""
-        if total_positions >= int(self.params.get("session_vwap_max_positions", 5)):
-            common_reason = "session_vwap_capacity_full"
-        elif spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
-            common_reason = "spread_guard"
-        elif stale.stale:
-            common_reason = "stale_signal_skip"
-        closed_cutoff, closed_state_invalid = self._session_vwap_closed_cutoff(side, admission_time)
-        if not common_reason and closed_state_invalid:
-            common_reason = "last_closed_state_invalid"
-        elif not common_reason and closed_cutoff is not None and release_time <= closed_cutoff:
-            common_reason = "stale_same_direction_after_close"
-        for strat in self._session_vwap_strategies():
-            lane_id = int(strat["lane_id"])
-            st = self._st(strat)
-            reason = common_reason
-            if not reason and not readiness.get(lane_id, False):
-                reason = "exit_or_sync_block"
-            elif not reason and st.get("session_vwap_retry_opportunity"):
-                reason = "session_vwap_retry_pending"
-            elif not reason and (st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1))):
-                reason = "lane_capacity_full"
-            if reason:
-                self._trade_row(
-                    "session_vwap_decision", strat, opportunity_id=opportunity_id,
-                    side=side, reason=reason, signal_bar_time=signal_bar_text,
-                )
-                continue
-            opportunity = {
-                "opportunity_id": opportunity_id, "source": "session_vwap_extension_fade",
-                "side": side, "raw_side": side, "effective_side": side,
-                "event_time": signal_bar_text, "release_time": dt_text(release_time),
-                "available_time": dt_text(release_time), "decision_time": dt_text(admission_time),
-                "executable_at": dt_text(quote_time),
-            }
-            note = "session_vwap_q90_20d_atr60_hold_15m"
-            if signal_row is not None:
-                note += f";z={float(signal_row['Z']):.6f};q90={float(signal_row['Q90']):.6f}"
-            st["session_vwap_retry_opportunity"] = {
-                "opportunity": opportunity,
-                "signal_bar_time": signal_bar_text,
-                "expires_utc": dt_text(
-                    release_time + pd.Timedelta(
-                        minutes=float(self.params.get("max_signal_delay_minutes", 2.0))
-                    )
-                ),
-                "note": note,
-            }
-            self._save_state()
-            opened = self._open_entry(
-                strat, side, price_row, info, note=note, execution_time=quote_time,
-                admission_time=admission_time,
-                opportunity=opportunity, apply_portfolio_rearm=False, use_confirmed_fill_time=True,
-            )
-            confirmed_open = any(
-                str(pos.get("opportunity_id") or "") == opportunity_id
-                for pos in self._basket_rows(strat)
-            )
-            retry_scheduled = bool(
-                not confirmed_open
-                and not self._st(strat).get("pending_open_opportunity_id")
-                and self._st(strat).get("open_retry_after_utc")
-            )
-            if retry_scheduled:
-                # The lane-local retry record retains the original bar across
-                # newer M1 bars and restarts. Global evaluated identity stays
-                # consumed so the first submission is never duplicated.
-                pass
-            elif confirmed_open:
-                st["session_vwap_retry_opportunity"] = None
-                self._save_state()
-            elif not st.get("pending_open_opportunity_id") and not st.get("sync_block_new_entries"):
-                st["session_vwap_retry_opportunity"] = None
-                self._save_state()
-            if confirmed_open:
-                decision_reason = "entry_opened"
-            elif retry_scheduled:
-                decision_reason = "entry_retry_scheduled"
-            elif opened:
-                decision_reason = "entry_action_unconfirmed"
-            else:
-                decision_reason = "entry_not_opened"
-            self._trade_row(
-                "session_vwap_decision", strat, opportunity_id=opportunity_id, side=side,
-                reason=decision_reason, signal_bar_time=signal_bar_text,
-            )
-            return
-        self._trade_row(
-            "session_vwap_decision", primary, opportunity_id=opportunity_id,
-            side=side, reason="all_lanes_unavailable", signal_bar_time=signal_bar_text,
-        )
 
     def _monitor_t0530_edge_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
         return self._monitor_fixed_hold_position(strat, info, poll_time, "t0530_edge_fixed_hold")
@@ -9988,13 +9173,8 @@ class S23HorizontalInventoryRunner:
         midday_readiness = self._process_midday_exits(info, quote_time)
         pre_eu30_readiness = self._process_pre_eu30_exits(info, quote_time)
         trend_recovery_readiness = self._process_trend_recovery_exits(info, quote_time)
-        session_vwap_readiness = self._process_session_vwap_exits(info, quote_time)
         t0530_edge_readiness = self._process_t0530_edge_exits(info, quote_time)
         q01_readiness = self._process_q01_exits(info, quote_time)
-        # History acquisition is independent of the legacy 420-bar HIST
-        # consumer. This keeps backfill/retry moving even when the later legacy
-        # signal path cannot evaluate a bar on this poll.
-        self._refresh_session_vwap_history(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -10007,7 +9187,6 @@ class S23HorizontalInventoryRunner:
                 quote_time = utc_now()
                 quote_row = pd.Series({"Open": float(info.bid), "Close": float(info.bid), "AskOpen": float(info.ask)}, name=pd.Timestamp(quote_time))
                 self._monitor_open_basket(strat, info, quote_row, quote_time)
-            self._process_session_vwap_entries(info, pd.Timestamp(utc_now()), session_vwap_readiness)
             self._process_q01_entries(
                 bars if bars is not None else pd.DataFrame(),
                 info,
@@ -10016,7 +9195,6 @@ class S23HorizontalInventoryRunner:
             )
             return
         if len(bars) < 2:
-            self._process_session_vwap_entries(info, pd.Timestamp(utc_now()), session_vwap_readiness)
             self._process_q01_entries(bars, info, pd.Timestamp(utc_now()), q01_readiness)
             return
         price_row = bars.iloc[-1]
@@ -10027,7 +9205,6 @@ class S23HorizontalInventoryRunner:
                 if bool(strat.get("enabled", True)):
                     self._set_sync_block(strat, "signal_bar_time_invalid", {"bar_time": str(price_row.name)}, recoverable=True)
             self._save_state()
-            self._process_session_vwap_entries(info, poll_time, session_vwap_readiness)
             return
         self._process_morning_entries(bars, price_row, info, poll_time, morning_readiness)
         self._process_midday_entries(bars, price_row, info, poll_time, midday_readiness)
@@ -10320,7 +9497,6 @@ class S23HorizontalInventoryRunner:
                     )
         # Append-only overlay processing: all pre-existing entry and exit paths
         # above retain their original order and complete first.
-        self._process_session_vwap_entries(info, poll_time, session_vwap_readiness)
         self._process_t0530_edge_entries(
             bars, price_row, info, poll_time, t0530_edge_readiness,
         )

@@ -162,8 +162,6 @@ string CanonicalCommentForMagic(const long magic)
       return StringFormat("s23_pe_l%d", (int)(magic - 230030));
    if(magic == 230034)
       return "s23_tr_l1";
-   if(magic >= 230035 && magic <= 230039)
-      return StringFormat("s23_sv_l%d", (int)(magic - 230034));
    if(magic >= 230040 && magic <= 230043)
       return StringFormat("s23_ed_l%d", (int)(magic - 230039));
    if(magic == 230044)
@@ -298,12 +296,13 @@ bool ValidHistoryNumericFields(string &parts[], const int count)
 
 bool IsOwnedMagic(const long magic)
 {
-   return magic >= 230023 && magic <= 230044;
+   return (magic >= 230023 && magic <= 230034) ||
+      (magic >= 230040 && magic <= 230044);
 }
 
 bool IsInventoryQueryMagic(const long magic)
 {
-   // Retired inventory must be visible to cutover preflight, not tradable.
+   // The original single-lane namespace remains query-only for legacy migration.
    return IsOwnedMagic(magic) || magic == 200023;
 }
 

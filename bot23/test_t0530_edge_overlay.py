@@ -157,7 +157,7 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
         lanes = runner._t0530_edge_strategies()
         self.assertEqual([row["lane_id"] for row in lanes], [18, 19, 20, 21])
         self.assertEqual([row["magic"] for row in lanes], [230040, 230041, 230042, 230043])
-        self.assertEqual(len(runner._all_strategies()), 22)
+        self.assertEqual(len(runner._all_strategies()), 17)
         live_s23_bot.validate_boolean_config(runner.params)
         live_s23_bot.validate_strategy_topology_config(runner.params)
         live_s23_bot.validate_execution_numeric_config(runner.params)
@@ -225,14 +225,6 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
         self.assertEqual(synced, [lane["id"]])
         self.assertEqual(monitored, [lane["id"]])
 
-    def test_existing_overlay_entry_order_is_preserved(self):
-        source = Path(live_s23_bot.__file__).read_text(encoding="utf-8")
-        run_once = source[source.index("    def run_once(self)"):]
-        self.assertLess(
-            run_once.index("self._process_session_vwap_entries(info, poll_time"),
-            run_once.index("self._process_t0530_edge_entries("),
-        )
-
     def test_pre_edge_state_migration_preserves_every_existing_lane(self):
         seed = self.make_runner()
         legacy = seed._default_state()
@@ -245,7 +237,6 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
         for lane_state in legacy["strategies"].values():
             lane_state.pop("t0530_edge_retry_opportunity")
         legacy["strategies"]["za_horizontal_lane_1"]["daily_realized_pnl_usd"] = -12.34
-        legacy["strategies"]["ny0530_session_vwap_lane_5"]["basket_sequence"] = 77
         params = json.loads(json.dumps(seed.params))
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "s23_bot_state.json"
@@ -253,7 +244,7 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
             with patch.object(live_s23_bot, "STATE_FILE", str(state_path)):
                 migrated = live_s23_bot.S23HorizontalInventoryRunner(params)
         self.assertEqual(migrated._st(params["strategies"][0])["daily_realized_pnl_usd"], -12.34)
-        self.assertEqual(migrated.state["strategies"]["ny0530_session_vwap_lane_5"]["basket_sequence"], 77)
+        self.assertTrue(live_s23_bot.RETIRED_STRATEGY_IDS.isdisjoint(migrated.state["strategies"]))
         self.assertTrue(migrated._t0530_edge_state_migrated)
         for lane in migrated._t0530_edge_strategies():
             self.assertEqual(migrated._st(lane)["basket"], [])

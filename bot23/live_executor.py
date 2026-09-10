@@ -21,7 +21,6 @@ S23_OPEN_POLICY = {
     230030: "s23_md_l1",
     **{230030 + lane: f"s23_pe_l{lane}" for lane in range(1, 4)},
     230034: "s23_tr_l1",
-    **{230034 + lane: f"s23_sv_l{lane}" for lane in range(1, 6)},
     **{230039 + lane: f"s23_ed_l{lane}" for lane in range(1, 5)},
     230044: "s23_q01_l1",
 }
