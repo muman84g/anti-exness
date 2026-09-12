@@ -152,6 +152,9 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         )
         params = load_params(str(Path(__file__).with_name("s23_params.json")))
         self.assertEqual(params["expected_bridge_version"], live_s23_bot.EXPECTED_BRIDGE_VERSION)
+        readme = (Path(__file__).with_name("README.md")).read_text(encoding="utf-8")
+        self.assertIn(live_s23_bot.EXPECTED_BRIDGE_VERSION, readme)
+        self.assertNotIn("2026-09-04-s23-legacy-query-v32", readme)
 
     def test_q01_lane_contract_is_configured_as_independent_lane_22(self):
         params = load_params(str(Path(__file__).with_name("s23_params.json")))
@@ -166,6 +169,12 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         self.assertEqual(q01[0]["max_positions"], 1)
         self.assertEqual(q01[0]["hold_minutes"], 30)
         self.assertEqual(q01[0]["cooldown"], 5)
+
+    def test_multi_symbol_config_rejects_duplicate_physical_symbol(self):
+        params = load_params(str(Path(__file__).with_name("s23_params.json")))
+        params["multi_symbol_m1_symbols"]["GBPUSD"] = params["multi_symbol_m1_symbols"]["EURUSD"]
+        with self.assertRaisesRegex(ValueError, "invalid multi-symbol M1 map"):
+            live_s23_bot.validate_execution_numeric_config(params)
 
     def test_ea_rejects_noncanonical_execution_and_envelope_numbers_before_conversion(self):
         source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
@@ -193,7 +202,10 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             'if(op == "CLOSEDEAL" && n == 3)',
         ):
             self.assertIn(exact_guard, source)
-        self.assertIn('symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n)', source)
+        self.assertIn('!IsAllowedHistorySymbol(symbol) || !ValidHistoryNumericFields(parts, n)', source)
+        self.assertIn('StringLen(symbol)', source)
+        self.assertIn('StringGetCharacter(symbol, i)', source)
+        self.assertIn('if(symbol != "XAUUSD")', source)
         self.assertIn("timeframe != PERIOD_M1", source)
         self.assertIn("!IsInventoryQueryMagic(parsed_magic)", source)
         position_block = source.split('if(op == "POSITION"', 1)[1].split(
@@ -1006,7 +1018,7 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         self.assertEqual(
             params["candidate_id"],
-            "bot23-t0530-edge-on-q01-hl-on-v010",
+            "bot23-jst1113-b4c-on-v011",
         )
         self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])
@@ -4516,9 +4528,17 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
             compose,
         )
         self.assertIn(
+            "./bot23/multi_symbol_m1.py:/app/bot23/multi_symbol_m1.py:ro",
+            compose,
+        )
+        self.assertIn(
             "./bot23/BotBridge_s23.mq5:/app/bot23/BotBridge_s23.mq5:ro",
             compose,
         )
+        self.assertNotIn("./bot23/BotBridge_s23.ex5:", compose)
+        entrypoint = (Path(__file__).resolve().parent.parent / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn('rm -f "$EXPERTS_DIR/${BRIDGE_EXPERT_NAME}.ex5"', entrypoint)
+        self.assertIn('EA_BRIDGE_SOURCE_FILE', compose)
 
     def test_bot23_uses_fixed_local_credentials_without_unused_environment_wiring(self):
         bot23 = Path(__file__).resolve().parent
@@ -4944,6 +4964,73 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         finally:
             os.unlink(state_path)
 
+    def test_previous_midday_policy_migrates_only_when_lane_is_flat(self):
+        params = json.loads(json.dumps(load_params()))
+        params["shadow_opportunity_observer"]["enabled"] = False
+        params["shadow_state_tagger"]["enabled"] = False
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            seed = S23HorizontalInventoryRunner(params)
+        state = seed._default_state()
+        state["routing"]["midday_policy_id"] = "previous_midday_policy"
+        state["routing"]["midday_policy_params_hash"] = live_s23_bot.PREVIOUS_MIDDAY_POLICY_PARAMS_HASH
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle); state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                migrated = S23HorizontalInventoryRunner(params)
+            self.assertEqual(migrated.state["routing"]["midday_policy_id"], live_s23_bot.EXPECTED_MIDDAY_POLICY_ID)
+            self.assertTrue(migrated._midday_session_state_migrated)
+            self.assertFalse(migrated._st(params["midday_session_strategies"][0])["sync_block_new_entries"])
+        finally:
+            os.unlink(state_path)
+
+    def test_previous_lane8_state_key_is_renamed_before_shape_validation(self):
+        params = json.loads(json.dumps(load_params()))
+        params["shadow_opportunity_observer"]["enabled"] = False
+        params["shadow_state_tagger"]["enabled"] = False
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            seed = S23HorizontalInventoryRunner(params)
+        state = seed._default_state()
+        current_id = params["midday_session_strategies"][0]["id"]
+        state["strategies"]["previous_lane_8"] = state["strategies"].pop(current_id)
+        state["routing"]["midday_policy_id"] = "previous_midday_policy"
+        state["routing"]["midday_policy_params_hash"] = live_s23_bot.PREVIOUS_MIDDAY_POLICY_PARAMS_HASH
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle); state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                migrated = S23HorizontalInventoryRunner(params)
+            self.assertIn(current_id, migrated.state["strategies"])
+            self.assertNotIn("previous_lane_8", migrated.state["strategies"])
+            self.assertFalse(migrated._st(params["midday_session_strategies"][0])["sync_block_new_entries"])
+        finally:
+            os.unlink(state_path)
+
+    def test_previous_midday_policy_with_pending_entry_fails_closed(self):
+        params = json.loads(json.dumps(load_params()))
+        params["shadow_opportunity_observer"]["enabled"] = False
+        params["shadow_state_tagger"]["enabled"] = False
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            seed = S23HorizontalInventoryRunner(params)
+        state = seed._default_state()
+        strat = params["midday_session_strategies"][0]
+        state["routing"]["midday_policy_id"] = "previous_midday_policy"
+        state["routing"]["midday_policy_params_hash"] = live_s23_bot.PREVIOUS_MIDDAY_POLICY_PARAMS_HASH
+        arm_pending(
+            state["strategies"][strat["id"]],
+            now=pd.Timestamp("2026-08-28 02:11", tz="UTC"),
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle); state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                blocked = S23HorizontalInventoryRunner(params)
+            lane = blocked._st(strat)
+            self.assertTrue(lane["sync_block_new_entries"])
+            self.assertEqual(lane["sync_block_reason"], "midday_policy_identity_mismatch")
+        finally:
+            os.unlink(state_path)
+
     def test_morning_ownership_namespace_is_exact_and_disjoint(self):
         runner, _strategy, _state = make_runner(live=False)
         params = runner.params
@@ -5008,28 +5095,47 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         sides = S23HorizontalInventoryRunner._morning_signal_sides(bars)
         self.assertEqual(sides["jst09_range_false_break_confirm_direction_control"], "LONG")
 
-    def test_midday_round_sweep_long_and_short_match_fixed_definition(self):
+    def test_midday_base_event_long_and_short_match_fixed_definition(self):
         runner, _za, _state = make_runner(live=False)
         strat = runner.params["midday_session_strategies"][0]
         index = pd.date_range("2026-08-28 01:00", periods=62, freq="1min", tz="UTC")
         long_bars = self._bars(index)
         long_bars.loc[index[-1], ["Open", "High", "Low", "Close"]] = [100.0, 100.3, 99.8, 100.1]
-        self.assertEqual(runner._midday_signal_side(long_bars, strat), "LONG")
+        self.assertEqual(runner._midday_base_event_side(long_bars, strat), "LONG")
         short_bars = self._bars(index)
         short_bars.loc[index[-1], ["Open", "High", "Low", "Close"]] = [100.0, 100.2, 99.7, 99.9]
-        self.assertEqual(runner._midday_signal_side(short_bars, strat), "SHORT")
+        self.assertEqual(runner._midday_base_event_side(short_bars, strat), "SHORT")
 
-    def test_midday_round_sweep_requires_onset_and_utc02_to04_release(self):
+    def test_midday_base_event_requires_onset_and_utc02_to04_release(self):
         runner, _za, _state = make_runner(live=False)
         strat = runner.params["midday_session_strategies"][0]
         index = pd.date_range("2026-08-28 01:00", periods=62, freq="1min", tz="UTC")
         bars = self._bars(index)
         bars.loc[index[-2:], ["Open", "High", "Low", "Close"]] = [100.0, 100.3, 99.8, 100.1]
-        self.assertIsNone(runner._midday_signal_side(bars, strat))
+        self.assertIsNone(runner._midday_base_event_side(bars, strat))
         outside_index = pd.date_range("2026-08-28 00:57", periods=62, freq="1min", tz="UTC")
         outside = self._bars(outside_index)
         outside.loc[outside_index[-1], ["Open", "High", "Low", "Close"]] = [100.0, 100.3, 99.8, 100.1]
-        self.assertIsNone(runner._midday_signal_side(outside, strat))
+        self.assertIsNone(runner._midday_base_event_side(outside, strat))
+
+    def test_midday_replacement_is_short_only_and_uses_signal_release_cutoff(self):
+        runner, _za, _state = make_runner(live=False)
+        strat = runner.params["midday_session_strategies"][0]
+        index = pd.date_range("2026-08-28 01:00", periods=62, freq="1min", tz="UTC")
+        bars = self._bars(index, [100.0 + i * 0.01 for i in range(62)])
+        bars.loc[index[-1], ["Open", "High", "Low", "Close"]] = [100.5, 102.8, 100.4, 100.6]
+        release = index[-1] + pd.Timedelta(minutes=1)
+        snapshot = SimpleNamespace(bars={})
+        with patch.object(live_s23_bot, "fetch_completed_m1_snapshot", return_value=(snapshot, "ok")) as fetch, patch.object(
+            live_s23_bot, "jst1113_usd_accel_pre_session_short", return_value=(True, "signal")
+        ):
+            self.assertEqual(runner._midday_signal_side(bars, strat, release), "SHORT")
+        self.assertEqual(fetch.call_args.kwargs["decision_time"], release)
+
+        bars.loc[index[-1], ["Open", "High", "Low", "Close"]] = [100.5, 100.6, 97.2, 100.5]
+        with patch.object(live_s23_bot, "fetch_completed_m1_snapshot") as fetch:
+            self.assertIsNone(runner._midday_signal_side(bars, strat, release))
+        fetch.assert_not_called()
 
     def test_midday_session_end_at_utc04_is_exclusive(self):
         runner, _za, _state = make_runner(live=False)
@@ -5038,7 +5144,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         bars = self._bars(index)
         bars.loc[index[-1], ["Open", "High", "Low", "Close"]] = [100.0, 100.3, 99.8, 100.1]
         self.assertEqual(index[-1], pd.Timestamp("2026-08-28 03:59", tz="UTC"))
-        self.assertIsNone(runner._midday_signal_side(bars, strat))
+        self.assertIsNone(runner._midday_base_event_side(bars, strat))
 
     def test_midday_fixed_hold_uses_actual_entry_time_and_is_idempotent(self):
         runner, _za, _state = make_runner(live=False)
@@ -5234,7 +5340,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         signal_bar = pd.Timestamp("2026-08-28 02:10", tz="UTC")
         bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
         quote = SimpleNamespace(bid=100.0, ask=100.03)
-        with patch.object(runner, "_midday_signal_side", return_value="LONG"), patch.object(
+        with patch.object(runner, "_midday_signal_side", return_value="SHORT"), patch.object(
             live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)
         ):
             runner._process_midday_entries(bars, bars.iloc[-1], quote, signal_bar + pd.Timedelta(minutes=1), {8: True})
@@ -5256,19 +5362,20 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         signal_bar = pd.Timestamp("2026-08-28 02:10", tz="UTC")
         bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
         quote = SimpleNamespace(bid=100.0, ask=100.03)
-        with patch.object(runner, "_midday_signal_side", return_value="LONG"), patch.object(
+        with patch.object(runner, "_midday_signal_side", return_value="SHORT"), patch.object(
             live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)
         ):
             runner._process_midday_entries(bars, bars.iloc[-1], quote, signal_bar + pd.Timedelta(minutes=1), {8: True})
         self.assertEqual([method for method, _kwargs in observer.calls], ["register_opportunity", "record_route"])
         registered = observer.calls[0][1]["opportunity"]
-        self.assertEqual(registered["source"], "jst1113_round_sweep")
-        self.assertEqual(registered["effective_side"], "LONG")
+        self.assertEqual(registered["source"], "jst1113_b4c_accel_pre_session_up")
+        self.assertEqual(registered["effective_side"], "SHORT")
         self.assertEqual(observer.calls[1][1]["status"], "consumed")
         self.assertEqual(len(tag_calls), 1)
 
     def test_midday_master_switch_blocks_orders_but_keeps_shadow_evidence(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["midday_session_enabled"] = False
         self.assertFalse(runner.params["midday_session_enabled"])
         strat = runner.params["midday_session_strategies"][0]
         observer = RecordingObserver()
@@ -5281,7 +5388,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         signal_bar = pd.Timestamp("2026-08-28 02:10", tz="UTC")
         bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
         quote = SimpleNamespace(bid=100.0, ask=100.03)
-        with patch.object(runner, "_midday_signal_side", return_value="LONG"), patch.object(
+        with patch.object(runner, "_midday_signal_side", return_value="SHORT"), patch.object(
             live_s23_bot, "stale_signal_decision", return_value=SimpleNamespace(stale=False)
         ):
             runner._process_midday_entries(
@@ -5296,6 +5403,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_midday_master_switch_preserves_owned_exit_monitoring(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["midday_session_enabled"] = False
         self.assertFalse(runner.params["midday_session_enabled"])
         strat = runner.params["midday_session_strategies"][0]
         state = runner._st(strat)

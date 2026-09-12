@@ -623,6 +623,7 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh:ro
       - ./bot23/live_config.py:/app/bot23/live_config.py:ro
       - ./bot23/live_s23_bot.py:/app/bot23/live_s23_bot.py:ro
+      - ./bot23/multi_symbol_m1.py:/app/bot23/multi_symbol_m1.py:ro
       - ./bot23/utc1330_hl_overlay.py:/app/bot23/utc1330_hl_overlay.py:ro
       - ./bot23/eu_entry_admission_clock.py:/app/bot23/eu_entry_admission_clock.py:ro
       - ./bot23/position_lifecycle_clock.py:/app/bot23/position_lifecycle_clock.py:ro

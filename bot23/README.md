@@ -1,5 +1,12 @@
 # Bot23 integrated inventory and independent session overlays
 
+## 2026-09-12 current candidate
+
+Current candidate is `bot23-jst1113-b4c-on-v011`; its required EA bridge is
+`2026-09-12-s23-multisymbol-history-v34`. JST11:00-13:00 uses only the B4C
+SHORT strategy described below. Deployment, EA compilation/attachment, service recreation and
+live multi-symbol availability are not proved by the local checks.
+
 ## UTC 13:30 corrected HL overlay (2026-09-10 local implementation)
 
 The core ZA route now applies the frozen policy
@@ -24,9 +31,12 @@ the owned POSITION/CLOSEDEAL lifecycle. The Python CLOSE submission marker is
 retained across restart; the receipt is not a definitive no-fill rejection.
 Normal first-time CLOSE execution and read-only claim recovery are unchanged.
 
-EA source/binary, `EXPECTED_BRIDGE_VERSION` and `expected_bridge_version` must
-be deployed together as `2026-09-04-s23-close-claim-v33`. A v32 EA is rejected
-by the updated preflight. Compilation and local tests are not deployment proof.
+The canonical EA artifact in this folder is the source `BotBridge_s23.mq5`.
+Compose copies it into MT5, removes any previously compiled binary, and compiles
+the selected `BotBridge_s23` during service startup. The runner constant and
+`expected_bridge_version` must both remain
+`2026-09-12-s23-multisymbol-history-v34`; every older EA is rejected by
+preflight. Compilation and local tests are not deployment proof.
 
 ## Local IPC recovery correction (2026-09-04)
 
@@ -62,9 +72,9 @@ Strategy parameters, credentials and runtime state are unchanged.
 The repeated audit also rejects malformed CSV quoting before close replay,
 while preserving valid quoted multiline fields.
 
-## 2026-09-11 current candidate
+## 2026-09-11 prior candidate (historical snapshot)
 
-Current candidate is `bot23-t0530-edge-on-q01-hl-on-v010`. The NY 05:30-08:30
+Candidate at that snapshot was `bot23-t0530-edge-on-q01-hl-on-v010`. The NY 05:30-08:30
 session-VWAP strategy was removed after the extended Forward-tick replay fell to
 68 trades, PnL -74.786, PF 0.685 and MTM MDD 160.456. Its five strategy rows,
 signal/history implementation, runtime entry/exit/retry paths, Python and EA OPEN
@@ -206,7 +216,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-04-s23-legacy-query-v32` です。v31はv30の全IPC/TICKS/ownership guard、edge lane allowlist、deadline切り下げ比較を継承し、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`を所有allowlistへ追加します。さらにrequest ID、deadline、全execution数値、履歴・inventory queryの項目数と数値表現を厳密検査し、符号、指数表記、末尾文字、空値、余分なfieldを変換前に拒否します。INFO/HIST/HISTPAGE/TICKSはXAUUSDへ、履歴はM1へ、inventory queryはbot23の所有magicへ固定します。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-12-s23-multisymbol-history-v34` です。v34は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよび今後のread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
@@ -272,20 +282,20 @@ time. This overlay does not use ZA routing, pullback, adds, adaptive exits, or
 the LONG-target portfolio-rearm gate.
 
 An independent midday overlay runs only for executable releases from 02:00
-through 03:59 UTC (JST 11:00-12:59). Its frozen signal is
-`round_s2p5_d0p05_r0p03`: using confirmed M1, the prior close selects the
-nearest 2.5-USD grid boundary, a bar must sweep that boundary by at least
-0.05 ATR60 and reclaim by at least 0.03 ATR60, and only a new raw-side onset
-is admitted. One private 0.01-lot lane holds the confirmed broker fill for 60
-minutes and has capacity one. It does not enter ZA routing or use ZA pullback,
-adds, adaptive exits, cooldown, or LONG-target rearm.
+through 03:59 UTC (JST 11:00-12:59). Its frozen SHORT signal is
+`b4c_accel_pre_session_up`: EURUSD/GBPUSD/AUDUSD/USDJPY completed-M1 USD
+breadth over 15 bars must be at least three, its average per-bar move must
+accelerate versus 110 bars, and XAUUSD must be above its event-excluding
+60-bar pre-session reference. One private 0.01-lot lane holds the confirmed
+broker fill for 60 minutes and has capacity one.
 
-Operational status as of 2026-09-02: `midday_session_enabled=false`. An
-unchanged-candidate extended-forward diagnostic produced 25 Stress trades /
-USD -52.561 / PF 0.511, while the live sample was also negative. The master
-switch therefore blocks new Midday orders while preserving passive shadow
-opportunity/state-tag evidence and management of any already-owned Midday
-position. Morning, pre-EU30, and ZA routing are unchanged.
+Cross-asset history is read-only and configurable by logical-to-MT5 symbol
+mapping. The common snapshot helper has no session restriction and can be
+reused by future signals at any hour. For this strategy it is cut off at the
+XAUUSD event release time, uses only M1 bars completed by that instant, and
+fails closed if any constituent is missing or more than 120 seconds stale.
+Trading commands remain XAUUSD-only. `midday_session_enabled=true` enables
+only this filtered SHORT replacement.
 
 The adopted pre-Europe overlay keeps the original JST 13:00-to-15:30/16:30
 market-time meaning, but runtime admission is resolved and compared only in
@@ -594,20 +604,10 @@ becomes available.
   parameterized forward check contains only one complete day (4 trades,
   USD +28.446 Stress), so it is not independent proof and must not be retuned
   from live outcomes.
-- JST11-13 round-level sweep research:
-  fixed `round_s2p5_d0p05_r0p03`, 60-minute hold, capacity one. Dev Stress
-  produced 102 trades / USD +199.7715 / PF 1.676534 / MTM DD USD 88.591;
-  observed leakcheck Stress produced 40 / USD +156.4325 / PF 2.892275 / DD
-  USD 27.583. The already-consumed forward file produced only 4 trades / USD
-  +17.583 / PF 3.110804 / DD USD 15.756 and is not independent proof.
-- JST09-13 combined fixed-risk audit:
-  `evidence/jst0913_combined_v004`. On the exact fixed overlays, Dev Stress was
-  248 trades / USD +544.814 / PF 1.74115 / every-tick MTM DD USD 80.473 /
-  maximum four positions. The observed leakcheck diagnostic was 95 trades /
-  USD +258.534 / PF 2.09609 / MTM DD USD 44.363 / maximum three positions.
-  Morning/midday inventory overlapped for 26 DEV episodes (12.568 hours) and
-  11 observed-leakcheck episodes (5.117 hours); the result is a portfolio-risk
-  audit only and was not used to retune either block.
+- JST11-13 B4C research: `b4c_accel_pre_session_up`, SHORT only, 60-minute
+  hold and capacity one. Fixed Stress results were DEV 39 trades / USD
+  +90.182 / PF 1.806, observed Leakcheck 20 / USD +46.3755 / PF 1.657, and
+  Forward 22 / USD +75.065 / PF 3.161.
 
 reverse_d60 Dev Base produced 1,529 trades, USD 908.314, PF 1.188445,
 and every-tick MTM MDD USD 228.926. Its observed leakcheck Base produced 391

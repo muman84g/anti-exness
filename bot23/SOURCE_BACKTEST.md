@@ -1,8 +1,24 @@
 # Source Backtest
 
-## 2026-09-11 session-VWAP retirement
+## 2026-09-12 JST11-13 B4C replacement
 
-- Current candidate: `bot23-t0530-edge-on-q01-hl-on-v010`.
+- Current candidate: `bot23-jst1113-b4c-on-v011`.
+- Current bridge: `2026-09-12-s23-multisymbol-history-v34`.
+- JST11-13 runs only `b4c_accel_pre_session_up`; LONG is never routed.
+- Cross-asset features use completed EURUSD/GBPUSD/AUDUSD/USDJPY M1 available
+  at the XAUUSD signal release instant. A late live poll is trimmed back to that
+  instant, preventing post-release bars from entering the decision.
+- The generic read-only history surface accepts safe broker symbol names and
+  the snapshot helper has no session gate. The adopted strategy itself remains
+  UTC 02:00 inclusive to 04:00 exclusive, 0.01 lot, capacity one, and 60 minutes
+  from confirmed fill.
+- Local implementation and no-order verification only. EA compilation,
+  CentOS placement, service recreation, bridge attachment, and runtime symbol
+  availability remain unverified external steps.
+
+## 2026-09-11 session-VWAP retirement (historical snapshot)
+
+- Candidate at that snapshot: `bot23-t0530-edge-on-q01-hl-on-v010`.
 - Extended Forward tick result: 68 trades, PnL -74.786, PF 0.685, MTM MDD 160.456.
 - Decision: remove the session-VWAP signal from bot23. The strategy/config rows,
   runtime signal/history/entry/exit/retry paths, Python and EA OPEN authorization,
@@ -217,7 +233,7 @@ Cycle27のlive移植前監査でraw tick入力差が見つかったため、次�
 - Adopted idea: `bot23_x_archive_inventory_range_false_break_fade_opt_v001`
 - Candidate: `bot23-x-archive-plus-jst0911-plus-jst1113-plus-jst1300-pre-eu30-plus-reverse-stop-trend-v001`
 - Parent candidate: `bot23-long-target-portfolio-rearm-v001`
-- Selected spec: `reverse_d60 + long_target_portfolio_rearm_8m + balanced_book_false_break_fade_w15_c2_both + jst0911_stable001_param_15_55_45_v001 + jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001 + jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001 + reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001`
+- Selected spec: `reverse_d60 + long_target_portfolio_rearm_8m + balanced_book_false_break_fade_w15_c2_both + jst0911_stable001_param_15_55_45_v001 + jst1113_b4c_accel_pre_session_up_h60_cap1_v001 + jst1300_pre_eu30_squeeze45_double60_rsi45_cap3_dst_v001 + reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001`
 - Morning overlay params hash:
   `c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e`
 - Midday overlay params hash:
@@ -350,11 +366,9 @@ three. Completed-bar availability is causal; live current spread/staleness and
 broker confirmation remain additional safety gates.
 
 The independent midday overlay is restricted to executable releases in
-02:00-04:00 UTC, with the end exclusive. Lane 8 detects only the onset of a
-confirmed-M1 2.5-USD round-level sweep/reclaim using ATR60 depth 0.05 and
-reclaim 0.03. LONG has deterministic priority only in the degenerate case in
-which both raw conditions hold. The lane is 0.01 lot, capacity one, no add and
-no cooldown, and closes 60 minutes from the confirmed broker fill.
+02:00-04:00 UTC, with the end exclusive. Lane 8 runs only the frozen
+`b4c_accel_pre_session_up` SHORT decision. The lane is 0.01 lot, capacity one,
+no add and no cooldown, and closes 60 minutes from the confirmed broker fill.
 
 ### JST09-11 stable_001 provisional evidence
 
@@ -367,50 +381,19 @@ forward day: four Stress trades, USD +28.446, with DD/PnL 0.585. It is therefore
 a fixed provisional implementation candidate, not independently proven forward
 evidence; the forward period must not be used for further tuning.
 
-### JST11-13 round-level sweep fixed evidence
+### JST11-13 B4C fixed evidence
 
-The fixed `round_s2p5_d0p05_r0p03` candidate uses confirmed M1, a 2.5-USD
-round-price grid, minimum sweep depth 0.05 ATR60, reclaim 0.03 ATR60, a
-60-minute fill-based hold, one 0.01-lot lane, and capacity one.
-
-| Dataset/scenario | Trades | PnL USD | PF | Every-tick MTM MDD USD |
-|---|---:|---:|---:|---:|
-| Dev Stress | 102 | 199.7715 | 1.676534 | 88.591 |
-| Observed leakcheck Stress | 40 | 156.4325 | 2.892275 | 27.583 |
-| Consumed forward Stress | 4 | 17.583 | 3.110804 | 15.756 |
-
-Canonical runs:
-
-- Dev: `C:/botter/backtest/output/backtest213/candidates/xau-jst1113-round5-parameter-shortlist-v001/runs/20260828_fixed_dev_reproduction_v001`
-- Leakcheck: `C:/botter/backtest/output/backtest213/candidates/xau-jst1113-round5-parameter-shortlist-v001/runs/20260828_fixed_leakcheck_v001`
-- Forward: `C:/botter/backtest/output/backtest213/candidates/xau-jst1113-round5-remaining-fixed-forward-v001/runs/20260828_consumed_forward_final_v001`
-
-The forward file was already consumed during selection and contains only four
-trades. It is reported for transparency, not treated as independent forward
-proof and not available for retuning.
-
-An unchanged-candidate diagnostic rerun on the extended forward tick file
-through 2026-09-02 produced 25 Stress trades / USD -52.561 / PF 0.5107 /
-every-tick MTM MDD USD 79.952, with all three sampled weeks negative. This is
-diagnostic evidence on an already observed period rather than a reusable
-holdout. It rejects continued live entry use of the fixed Midday candidate;
-`midday_session_enabled=false` blocks new orders while its frozen identity,
-passive shadow evidence, and owned-position exit handling remain intact.
-
-### JST09-13 combined portfolio-risk evidence
-
-The exact fixed morning and midday trade streams were replayed together on the
-same ordered Bid/Ask ticks. This is an overlap/MDD audit, not another search.
-
-| Dataset/scenario | Trades | PnL USD | PF | Every-tick MTM MDD USD | Max positions |
-|---|---:|---:|---:|---:|---:|
-| Dev Stress | 248 | 544.8140 | 1.741148 | 80.473 | 4 |
-| Observed leakcheck Stress | 95 | 258.5340 | 2.096087 | 44.363 | 3 |
-
-Morning and midday inventory overlapped in 26 DEV episodes totaling 12.568
-hours and 11 observed-leakcheck episodes totaling 5.117 hours. The audit is
-stored under `C:/botter/bot/bot23/evidence/jst0913_combined_v004`. Failed
-pre-PnL/summary attempts v001-v003 are retained explicitly and are not evidence.
+The fixed `b4c_accel_pre_session_up` SHORT strategy produced DEV Stress
+39 trades / USD +90.182 / PF 1.806, observed Leakcheck Stress 20 / USD
++46.3755 / PF 1.657, and Forward Stress 22 / USD +75.065 / PF 3.161.
+Live parity uses the XAU event-bar release as the
+decision/availability cutoff, completed M1 only, XAU `shift(1)>shift(61)`,
+USD-signed 15/110-bar returns for EURUSD/GBPUSD/AUDUSD/USDJPY, breadth15 >= 3,
+and mean-per-bar acceleration. The reusable cross-asset reader is available at
+all hours, but this strategy's entry window remains UTC 02:00-04:00. Missing,
+future, or stale constituents fail closed. Execution remains the next live
+poll after release using executable SHORT Bid, with the existing spread/stale
+guards; exit remains confirmed-fill-time plus 60 minutes using executable Ask.
 
 ## Evidence
 

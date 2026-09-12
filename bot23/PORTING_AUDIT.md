@@ -66,78 +66,6 @@ that behavior for the frozen `impulse_bars=8` candidate.
 No deployment, service restart, bridge attachment, push, or live-mode switch was
 performed.
 
-## 2026-08-28 JST11-13 round-level sweep capacity-one overlay adoption
-
-The fixed XAUUSD candidate `round_s2p5_d0p05_r0p03` was added as an
-independent JST11:00-13:00 lane. The executable release window is UTC
-02:00-04:00 with the end exclusive. Confirmed M1 selects a 2.5-USD grid from
-the prior close, requires a 0.05 ATR60 sweep and 0.03 ATR60 reclaim, and admits
-only a new raw-side onset. Lane 8 owns magic 230030, comment `s23_md_l1`, lot
-0.01, capacity one, and a 60-minute close clock starting from confirmed broker
-fill. ZA routing, morning routing, add, pullback, adaptive exit, cooldown,
-reverse_d60, and LONG-target rearm were not changed.
-
-State schema remains version 3. An existing compatible state receives only an
-empty midday lane plus the frozen midday policy identity; all ZA and JST09-11
-baskets, pending actions, reservations, and routing state are preserved. A
-non-empty incompatible identity is not adopted. Ownership and startup checks
-now require the exact new magic/comment while retaining all prior namespaces.
-
-No semantic behavior or persisted field was intentionally deleted. The
-morning fixed-hold implementation was only extracted into a shared helper and
-retained through its original wrapper and close reason. The first regression
-run exposed two failures from applying `math.ceil` to warm-up NaN values in
-the new grid calculation. The calculation was corrected to preserve NaN until
-the 60-bar ATR window is valid; no threshold or research rule was changed.
-
-Initial no-order validation passed Python compilation, runner self-test, 84 bot23
-regressions, six passive-observer tests, and three state-tagger tests. New
-coverage checks exact LONG/SHORT mechanics, onset gating, UTC04:00 exclusion,
-actual-fill hold timing, capacity one, state migration, namespace separation,
-and rejection of a foreign magic.
-
-Research used ordered Bid ticks and first-eligible-tick execution. Live uses
-broker HIST M1 and a later polling quote. The consumed forward sample has only
-four trades and is not independent proof. The fixed-hold bridge/close gap found
-in final audit was corrected in the follow-up section below.
-
-Compose already mounts the modified runner and params as bot23 read-only
-files, so no Compose edit was required. No deployment, container recreation,
-service restart, runtime state/log edit, MT5 order, commit, or push was
-performed.
-
-### 2026-08-28 final-audit correction
-
-The first final audit found that a failed fixed-hold close could leave
-`pending_close_reason` plus a permanent `live_time_close_failed` block, making
-later polls unable to retry. It also found no broker quote timestamp, no spread
-defer/reopen contract, incomplete close-deal audit columns, no midday passive
-observer, and no combined JST09-13 portfolio replay.
-
-The corrected bridge INFO response includes `MqlTick.time_msc`; live preflight
-rejects an older bridge that lacks it. Fixed-hold state now persists the last
-evaluated quote, wide-spread defer start, stable-poll count, and retry time.
-Pre-deadline and duplicate quotes do not count. A normal spread closes
-immediately; after a wide quote, three fresh narrow quotes are required, with a
-30-minute force limit. Exact retcode 10018 resets spread defer, waits 60 seconds,
-and retries without a permanent block. Other ambiguous/failed close outcomes
-remain fail-closed.
-
-Confirmed close rows now retain ticket, position identifier, deal ID, entry and
-exit price, side, lot, broker deal time, and ticket-level net PnL. The trades CSV
-header is checked before bridge connection; an older CSV must be archived before
-restart. Separate midday opportunity/markout/state-tag files observe raw signals
-and capacity/spread/stale/sync rejection without affecting orders.
-
-The exact fixed JST09-11 and JST11-13 overlays were combined on ordered Bid/Ask
-ticks without retuning. Dev Stress: 248 trades, USD +544.814, PF 1.74115,
-every-tick MTM MDD USD 80.473, maximum four positions. Observed-leakcheck
-diagnostic: 95 trades, USD +258.534, PF 2.09609, MDD USD 44.363, maximum three.
-Overlap occurred in 26 DEV episodes / 12.568 hours and 11 observed-leakcheck
-episodes / 5.117 hours. Canonical artifacts are under
-`evidence/jst0913_combined_v004`; v001-v003 are retained failed-run evidence and
-must not be used for selection.
-
 ## 2026-08-28 JST09-11 stable_001 15/55/45 overlay adoption
 
 - Added three independent morning lanes to the original bot23 runner without
@@ -517,7 +445,7 @@ performed.
 ## 2026-08-28 entry/lifecycle clock separation correction
 
 The post-13:00 JST admission classifier remains diagnostic-only with
-`routing_enabled=false`; existing ZA, JST09-11, and JST11-13 entry routes are
+`routing_enabled=false`; existing ZA, JST09-11, and current B4C entry routes are
 unchanged. Its first implementation used the London DST regime for both the
 European and US boundaries. That is wrong during the several weeks each year
 when London and New York change clocks on different dates. The corrected clock
@@ -535,12 +463,6 @@ market-closed retry, and position-ownership guards remain in force.
 No signal, lot, hold duration, session route, ownership namespace, deployment
 file, runtime state, or live service was changed by this correction.
 
-`JST1113_PORTING_EVIDENCE_V3.json` is retained unchanged as historical evidence,
-but the canonical evidence-work-state validator rejects its custom schema. It
-must not be used as a release manifest. The correction disposition and exact
-candidate hashes are recorded in
-`CLOCK_SEPARATION_CORRECTION_AUDIT_20260828.json`.
-
 ## 2026-08-28 JST13:00-pre-EU30 three-lane adoption
 
 The earlier diagnostic-only `routing_enabled=false` statement above is
@@ -552,7 +474,7 @@ blocks still have no entry strategy.
 Three disjoint lanes were added with magics 230031-230033, comments
 `s23_pe_l1`-`s23_pe_l3`, 0.01 lot, capacity one each, and confirmed-fill holds
 of 45/60/45 minutes. Their state is migrated empty without changing existing
-ZA, JST09-11, or JST11-13 state. Entry admission is session/DST dependent;
+ZA, JST09-11, or current B4C state. Entry admission is session/DST dependent;
 position reconciliation and close deadlines are not.
 
 The exact live M5 implementation was compared with the frozen backtest event

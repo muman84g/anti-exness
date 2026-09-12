@@ -45,6 +45,11 @@ from live_manual_alerts import notify_manual_action_required
 from live_config import MT5_LOGIN, MT5_SERVER
 from eu_entry_admission_clock import classify_entry_admission, is_eu_summer_time, is_us_summer_time
 from position_lifecycle_clock import fixed_hold_due_at
+from multi_symbol_m1 import (
+    fetch_completed_m1_snapshot,
+    jst1113_usd_accel_pre_session_short,
+    valid_history_symbol_map,
+)
 from jst1300_pre_eu30_strategy import (
     ADMISSION_BLOCK_ID as PRE_EU30_ADMISSION_BLOCK_ID,
     POLICY_ID as PRE_EU30_POLICY_ID,
@@ -90,9 +95,9 @@ RETIRED_STRATEGY_IDS = frozenset(
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-t0530-edge-on-q01-hl-on-v010"
+EXPECTED_CANDIDATE_ID = "bot23-jst1113-b4c-on-v011"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-04-s23-close-claim-v33"
+EXPECTED_BRIDGE_VERSION = "2026-09-12-s23-multisymbol-history-v34"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -118,8 +123,9 @@ EXPECTED_MORNING_POLICY_PARAMS_HASH = "c36023031af830bca0c08dd441ff800868909d404
 EXPECTED_MORNING_SESSION_START_UTC = 0
 EXPECTED_MORNING_SESSION_END_UTC = 2
 EXPECTED_MORNING_MAX_POSITIONS = 3
-EXPECTED_MIDDAY_POLICY_ID = "jst1113_round_s2p5_d0p05_r0p03_h60_cap1_v001"
-EXPECTED_MIDDAY_POLICY_PARAMS_HASH = "526d90e6dc16981ba5e60d31750f1b4862fbe3d9170382ed624fea53ef55fd83"
+PREVIOUS_MIDDAY_POLICY_PARAMS_HASH = "526d90e6dc16981ba5e60d31750f1b4862fbe3d9170382ed624fea53ef55fd83"
+EXPECTED_MIDDAY_POLICY_ID = "jst1113_b4c_accel_pre_session_up_h60_cap1_v001"
+EXPECTED_MIDDAY_POLICY_PARAMS_HASH = "870c177f18da17e2558741cf66d33ca3c22da227367b3c9478a48b95079b578b"
 EXPECTED_MIDDAY_SESSION_START_UTC = 2
 EXPECTED_MIDDAY_SESSION_END_UTC = 4
 EXPECTED_MIDDAY_MAX_POSITIONS = 1
@@ -372,7 +378,7 @@ _STRATEGY_CONFIG_COLLECTIONS = (
 _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "strategies": tuple(f"za_horizontal_lane_{index}" for index in range(1, 5)),
     "morning_session_strategies": tuple(f"jst0911_morning_lane_{index}" for index in range(1, 4)),
-    "midday_session_strategies": ("jst1113_round_sweep_lane_1",),
+    "midday_session_strategies": ("jst1113_b4c_lane_1",),
     "pre_eu30_session_strategies": tuple(f"jst1300_pre_eu30_lane_{index}" for index in range(1, 4)),
     "trend_recovery_strategies": ("reverse_long_stop_trend_lane_1",),
     "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
@@ -436,7 +442,7 @@ _STRATEGY_KEYS_BY_COLLECTION = {
     "midday_session_strategies": frozenset({
         "enabled", "id", "lane_id", "midday_lane_id", "spec_id", "signal_id",
         "magic", "comment_prefix", "lot", "hold_minutes", "max_positions", "cooldown",
-        "level_step", "atr_period", "min_sweep_depth_atr", "reclaim_atr",
+        "level_step", "atr_period", "min_sweep_depth_atr", "reclaim_atr", "parent_signal_id",
     }),
     "pre_eu30_session_strategies": frozenset({
         "enabled", "id", "lane_id", "pre_eu30_lane_id", "spec_id", "signal_id",
@@ -605,6 +611,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "morning_session_end_utc", "morning_session_max_positions",
         "midday_session_start_utc", "midday_session_end_utc",
         "midday_session_max_positions", "pre_eu30_session_max_positions",
+        "multi_symbol_m1_bars", "multi_symbol_m1_freshness_seconds",
         "trend_recovery_entry_window_minutes", "trend_recovery_max_total_entries",
         "t0530_edge_lookback_bars", "t0530_edge_hold_minutes",
         "t0530_edge_max_positions", "t0530_edge_max_signal_delay_minutes",
@@ -630,6 +637,14 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
             or not math.isfinite(float(value))
         ):
             raise ValueError(f"invalid strategy numeric config: {key}={value!r}")
+
+    symbols = params.get("multi_symbol_m1_symbols")
+    if (
+        not isinstance(symbols, dict)
+        or set(symbols) != {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY"}
+        or not valid_history_symbol_map(symbols)
+    ):
+        raise ValueError(f"invalid multi-symbol M1 map: {symbols!r}")
 
     expected_magic_keys = (
         "expected_magics", "expected_morning_magics", "expected_midday_magics",
@@ -1435,6 +1450,21 @@ class S23HorizontalInventoryRunner:
             if removed:
                 self._retired_state_pruned = True
                 logging.warning("S23 removed retired strategy state: %s", ",".join(removed))
+            raw_midday_routing = observed.get("routing")
+            expected_midday_id = _EXPECTED_STRATEGY_IDS_BY_COLLECTION["midday_session_strategies"][0]
+            if (
+                isinstance(raw_midday_routing, dict)
+                and raw_midday_routing.get("midday_policy_params_hash") == PREVIOUS_MIDDAY_POLICY_PARAMS_HASH
+                and expected_midday_id not in strategies
+            ):
+                prior_midday_ids = [
+                    str(strategy_id) for strategy_id, lane_state in strategies.items()
+                    if isinstance(lane_state, dict) and lane_state.get("lane_id") == 8
+                ]
+                if len(prior_midday_ids) == 1:
+                    strategies[expected_midday_id] = strategies.pop(prior_midday_ids[0])
+                    self._midday_session_state_migrated = True
+                    logging.warning("S23 lane 8 state key migrated to current Midday strategy identity")
         expected_strategy_ids = {str(s["id"]) for s in self._all_strategies()}
         expected_lane_ids = {str(s["id"]): int(s["lane_id"]) for s in self._all_strategies()}
         unknown_strategy_ids = (
@@ -1747,6 +1777,38 @@ class S23HorizontalInventoryRunner:
                 "S23 midday-session state initialized to %s; existing ZA and JST09-11 state was preserved",
                 expected_midday_policy_id,
             )
+        elif (
+            observed_midday_policy_id != expected_midday_policy_id
+            and observed_midday_policy_hash == PREVIOUS_MIDDAY_POLICY_PARAMS_HASH
+        ):
+            # This strategy keeps the same magic/lane ownership namespace.  A
+            # flat legacy lane can be cut over automatically; any live or
+            # locally pending lifecycle remains blocked for manual review.
+            legacy_flat = all(
+                not state["strategies"][strat["id"]].get("basket")
+                and not state["strategies"][strat["id"]].get("pending_entry_side")
+                for strat in self._midday_strategies()
+            )
+            if legacy_flat:
+                routing["midday_policy_id"] = expected_midday_policy_id
+                routing["midday_policy_params_hash"] = expected_midday_policy_hash
+                self._midday_session_state_migrated = True
+                logging.warning(
+                    "S23 flat Midday policy state migrated to %s",
+                    expected_midday_policy_id,
+                )
+            else:
+                for strat in self._midday_strategies():
+                    lane_state = state["strategies"][strat["id"]]
+                    lane_state["sync_block_new_entries"] = True
+                    lane_state["sync_block_reason"] = "midday_policy_identity_mismatch"
+                    lane_state["sync_block_recoverable"] = False
+                    lane_state["sync_block_details"] = {
+                        "observed_policy_id": observed_midday_policy_id,
+                        "observed_policy_hash": observed_midday_policy_hash,
+                        "expected_policy_id": expected_midday_policy_id,
+                        "expected_policy_hash": expected_midday_policy_hash,
+                    }
         elif observed_midday_policy_id != expected_midday_policy_id or observed_midday_policy_hash != expected_midday_policy_hash:
             for strat in self._midday_strategies():
                 lane_state = state["strategies"][strat["id"]]
@@ -4502,7 +4564,8 @@ class S23HorizontalInventoryRunner:
         if [int(row.get("lane_id") or 0) for row in midday] != [8]:
             return "invalid_midday_lane_ids"
         expected_midday = {
-            "signal_id": "round_s2p5_d0p05_r0p03", "hold_minutes": 60, "comment_prefix": "s23_md_l1",
+            "signal_id": "b4c_accel_pre_session_up", "parent_signal_id": "b4c_base_event_short",
+            "hold_minutes": 60, "comment_prefix": "s23_md_l1",
             "lot": 0.01, "max_positions": 1, "cooldown": 0, "level_step": 2.5, "atr_period": 60,
             "min_sweep_depth_atr": 0.05, "reclaim_atr": 0.03,
         }
@@ -4813,8 +4876,8 @@ class S23HorizontalInventoryRunner:
         return result
 
     @staticmethod
-    def _midday_signal_side(bars: pd.DataFrame, strat: dict[str, Any]) -> str | None:
-        """Return the fixed round-level sweep onset for the latest completed M1."""
+    def _midday_base_event_side(bars: pd.DataFrame, strat: dict[str, Any]) -> str | None:
+        """Return the B4C base price event for the latest completed M1."""
         if bars.empty:
             return None
         frame = bars.copy()
@@ -4861,6 +4924,31 @@ class S23HorizontalInventoryRunner:
         onset = raw.where(raw.ne(raw.shift(1).fillna(0)), 0)
         latest = int(onset.iloc[-1])
         return "LONG" if latest > 0 else ("SHORT" if latest < 0 else None)
+
+    def _midday_signal_side(
+        self, bars: pd.DataFrame, strat: dict[str, Any], decision_time: pd.Timestamp | None = None,
+    ) -> str | None:
+        """Return the frozen B4C SHORT signal at the causal release clock."""
+        self._midday_signal_reason = "parent_no_short_signal"
+        if self._midday_base_event_side(bars, strat) != "SHORT":
+            return None
+        cutoff = decision_time
+        if cutoff is None and not bars.empty:
+            cutoff = pd.Timestamp(bars.index[-1]) + pd.Timedelta(minutes=1)
+        snapshot, reason = fetch_completed_m1_snapshot(
+            self.dm,
+            self.params.get("multi_symbol_m1_symbols", {}),
+            decision_time=cutoff,
+            num_bars=int(self.params.get("multi_symbol_m1_bars", 140)),
+            freshness_seconds=int(self.params.get("multi_symbol_m1_freshness_seconds", 120)),
+            broker_timezone=str(self.params.get("broker_timezone", "UTC")),
+        )
+        if snapshot is None:
+            self._midday_signal_reason = reason
+            return None
+        accepted, reason = jst1113_usd_accel_pre_session_short(bars, snapshot)
+        self._midday_signal_reason = reason
+        return "SHORT" if accepted else None
 
     def _apply_entry_policy(
         self,
@@ -8492,13 +8580,17 @@ class S23HorizontalInventoryRunner:
                 strat, signal_bar_text, "midday_decision",
             ):
                 continue
-            side = self._midday_signal_side(bars, strat)
+            side = self._midday_signal_side(bars, strat, release_time)
             if side is None:
-                self._trade_row("midday_decision", strat, reason="no_signal", signal_bar_time=signal_bar_text)
+                self._trade_row(
+                    "midday_decision", strat,
+                    reason=str(getattr(self, "_midday_signal_reason", "no_signal")),
+                    signal_bar_time=signal_bar_text,
+                )
                 continue
             opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|{strat['signal_id']}|{side}"
             opportunity = {
-                "opportunity_id": opportunity_id, "source": "jst1113_round_sweep",
+                "opportunity_id": opportunity_id, "source": "jst1113_b4c_accel_pre_session_up",
                 "side": side, "raw_side": side, "effective_side": side,
                 "event_time": signal_bar_text, "release_time": dt_text(release_time),
                 "available_time": dt_text(release_time), "decision_time": dt_text(poll_time),
@@ -8552,7 +8644,7 @@ class S23HorizontalInventoryRunner:
                 continue
             opened = self._open_entry(
                 strat, side, price_row, info,
-                note="midday_round_s2p5_d0p05_r0p03_hold_60m",
+                note="midday_b4c_accel_pre_session_up_short_hold_60m",
                 execution_time=poll_time, opportunity=opportunity,
                 apply_portfolio_rearm=False, use_confirmed_fill_time=True,
             )

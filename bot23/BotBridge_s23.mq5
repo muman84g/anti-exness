@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-09-04-s23-close-claim-v33"
+#define BRIDGE_VERSION "2026-09-12-s23-multisymbol-history-v34"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -18,6 +18,24 @@ input int InpTimerMs = 250;
 string consumer_owner_name = "BotBridge_s23_consumer_owner";
 string consumer_heartbeat_name = "BotBridge_s23_consumer_heartbeat";
 double consumer_token = 0.0;
+
+bool IsAllowedHistorySymbol(const string symbol)
+{
+   // Generic read-only feature surface for future signals and broker suffixes.
+   // Trading, tick and account-sensitive commands remain XAUUSD-only.
+   int length = StringLen(symbol);
+   if(length <= 0 || length > 32)
+      return false;
+   for(int i = 0; i < length; ++i)
+   {
+      ushort c = (ushort)StringGetCharacter(symbol, i);
+      bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '#';
+      if(!valid)
+         return false;
+   }
+   return true;
+}
 
 bool AcquireConsumerOwnership()
 {
@@ -372,7 +390,7 @@ string HandleCommand(const string command)
    if(op == "HIST" && n == 4)
    {
       string symbol = parts[1];
-      if(symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n))
+      if(!IsAllowedHistorySymbol(symbol) || !ValidHistoryNumericFields(parts, n))
          return "ERR|BAD_HIST_GUARD";
       ENUM_TIMEFRAMES timeframe = (ENUM_TIMEFRAMES)((int)StringToInteger(parts[2]));
       int bars = (int)StringToInteger(parts[3]);
@@ -410,7 +428,7 @@ string HandleCommand(const string command)
    if(op == "HISTPAGE" && n == 5)
    {
       string symbol = parts[1];
-      if(symbol != "XAUUSD" || !ValidHistoryNumericFields(parts, n))
+      if(!IsAllowedHistorySymbol(symbol) || !ValidHistoryNumericFields(parts, n))
          return "ERR|BAD_HISTPAGE_GUARD";
       ENUM_TIMEFRAMES timeframe = (ENUM_TIMEFRAMES)((int)StringToInteger(parts[2]));
       int start_pos = (int)StringToInteger(parts[3]);
