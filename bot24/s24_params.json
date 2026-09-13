@@ -2,7 +2,7 @@
   "enabled": true, "live_trading_enabled": true, "shadow_forward_enabled": false,
   "require_hedging_account": true, "bot_number": "24", "bot_suffix": "s24",
   "strategy_id": "bot24_visual_no_adverse_c_target16", "expected_magic": 200024,
-  "expected_bridge_name": "BotBridge_s24", "expected_bridge_version": "2026-09-10-s24-rad070-v14", "symbol": "XAUUSD", "mt5_symbol": "XAUUSD",
+  "expected_bridge_name": "BotBridge_s24", "expected_bridge_version": "2026-09-14-s24-rad070-v20", "symbol": "XAUUSD", "mt5_symbol": "XAUUSD",
   "default_lot": 0.01, "contract_size": 100.0, "poll_interval_seconds": 5,
   "utc1330_hl": {
     "enabled": true,

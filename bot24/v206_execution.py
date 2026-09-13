@@ -83,6 +83,12 @@ def _nonnegative_receipt_int(value: str, prefix: str) -> int:
     return int(text)
 
 
+def _nonnegative_int(value: str) -> int:
+    if not isinstance(value, str) or not value or not value.isascii() or not value.isdecimal():
+        raise ValueError("invalid unsigned integer field")
+    return int(value)
+
+
 def build_open_r1_command(
     *,
     symbol: str,
@@ -188,15 +194,15 @@ def parse_open_r1_response(response: str | None) -> R1OpenResult:
             result = R1OpenResult(
                 status="CONFIRMED",
                 raw_response=raw,
-                ticket=int(parts[2]),
-                identifier=int(parts[3]),
-                deal=int(parts[4]),
+                ticket=_nonnegative_int(parts[2]),
+                identifier=_nonnegative_int(parts[3]),
+                deal=_nonnegative_int(parts[4]),
                 fill=float(parts[5]),
                 stop=float(parts[6]),
                 target=float(parts[7]),
-                open_time=int(parts[8]),
-                open_retcode=int(parts[9]),
-                modify_retcode=int(parts[10]),
+                open_time=_nonnegative_int(parts[8]),
+                open_retcode=_nonnegative_int(parts[9]),
+                modify_retcode=_nonnegative_int(parts[10]),
             )
             if not _valid_open_result(result, require_target=True):
                 raise ValueError(raw)
@@ -205,14 +211,14 @@ def parse_open_r1_response(response: str | None) -> R1OpenResult:
             result = R1OpenResult(
                 status="REPAIR_REQUIRED",
                 raw_response=raw,
-                ticket=int(parts[2]),
-                identifier=int(parts[3]),
-                deal=int(parts[4]),
+                ticket=_nonnegative_int(parts[2]),
+                identifier=_nonnegative_int(parts[3]),
+                deal=_nonnegative_int(parts[4]),
                 fill=float(parts[5]),
                 stop=float(parts[6]),
-                open_time=int(parts[7]),
-                open_retcode=int(parts[8]),
-                modify_retcode=int(parts[9]),
+                open_time=_nonnegative_int(parts[7]),
+                open_retcode=_nonnegative_int(parts[8]),
+                modify_retcode=_nonnegative_int(parts[9]),
                 reason="tp_setup_failed_after_confirmed_fill",
             )
             if not _valid_open_result(result, require_target=False):
@@ -224,7 +230,7 @@ def parse_open_r1_response(response: str | None) -> R1OpenResult:
         return R1OpenResult("NO_FILL", raw, reason=parts[1])
     if len(parts) == 5 and parts[0] == "ERR":
         try:
-            retcode = int(parts[1])
+            retcode = _nonnegative_int(parts[1])
             order = _nonnegative_receipt_int(parts[2], "ORDER=")
             deal = _nonnegative_receipt_int(parts[3], "DEAL=")
             _nonnegative_receipt_int(parts[4], "LAST=")
@@ -268,12 +274,12 @@ def parse_repair_r1_response(response: str | None) -> R1RepairResult:
                 ok=True,
                 status="CONFIRMED",
                 raw_response=raw,
-                ticket=int(parts[2]),
-                identifier=int(parts[3]),
+                ticket=_nonnegative_int(parts[2]),
+                identifier=_nonnegative_int(parts[3]),
                 fill=float(parts[4]),
                 stop=float(parts[5]),
                 target=float(parts[6]),
-                retcode=int(parts[7]),
+                retcode=_nonnegative_int(parts[7]),
             )
             # parts[8] is the current position type echoed by the bridge.
             if (
@@ -281,7 +287,7 @@ def parse_repair_r1_response(response: str | None) -> R1RepairResult:
                 or result.identifier <= 0
                 or not all(math.isfinite(value) and value > 0.0 for value in (result.fill, result.stop, result.target))
                 or result.retcode not in {TRADE_RETCODE_DONE, TRADE_RETCODE_NO_CHANGES}
-                or int(parts[8]) not in {0, 1}
+                or _nonnegative_int(parts[8]) not in {0, 1}
             ):
                 raise ValueError(raw)
             return result
@@ -299,13 +305,13 @@ def parse_close_r1_response(response: str | None) -> R1CloseResult:
                 True,
                 "CONFIRMED",
                 raw,
-                ticket=int(parts[2]),
+                ticket=_nonnegative_int(parts[2]),
                 lot=float(parts[3]),
                 open_price=float(parts[4]),
                 close_price=float(parts[5]),
                 profit=float(parts[6]),
-                deal=int(parts[7]),
-                retcode=int(parts[8]),
+                deal=_nonnegative_int(parts[7]),
+                retcode=_nonnegative_int(parts[8]),
             )
             if (
                 result.ticket <= 0
@@ -324,7 +330,7 @@ def parse_close_r1_response(response: str | None) -> R1CloseResult:
         return R1CloseResult(False, "MISSING_UNCONFIRMED", raw)
     if len(parts) == 4 and parts[0] == "ERR":
         try:
-            retcode = int(parts[1])
+            retcode = _nonnegative_int(parts[1])
             deal = _nonnegative_receipt_int(parts[2], "DEAL=")
             _nonnegative_receipt_int(parts[3], "LAST=")
         except (TypeError, ValueError, OverflowError):

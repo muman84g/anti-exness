@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from dataclasses import replace
 
@@ -40,6 +42,28 @@ class RecordingExecutor(s24.FakeExecutor):
 
 
 class RunnerShadowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._state_directory = tempfile.TemporaryDirectory(prefix="s24-shadow-test-state-")
+        self._previous_runtime_paths = (
+            s24.LOG_DIR, s24.STATE_DIR, s24.LOG_FILE, s24.TRADE_LOG_FILE,
+            s24.SHADOW_RUNNER_LOG_FILE, s24.STATE_FILE, s24.RUNNER_LOCK_FILE,
+        )
+        root = Path(self._state_directory.name)
+        s24.LOG_DIR = str(root / "logs")
+        s24.STATE_DIR = str(root / "state")
+        s24.LOG_FILE = str(root / "logs" / "s24_bot.log")
+        s24.TRADE_LOG_FILE = str(root / "logs" / "s24_trades.csv")
+        s24.SHADOW_RUNNER_LOG_FILE = str(root / "logs" / "s24_shadow_runner_trades.csv")
+        s24.STATE_FILE = str(root / "state" / "state.json")
+        s24.RUNNER_LOCK_FILE = str(root / "state" / "s24_runner.lock")
+
+    def tearDown(self) -> None:
+        (
+            s24.LOG_DIR, s24.STATE_DIR, s24.LOG_FILE, s24.TRADE_LOG_FILE,
+            s24.SHADOW_RUNNER_LOG_FILE, s24.STATE_FILE, s24.RUNNER_LOCK_FILE,
+        ) = self._previous_runtime_paths
+        self._state_directory.cleanup()
+
     def make_runner(self) -> tuple[s24.S24NoAdverseRunner, dict, RecordingExecutor, list[tuple[str, dict]]]:
         params = test_params()
         runner = s24.S24NoAdverseRunner(params)

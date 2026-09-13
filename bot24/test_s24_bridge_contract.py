@@ -17,20 +17,49 @@ from pathlib import Path
 import live_executor
 import live_data_fetcher
 import live_s24_bot
+import v206_execution
 from ea_bridge import EABridgeServer
 
 
 class S24BridgeContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_send = live_executor.ea_bridge.send_command
+        self._state_directory = tempfile.TemporaryDirectory(prefix="s24-bridge-test-state-")
+        self._previous_runtime_paths = (
+            live_s24_bot.LOG_DIR,
+            live_s24_bot.STATE_DIR,
+            live_s24_bot.LOG_FILE,
+            live_s24_bot.TRADE_LOG_FILE,
+            live_s24_bot.SHADOW_RUNNER_LOG_FILE,
+            live_s24_bot.STATE_FILE,
+            live_s24_bot.RUNNER_LOCK_FILE,
+        )
+        root = Path(self._state_directory.name)
+        live_s24_bot.LOG_DIR = str(root / "logs")
+        live_s24_bot.STATE_DIR = str(root / "state")
+        live_s24_bot.LOG_FILE = str(root / "logs" / "s24_bot.log")
+        live_s24_bot.TRADE_LOG_FILE = str(root / "logs" / "s24_trades.csv")
+        live_s24_bot.SHADOW_RUNNER_LOG_FILE = str(root / "logs" / "s24_shadow_runner_trades.csv")
+        live_s24_bot.STATE_FILE = str(root / "state" / "state.json")
+        live_s24_bot.RUNNER_LOCK_FILE = str(root / "state" / "s24_runner.lock")
 
     def tearDown(self) -> None:
         live_executor.ea_bridge.send_command = self.original_send
+        (
+            live_s24_bot.LOG_DIR,
+            live_s24_bot.STATE_DIR,
+            live_s24_bot.LOG_FILE,
+            live_s24_bot.TRADE_LOG_FILE,
+            live_s24_bot.SHADOW_RUNNER_LOG_FILE,
+            live_s24_bot.STATE_FILE,
+            live_s24_bot.RUNNER_LOCK_FILE,
+        ) = self._previous_runtime_paths
+        self._state_directory.cleanup()
 
     def test_mql_bridge_exposes_identity_and_quote_timestamp(self):
         text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
         self.assertIn('#define BRIDGE_NAME "BotBridge_s24"', text)
-        self.assertIn('#define BRIDGE_VERSION "2026-09-10-s24-rad070-v14"', text)
+        self.assertIn('#define BRIDGE_VERSION "2026-09-14-s24-rad070-v20"', text)
         self.assertIn('input string InpCommandFile = "cmd_s24.txt";', text)
         self.assertIn('input string InpResponseFile = "res_s24.txt";', text)
         self.assertIn("ACCOUNT_LOGIN", text)
@@ -49,12 +78,90 @@ class S24BridgeContractTests(unittest.TestCase):
         self.assertNotIn("void ClearCommand()", text)
         self.assertIn("ParseRequestEnvelope", text)
         self.assertIn('WriteResponse("RID|" + request_id + "|" + HandleCommand(payload))', text)
+        self.assertIn("REPAIR_FIXED", caps)
+        self.assertIn("trade.PositionModify(position_ticket, exact_sl, exact_tp)", text)
+        self.assertIn("FixedProtectionAdmissible", text)
+        self.assertIn("SYMBOL_TRADE_STOPS_LEVEL", text)
+        self.assertIn("RECOVER|RAD_PROTECTION_REQUIRED", text)
+        self.assertIn("PositionGetInteger(POSITION_TYPE) != position_type", text)
+        self.assertIn("MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.01)", text)
+        self.assertIn("MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill)", text)
+        self.assertIn("admission_tick.ask - 18.0", text)
+        self.assertIn("admission_tick.bid + 18.0", text)
+
+    def test_v206_execution_responses_reject_noncanonical_integer_text(self):
+        cases = (
+            (v206_execution.parse_open_r1_response, "OK|R1|+1|2|3|2000.0|1982.0|2018.0|1760000000|10009|10009"),
+            (v206_execution.parse_repair_r1_response, "OK|R1_REPAIRED|1|2|2000.0|1982.0|2018.0|10009| 0"),
+            (v206_execution.parse_close_r1_response, "OK|R1_CLOSED|1|0.01|2000.0|2001.0|1.0|+3|10009"),
+        )
+        for parser, response in cases:
+            with self.subTest(parser=parser.__name__):
+                result = parser(response)
+                self.assertFalse(getattr(result, "success", getattr(result, "ok", False)) or getattr(result, "status", "") == "CONFIRMED")
 
     def test_mql_zero_argument_commands_reject_extra_fields(self):
         text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
         self.assertIn("bool IsZeroArgCommand", text)
         for command in ("ECHO", "CAPS", "ACCOUNT"):
             self.assertIn(f'if(op == "{command}" && IsZeroArgCommand(parts, n))', text)
+
+    def test_mql_open_r1_revalidates_complete_position_after_target_modify(self):
+        text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
+        block = text.split('if(op == "OPEN_R1")', 1)[1].split('if(op == "CLOSE_R1")', 1)[0]
+        final_check = block.split("trade.PositionModify(ticket, actual_sl, target)", 1)[1]
+        for guard in (
+            "PositionGetString(POSITION_SYMBOL) != symbol",
+            "PositionGetInteger(POSITION_MAGIC) != magic",
+            "PositionGetString(POSITION_COMMENT) != comment",
+            "(ulong)PositionGetInteger(POSITION_IDENTIFIER) != identifier",
+            "PositionGetInteger(POSITION_TYPE) != position_type",
+            "MathAbs(PositionGetDouble(POSITION_VOLUME) - volume)",
+            "MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill)",
+            "double confirmed_sl = PositionGetDouble(POSITION_SL)",
+            "double confirmed_tp = PositionGetDouble(POSITION_TP)",
+            "MathAbs(confirmed_sl - actual_sl)",
+            "MathAbs(confirmed_tp - target)",
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, final_check)
+
+    def test_mql_repair_r1_revalidates_complete_position_after_target_modify(self):
+        text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
+        block = text.split('if(op == "REPAIR_R1")', 1)[1].split('if(op == "REPAIR_FIXED")', 1)[0]
+        final_check = block.split("trade.PositionModify(ticket, sl, target)", 1)[1]
+        for guard in (
+            "PositionGetString(POSITION_SYMBOL) != expected_symbol",
+            "PositionGetInteger(POSITION_MAGIC) != expected_magic",
+            "PositionGetString(POSITION_COMMENT) != expected_comment",
+            "(ulong)PositionGetInteger(POSITION_IDENTIFIER) != expected_identifier",
+            "PositionGetInteger(POSITION_TYPE) != position_type",
+            "MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.01)",
+            "MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill)",
+            "MathAbs(PositionGetDouble(POSITION_SL) - sl)",
+            "MathAbs(PositionGetDouble(POSITION_TP) - target)",
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, final_check)
+
+    def test_mql_close_commands_bind_target_magic_before_position_close(self):
+        text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
+        close_r1 = text.split('if(op == "CLOSE_R1")', 1)[1].split('if(op == "REPAIR_R1")', 1)[0]
+        close_core = text.split('if(op == "CLOSE")', 1)[1].split('return "ERR|UNKNOWN_COMMAND"', 1)[0]
+        self.assertLess(close_r1.index("trade.SetExpertMagicNumber(expected_magic)"), close_r1.index("trade.PositionClose(ticket)"))
+        self.assertLess(close_core.index("trade.SetExpertMagicNumber(expected_magic)"), close_core.index("trade.PositionClose(ticket)"))
+
+    def test_mql_consumer_owner_reclaims_only_expired_heartbeat_with_cas(self):
+        text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
+        acquire = text.split("bool AcquireConsumerOwnership()", 1)[1].split("bool OwnsConsumerNamespace()", 1)[0]
+        self.assertIn("CONSUMER_HEARTBEAT_TIMEOUT_SECONDS", acquire)
+        self.assertIn("GlobalVariableGet(consumer_heartbeat_name)", acquire)
+        self.assertIn("TimeLocal() - observed_heartbeat <= CONSUMER_HEARTBEAT_TIMEOUT_SECONDS", acquire)
+        self.assertIn("GlobalVariableSetOnCondition(consumer_owner_name, consumer_token, observed)", acquire)
+        self.assertIn("if(GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal()) == 0)", acquire)
+        self.assertIn("GlobalVariableSetOnCondition(consumer_owner_name, 0.0, consumer_token)", acquire)
+        timer = text.split("void OnTimer()", 1)[1]
+        self.assertIn("if(GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal()) == 0)", timer)
 
     def test_mql_core_comment_policy_matches_python_hash_namespace(self):
         text = Path(__file__).with_name("BotBridge_s24.mq5").read_text(encoding="utf-8-sig")
@@ -198,6 +305,18 @@ class S24BridgeContractTests(unittest.TestCase):
                 live_executor.ea_bridge.send_command = lambda *_args, value=response, **_kwargs: value
                 self.assertEqual(executor.close_position(1001, 50, **kwargs).status, expected)
 
+    def test_core_open_no_fill_retcodes_require_canonical_unsigned_integer_text(self):
+        parse = live_s24_bot.S24NoAdverseRunner._core_open_no_fill_retcode
+        self.assertEqual(parse("ERR|10018|ORDER=0|DEAL=0|LAST=0"), 10018)
+        for response in (
+            "ERR|+10018|ORDER=0|DEAL=0|LAST=0",
+            "ERR|10018|ORDER=+0|DEAL=0|LAST=0",
+            "ERR|10018|ORDER=0|DEAL= 0|LAST=0",
+            "ERR|10018|ORDER=0|DEAL=0|LAST=+0",
+        ):
+            with self.subTest(response=response):
+                self.assertIsNone(parse(response))
+
     def test_core_open_and_close_commands_carry_atomic_guards(self):
         commands = []
         def send(command, **_kwargs):
@@ -222,6 +341,71 @@ class S24BridgeContractTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "TRADE_PERMISSION_GUARD")
         self.assertEqual(commands[-1], "CLOSE|1001|50|123456|Example-MT5|XAUUSD|200024|s24_no_adverse:abc123def0|7001|0|0.01")
+
+    def test_rad_open_recovery_receipt_preserves_confirmed_fill_identity(self):
+        live_executor.ea_bridge.send_command = lambda *_args, **_kwargs: (
+            "RECOVER|RAD_PROTECTION_REQUIRED|1001|7001|9001|2000.25|1767272400|10009|10030"
+        )
+        executor = live_executor.MT5Executor()
+        ticket = executor.open_position(
+            "XAUUSD", 0, 0.01, 1982.0, 2030.0, deviation=50, magic=240207,
+            comment="s24_rad070:abc123def0", digits=3, expected_login=123456,
+            expected_server="Example-MT5", expected_owned_positions=0,
+        )
+        self.assertEqual(ticket, 1001)
+        self.assertEqual(executor.last_open_identifier, 7001)
+        self.assertFalse(executor.last_open_protection_confirmed)
+
+    def test_rad_recovery_receipt_cannot_be_adopted_by_core_open(self):
+        live_executor.ea_bridge.send_command = lambda *_args, **_kwargs: (
+            "RECOVER|RAD_PROTECTION_REQUIRED|1001|7001|9001|2000.25|1767272400|10009|10030"
+        )
+        executor = live_executor.MT5Executor()
+        ticket = executor.open_position(
+            "XAUUSD", 0, 0.01, 0.0, 0.0, deviation=50, magic=200024,
+            comment="s24_no_adverse:abc123def0", digits=3, expected_login=123456,
+            expected_server="Example-MT5", expected_owned_positions=0,
+        )
+        self.assertIsNone(ticket)
+        self.assertTrue(str(executor.last_order_error).startswith("MALFORMED_OK:"))
+
+    def test_rad_fixed_repair_parser_requires_exact_fill_distances(self):
+        commands = []
+        live_executor.ea_bridge.send_command = lambda command, **_kwargs: commands.append(command) or (
+            "OK|FIXED_REPAIRED|1001|7001|2000.2500000000|1982.2500000000|2030.2500000000|10009|0"
+        )
+        result = live_executor.MT5Executor().repair_fixed_position(
+            ticket=1001, expected_login=123456, expected_server="Example-MT5",
+            expected_symbol="XAUUSD", expected_magic=240207,
+            expected_comment="s24_rad070:abc123def0", expected_identifier=7001,
+            stop_distance=18.0, target_distance=30.0, digits=3,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(commands[-1], "REPAIR_FIXED|1001|123456|Example-MT5|XAUUSD|240207|s24_rad070:abc123def0|7001|18.000|30.000")
+        live_executor.ea_bridge.send_command = lambda *_args, **_kwargs: (
+            "OK|FIXED_REPAIRED|1001|7001|2000.2500000000|1982.0000000000|2030.2500000000|10009|0"
+        )
+        malformed = live_executor.MT5Executor().repair_fixed_position(
+            ticket=1001, expected_login=123456, expected_server="Example-MT5",
+            expected_symbol="XAUUSD", expected_magic=240207,
+            expected_comment="s24_rad070:abc123def0", expected_identifier=7001,
+            stop_distance=18.0, target_distance=30.0, digits=3,
+        )
+        self.assertFalse(malformed.success)
+        self.assertEqual(malformed.status, "MALFORMED_OK")
+
+    def test_rad_fixed_repair_rejects_foreign_ownership_before_ipc(self):
+        commands = []
+        live_executor.ea_bridge.send_command = lambda command, **_kwargs: commands.append(command) or "OK"
+        result = live_executor.MT5Executor().repair_fixed_position(
+            ticket=1001, expected_login=123456, expected_server="Example-MT5",
+            expected_symbol="XAUUSD", expected_magic=200024,
+            expected_comment="s24_no_adverse:abc123def0", expected_identifier=7001,
+            stop_distance=18.0, target_distance=30.0, digits=3,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "INVALID_REQUEST")
+        self.assertEqual(commands, [])
 
     def test_hist_parser_accepts_only_monotonic_utc_epochs(self):
         original = live_data_fetcher.ea_bridge.send_command
@@ -467,7 +651,7 @@ class S24BridgeContractTests(unittest.TestCase):
         bot24 = Path(__file__).resolve().parent
         expected = {
             "v206_range_strategy.py": "c2066253c07e723ba7b3a167a6affc9a40b7d36e73077694b2aaef808104c147",
-            "v206_execution.py": "f1e7155821d88f60ef5dc05d43153eb7a0c75ca88c8cce88771c4943d7e80e64",
+            "v206_execution.py": "190797b9de0aff4aded01e002aba08410d01ee27c87bad60d6e3b49e532cae0b",
         }
         for name, frozen_hash in expected.items():
             current = hashlib.sha256((bot24 / name).read_bytes()).hexdigest()

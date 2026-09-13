@@ -7,8 +7,8 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s24"
-#define BRIDGE_VERSION "2026-09-10-s24-rad070-v14"
-#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,OPEN_R1,REPAIR_R1,CLOSE_R1,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
+#define BRIDGE_VERSION "2026-09-14-s24-rad070-v20"
+#define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,OPEN,OPEN_R1,REPAIR_R1,REPAIR_FIXED,CLOSE_R1,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s24.txt";
 input string InpResponseFile = "res_s24.txt";
@@ -17,6 +17,7 @@ input int InpTimerMs = 250;
 string consumer_owner_name = "BotBridge_s24_consumer_owner";
 string consumer_heartbeat_name = "BotBridge_s24_consumer_heartbeat";
 double consumer_token = 0.0;
+const long CONSUMER_HEARTBEAT_TIMEOUT_SECONDS = 10;
 
 bool AcquireConsumerOwnership()
 {
@@ -25,10 +26,21 @@ bool AcquireConsumerOwnership()
       GlobalVariableSet(consumer_owner_name, 0.0);
    double observed = GlobalVariableGet(consumer_owner_name);
    if(observed != 0.0)
-      return false;
+   {
+      double observed_heartbeat = GlobalVariableCheck(consumer_heartbeat_name) ?
+         GlobalVariableGet(consumer_heartbeat_name) : 0.0;
+      if(observed_heartbeat > 0.0 &&
+         TimeLocal() - observed_heartbeat <= CONSUMER_HEARTBEAT_TIMEOUT_SECONDS)
+         return false;
+   }
    if(!GlobalVariableSetOnCondition(consumer_owner_name, consumer_token, observed))
       return false;
-   GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal());
+   if(GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal()) == 0)
+   {
+      GlobalVariableSetOnCondition(consumer_owner_name, 0.0, consumer_token);
+      consumer_token = 0.0;
+      return false;
+   }
    return true;
 }
 
@@ -122,6 +134,13 @@ bool ValidRepairR1NumericFields(string &parts[])
 {
    return IsUnsignedIntegerText(parts[1]) && IsUnsignedIntegerText(parts[2]) &&
       IsUnsignedIntegerText(parts[5]) && IsUnsignedIntegerText(parts[7]);
+}
+
+bool ValidRepairFixedNumericFields(string &parts[])
+{
+   return IsUnsignedIntegerText(parts[1]) && IsUnsignedIntegerText(parts[2]) &&
+      IsUnsignedIntegerText(parts[5]) && IsUnsignedIntegerText(parts[7]) &&
+      IsUnsignedDecimalText(parts[8]) && IsUnsignedDecimalText(parts[9]);
 }
 
 bool ValidCoreOpenNumericFields(string &parts[])
@@ -254,6 +273,24 @@ bool IsPendingPlaced(const uint retcode, const ulong order)
 bool IsModifyDone(const uint retcode)
 {
    return (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_NO_CHANGES);
+}
+
+bool FixedProtectionAdmissible(
+   const string symbol,
+   const long position_type,
+   const double sl,
+   const double tp,
+   const double point)
+{
+   MqlTick tick;
+   if(point <= 0.0 || !SymbolInfoTick(symbol, tick))
+      return false;
+   double minimum_distance = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   if(position_type == POSITION_TYPE_BUY)
+      return sl <= tick.bid - minimum_distance && tp >= tick.ask + minimum_distance;
+   if(position_type == POSITION_TYPE_SELL)
+      return sl >= tick.ask + minimum_distance && tp <= tick.bid - minimum_distance;
+   return false;
 }
 
 bool IsV206R1Policy(
@@ -618,7 +655,14 @@ string HandleCommand(const string command)
       if(!modified || !IsModifyDone(modify_retcode))
          return StringFormat("RECOVER|R1_TP_REQUIRED|%I64u|%I64u|%I64u|%.10f|%.10f|%d|%d|%d",
             ticket, identifier, deal, fill, actual_sl, (int)open_time, open_retcode, modify_retcode);
-      if(!PositionSelectByTicket(ticket))
+      if(!PositionSelectByTicket(ticket) ||
+         PositionGetString(POSITION_SYMBOL) != symbol ||
+         PositionGetInteger(POSITION_MAGIC) != magic ||
+         PositionGetString(POSITION_COMMENT) != comment ||
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) != identifier ||
+         PositionGetInteger(POSITION_TYPE) != position_type ||
+         MathAbs(PositionGetDouble(POSITION_VOLUME) - volume) > 0.000000001 ||
+         MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill) > point * 0.5)
          return StringFormat("ERR|OPEN_R1_FILLED_UNRESOLVED|TICKET=%I64u|IDENTIFIER=%I64u",
             ticket, identifier);
       double confirmed_sl = PositionGetDouble(POSITION_SL);
@@ -761,11 +805,99 @@ string HandleCommand(const string command)
             return StringFormat("ERR|REPAIR_R1_FAILED|%d|LAST=%d", repair_retcode, GetLastError());
       }
       if(!PositionSelectByTicket(ticket) ||
+         PositionGetString(POSITION_SYMBOL) != expected_symbol ||
+         PositionGetInteger(POSITION_MAGIC) != expected_magic ||
+         PositionGetString(POSITION_COMMENT) != expected_comment ||
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) != expected_identifier ||
+         PositionGetInteger(POSITION_TYPE) != position_type ||
+         MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.01) > 0.000000001 ||
+         MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill) > point * 0.5 ||
          MathAbs(PositionGetDouble(POSITION_SL) - sl) > point * 0.5 ||
          MathAbs(PositionGetDouble(POSITION_TP) - target) > point * 0.5)
          return "ERR|REPAIR_R1_UNCONFIRMED";
       return StringFormat("OK|R1_REPAIRED|%I64u|%I64u|%.10f|%.10f|%.10f|%d|%d",
          ticket, expected_identifier, fill, sl, target, repair_retcode, (int)position_type);
+   }
+
+   if(op == "REPAIR_FIXED")
+   {
+      if(n != 10 || !ValidRepairFixedNumericFields(parts))
+         return "ERR|BAD_REPAIR_FIXED_GUARD";
+      ulong ticket = (ulong)StringToInteger(parts[1]);
+      long expected_login = StringToInteger(parts[2]);
+      string expected_server = parts[3];
+      string expected_symbol = parts[4];
+      long expected_magic = StringToInteger(parts[5]);
+      string expected_comment = parts[6];
+      ulong expected_identifier = (ulong)StringToInteger(parts[7]);
+      double stop_distance = StringToDouble(parts[8]);
+      double target_distance = StringToDouble(parts[9]);
+      if(ticket == 0 || expected_identifier == 0 || expected_symbol != "XAUUSD" ||
+         expected_magic != 240207 || !IsRADComment(expected_comment) ||
+         MathAbs(stop_distance - 18.0) > 0.000000001 ||
+         MathAbs(target_distance - 30.0) > 0.000000001)
+         return "ERR|REPAIR_FIXED_POLICY_GUARD";
+      if(AccountInfoInteger(ACCOUNT_LOGIN) != expected_login ||
+         AccountInfoString(ACCOUNT_SERVER) != expected_server)
+         return "ERR|ACCOUNT_IDENTITY_GUARD";
+      if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+         return "ERR|ACCOUNT_MODE_GUARD";
+      if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0 ||
+         AccountInfoInteger(ACCOUNT_TRADE_EXPERT) == 0 ||
+         TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 ||
+         MQLInfoInteger(MQL_TRADE_ALLOWED) == 0)
+         return "ERR|TRADE_PERMISSION_GUARD";
+      if(!PositionSelectByTicket(ticket))
+         return "ERR|POSITION_NOT_FOUND";
+      if(PositionGetString(POSITION_SYMBOL) != expected_symbol ||
+         PositionGetInteger(POSITION_MAGIC) != expected_magic ||
+         PositionGetString(POSITION_COMMENT) != expected_comment ||
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) != expected_identifier ||
+         MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.01) > 0.000000001)
+         return "ERR|POSITION_OWNERSHIP_GUARD";
+      ulong unique_ticket = 0;
+      ulong unique_identifier = 0;
+      if(!SelectUniqueOwnedPosition(expected_symbol, expected_magic, expected_comment,
+            unique_ticket, unique_identifier) ||
+         unique_ticket != ticket || unique_identifier != expected_identifier ||
+         !OwnedOrdersFlat(expected_symbol, expected_magic))
+         return "ERR|POSITION_OWNERSHIP_GUARD";
+      long position_type = PositionGetInteger(POSITION_TYPE);
+      double fill = PositionGetDouble(POSITION_PRICE_OPEN);
+      int digits = (int)SymbolInfoInteger(expected_symbol, SYMBOL_DIGITS);
+      double point = SymbolInfoDouble(expected_symbol, SYMBOL_POINT);
+      double exact_sl = NormalizeDouble(
+         position_type == POSITION_TYPE_BUY ? fill - stop_distance : fill + stop_distance,
+         digits);
+      double exact_tp = NormalizeDouble(
+         position_type == POSITION_TYPE_BUY ? fill + target_distance : fill - target_distance,
+         digits);
+      if(point <= 0.0 || fill <= 0.0 || exact_sl <= 0.0 || exact_tp <= 0.0 ||
+         !FixedProtectionAdmissible(expected_symbol, position_type, exact_sl, exact_tp, point))
+         return "ERR|REPAIR_FIXED_INVALID_POSITION";
+      uint repair_retcode = TRADE_RETCODE_NO_CHANGES;
+      if(MathAbs(PositionGetDouble(POSITION_SL) - exact_sl) > point * 0.5 ||
+         MathAbs(PositionGetDouble(POSITION_TP) - exact_tp) > point * 0.5)
+      {
+         ResetLastError();
+         bool repaired = trade.PositionModify(ticket, exact_sl, exact_tp);
+         repair_retcode = trade.ResultRetcode();
+         if(!repaired || !IsModifyDone(repair_retcode))
+            return StringFormat("ERR|REPAIR_FIXED_FAILED|%d|LAST=%d", repair_retcode, GetLastError());
+      }
+      if(!PositionSelectByTicket(ticket) ||
+         PositionGetString(POSITION_SYMBOL) != expected_symbol ||
+         PositionGetInteger(POSITION_MAGIC) != expected_magic ||
+         PositionGetString(POSITION_COMMENT) != expected_comment ||
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) != expected_identifier ||
+         PositionGetInteger(POSITION_TYPE) != position_type ||
+         MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.01) > 0.000000001 ||
+         MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - fill) > point * 0.5 ||
+         MathAbs(PositionGetDouble(POSITION_SL) - exact_sl) > point * 0.5 ||
+         MathAbs(PositionGetDouble(POSITION_TP) - exact_tp) > point * 0.5)
+         return "ERR|REPAIR_FIXED_UNCONFIRMED";
+      return StringFormat("OK|FIXED_REPAIRED|%I64u|%I64u|%.10f|%.10f|%.10f|%d|%d",
+         ticket, expected_identifier, fill, exact_sl, exact_tp, repair_retcode, (int)position_type);
    }
 
 
@@ -840,7 +972,7 @@ string HandleCommand(const string command)
          double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
          int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
          double expected_sl = NormalizeDouble(
-            order_type == ORDER_TYPE_BUY ? admission_tick.bid - 18.0 : admission_tick.ask + 18.0,
+            order_type == ORDER_TYPE_BUY ? admission_tick.ask - 18.0 : admission_tick.bid + 18.0,
             digits);
          double expected_tp = NormalizeDouble(
             order_type == ORDER_TYPE_BUY ? admission_tick.ask + 30.0 : admission_tick.bid - 30.0,
@@ -887,18 +1019,43 @@ string HandleCommand(const string command)
       }
       if(exact_matches != 1 || position_ticket == 0 || position_identifier == 0 || open_time <= 0 || open_price <= 0.0)
          return StringFormat("ERR|OPEN_FILLED_UNRESOLVED|DEAL=%I64u|MATCHES=%d", deal, exact_matches);
-      if(magic == 240207 && PositionSelectByTicket(position_ticket))
-      {
-         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-         if(point <= 0.0 || MathAbs(PositionGetDouble(POSITION_SL) - sl) > point * 0.5 ||
-            MathAbs(PositionGetDouble(POSITION_TP) - tp) > point * 0.5)
-            return StringFormat("ERR|OPEN_FILLED_UNRESOLVED|DEAL=%I64u|RAD_PROTECTION", deal);
-      }
       if(HistoryDealSelect(deal))
       {
          ulong deal_identifier = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
          if(deal_identifier > 0 && deal_identifier != position_identifier)
             return StringFormat("ERR|OPEN_FILLED_UNRESOLVED|DEAL=%I64u|IDENTIFIER=%I64u", deal, deal_identifier);
+      }
+      if(magic == 240207)
+      {
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         double exact_sl = NormalizeDouble(order_type == ORDER_TYPE_BUY ? open_price - 18.0 : open_price + 18.0, digits);
+         double exact_tp = NormalizeDouble(order_type == ORDER_TYPE_BUY ? open_price + 30.0 : open_price - 30.0, digits);
+         uint modify_retcode = TRADE_RETCODE_NO_CHANGES;
+         bool protection_ok = point > 0.0 && PositionSelectByTicket(position_ticket) &&
+            FixedProtectionAdmissible(symbol, PositionGetInteger(POSITION_TYPE), exact_sl, exact_tp, point);
+         if(protection_ok &&
+            (MathAbs(PositionGetDouble(POSITION_SL) - exact_sl) > point * 0.5 ||
+             MathAbs(PositionGetDouble(POSITION_TP) - exact_tp) > point * 0.5))
+         {
+            ResetLastError();
+            bool modified = trade.PositionModify(position_ticket, exact_sl, exact_tp);
+            modify_retcode = trade.ResultRetcode();
+            protection_ok = modified && IsModifyDone(modify_retcode);
+         }
+         protection_ok = protection_ok && PositionSelectByTicket(position_ticket) &&
+            PositionGetString(POSITION_SYMBOL) == symbol &&
+            PositionGetInteger(POSITION_MAGIC) == magic &&
+            PositionGetString(POSITION_COMMENT) == comment &&
+            (ulong)PositionGetInteger(POSITION_IDENTIFIER) == position_identifier &&
+            PositionGetInteger(POSITION_TYPE) == (order_type == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL) &&
+            MathAbs(PositionGetDouble(POSITION_VOLUME) - volume) <= 0.000000001 &&
+            MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - open_price) <= point * 0.5 &&
+            MathAbs(PositionGetDouble(POSITION_SL) - exact_sl) <= point * 0.5 &&
+            MathAbs(PositionGetDouble(POSITION_TP) - exact_tp) <= point * 0.5;
+         if(!protection_ok)
+            return StringFormat("RECOVER|RAD_PROTECTION_REQUIRED|%I64u|%I64u|%I64u|%.10f|%d|%d|%d",
+               position_ticket, position_identifier, deal, open_price, (int)open_time, retcode, modify_retcode);
       }
       return StringFormat("OK|%I64u|%I64u|%I64u|%.10f|%d|%d",
          position_ticket, position_identifier, deal, open_price, (int)open_time, retcode);
@@ -1094,6 +1251,7 @@ string HandleCommand(const string command)
          return "ERR|POSITION_OWNERSHIP_GUARD";
       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
       double profit_before = PositionGetDouble(POSITION_PROFIT);
+      trade.SetExpertMagicNumber(expected_magic);
       trade.SetDeviationInPoints(deviation);
       trade.SetTypeFillingBySymbol(symbol);
       ResetLastError();
@@ -1128,7 +1286,8 @@ void OnTimer()
 {
    if(!OwnsConsumerNamespace())
       return;
-   GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal());
+   if(GlobalVariableSet(consumer_heartbeat_name, (double)TimeLocal()) == 0)
+      return;
    string command = ReadCommand();
    if(command == "")
       return;

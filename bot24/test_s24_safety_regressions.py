@@ -78,11 +78,24 @@ def persisted_position() -> dict:
 class S24SafetyRegressionTests(unittest.TestCase):
     def setUp(self):
         self._state_directory = tempfile.TemporaryDirectory(prefix="s24-test-state-")
-        self._original_state_file = s24.STATE_FILE
-        s24.STATE_FILE = str(Path(self._state_directory.name) / "s24_bot_state.json")
+        self._original_runtime_paths = (
+            s24.LOG_DIR, s24.STATE_DIR, s24.LOG_FILE, s24.TRADE_LOG_FILE,
+            s24.SHADOW_RUNNER_LOG_FILE, s24.STATE_FILE, s24.RUNNER_LOCK_FILE,
+        )
+        root = Path(self._state_directory.name)
+        s24.LOG_DIR = str(root / "logs")
+        s24.STATE_DIR = str(root / "state")
+        s24.LOG_FILE = str(root / "logs" / "s24_bot.log")
+        s24.TRADE_LOG_FILE = str(root / "logs" / "s24_trades.csv")
+        s24.SHADOW_RUNNER_LOG_FILE = str(root / "logs" / "s24_shadow_runner_trades.csv")
+        s24.STATE_FILE = str(root / "state" / "s24_bot_state.json")
+        s24.RUNNER_LOCK_FILE = str(root / "state" / "s24_runner.lock")
 
     def tearDown(self):
-        s24.STATE_FILE = self._original_state_file
+        (
+            s24.LOG_DIR, s24.STATE_DIR, s24.LOG_FILE, s24.TRADE_LOG_FILE,
+            s24.SHADOW_RUNNER_LOG_FILE, s24.STATE_FILE, s24.RUNNER_LOCK_FILE,
+        ) = self._original_runtime_paths
         self._state_directory.cleanup()
 
     def test_self_test_never_reads_or_writes_configured_live_state_file(self):
@@ -157,6 +170,131 @@ class S24SafetyRegressionTests(unittest.TestCase):
 
         self.assertEqual(state["basket"], [])
         self.assertTrue(any(event == "entry_skip" and values.get("reason") == "known_same_direction_signal_after_close" for event, values in rows))
+
+    def test_core_restart_adopts_exact_pending_add_fill(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        rows = []
+        runner._trade_row = lambda event, _strat, **kwargs: rows.append((event, kwargs))
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        existing = persisted_position()
+        state["basket"] = [existing]
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        pending_id = f"s24-open:{strategy['id']}:{s24.dt_text(signal)}:LONG:2"
+        comment = f"s24_no_adverse:{s24.hashlib.sha256(pending_id.encode('utf-8')).hexdigest()[:10]}"
+        state["pending_open_opportunity_id"] = pending_id
+        state["pending_open_started_utc"] = "2026-01-01T13:01:05.900000+00:00"
+        existing_live = live_position()
+        added_live = SimpleNamespace(
+            ticket=7002,
+            identifier=7002,
+            symbol="XAUUSD",
+            magic=s24.EXPECTED_S24_MAGIC,
+            comment=comment,
+            type=s24.ORDER_TYPE_BUY,
+            volume=0.01,
+            open_price=2065.0,
+            open_time=int(pd.Timestamp("2026-01-01T13:01:05Z").timestamp()),
+        )
+        runner.executor = SimpleNamespace(
+            get_positions=lambda *_args: [existing_live, added_live],
+            get_orders=lambda *_args: [],
+            confirm_position_absent=lambda *_args: False,
+        )
+
+        self.assertTrue(runner._sync_strategy(strategy))
+        self.assertEqual([row["position_identifier"] for row in state["basket"]], [7001, 7002])
+        self.assertIsNone(state["pending_open_opportunity_id"])
+        self.assertTrue(any(
+            event == "position_lifecycle_recovered"
+            and row.get("reason") == "core_crash_after_fill_adopted"
+            and row.get("side") == "LONG"
+            and row.get("lot") == 0.01
+            and row.get("entry_price") == 2065.0
+            for event, row in rows
+        ))
+
+    def test_core_restart_rejects_fill_from_second_before_submission(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        existing = persisted_position()
+        state["basket"] = [existing]
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        pending_id = f"s24-open:{strategy['id']}:{s24.dt_text(signal)}:LONG:2"
+        comment = f"s24_no_adverse:{s24.hashlib.sha256(pending_id.encode('utf-8')).hexdigest()[:10]}"
+        state["pending_open_opportunity_id"] = pending_id
+        state["pending_open_started_utc"] = "2026-01-01T13:01:05.900000+00:00"
+        added_live = SimpleNamespace(
+            ticket=7002,
+            identifier=7002,
+            symbol="XAUUSD",
+            magic=s24.EXPECTED_S24_MAGIC,
+            comment=comment,
+            type=s24.ORDER_TYPE_BUY,
+            volume=0.01,
+            open_price=2065.0,
+            open_time=int(pd.Timestamp("2026-01-01T13:01:04Z").timestamp()),
+        )
+
+        adopted = runner._recover_pending_open_fill(
+            strategy,
+            [live_position(), added_live],
+            orders_available=True,
+            orders=[],
+        )
+
+        self.assertFalse(adopted)
+        self.assertEqual(state["basket"], [existing])
+
+        state["pending_open_started_utc"] = "2026-01-01T13:01:05.900000"
+        added_live.open_time = int(pd.Timestamp("2026-01-01T13:01:05Z").timestamp())
+        adopted = runner._recover_pending_open_fill(
+            strategy,
+            [live_position(), added_live],
+            orders_available=True,
+            orders=[],
+        )
+
+        self.assertFalse(adopted)
+        self.assertEqual(state["basket"], [existing])
+
+    def test_core_restart_rejects_fractional_signal_bar_identity(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        strategy = params["strategies"][0]
+        state = runner._st(strategy)
+        existing = persisted_position()
+        state["basket"] = [existing]
+        signal = pd.Timestamp("2026-01-01T13:00:00.500000Z")
+        pending_id = f"s24-open:{strategy['id']}:{s24.dt_text(signal)}:LONG:2"
+        comment = f"s24_no_adverse:{s24.hashlib.sha256(pending_id.encode('utf-8')).hexdigest()[:10]}"
+        state["pending_open_opportunity_id"] = pending_id
+        state["pending_open_started_utc"] = "2026-01-01T13:02:59.900000+00:00"
+        added_live = SimpleNamespace(
+            ticket=7002, identifier=7002, symbol="XAUUSD",
+            magic=s24.EXPECTED_S24_MAGIC, comment=comment,
+            type=s24.ORDER_TYPE_BUY, volume=0.01, open_price=2065.0,
+            open_time=int(pd.Timestamp("2026-01-01T13:03:01Z").timestamp()),
+        )
+
+        adopted = runner._recover_pending_open_fill(
+            strategy, [live_position(), added_live], orders_available=True, orders=[]
+        )
+
+        self.assertFalse(adopted)
+        self.assertEqual(state["basket"], [existing])
+        self.assertEqual(state["pending_open_opportunity_id"], pending_id)
 
     def test_core_close_identity_partial_state_fails_closed(self):
         params = params_copy()
@@ -609,10 +747,20 @@ class S24SafetyRegressionTests(unittest.TestCase):
         runner._save_state = lambda: None
         v206_reconciliations = []
         runner.v206_lane.reconcile_without_quote = lambda _cause: v206_reconciliations.append(True)
+        sync_calls = []
+        original_sync = runner._sync_strategy
+
+        def record_sync(strat, *, allow_protection_repair=True):
+            sync_calls.append((strat["id"], allow_protection_repair))
+            return original_sync(strat, allow_protection_repair=allow_protection_repair)
+
+        runner._sync_strategy = record_sync
 
         runner.run_once()
 
         self.assertEqual(v206_reconciliations, [True])
+        self.assertTrue(sync_calls)
+        self.assertTrue(all(not allow_repair for _strategy_id, allow_repair in sync_calls))
         state = runner._st(strategy)
         self.assertEqual(state["sync_block_reason"], "runtime_quote_clock_invalid")
         self.assertIsNone(state["last_evaluated_bar"])
@@ -704,6 +852,36 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(restored["open_time_epoch"], opened)
         self.assertEqual(restored["entry_time_utc"], "2026-01-01T13:00:00+00:00")
         self.assertEqual(restored["timeout_at_utc"], "2026-01-01T13:30:00+00:00")
+
+    def test_v206_quote_less_reconciliation_never_mutates_broker_protection(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner.state["v206"] = default_v206_state()
+        runner.state["v206"]["migration_pending"] = False
+        lane = runner.v206_lane
+        live = SimpleNamespace(
+            ticket=8206, identifier=8206, symbol="XAUUSD", magic=240206,
+            comment="s24_v206", type=s24.ORDER_TYPE_BUY, volume=0.01,
+            open_price=2064.0, open_time=1767272400, sl=2059.0, tp=0.0,
+        )
+        lane.state["basket"] = [{
+            "ticket": 8206, "position_identifier": 8206, "side": "LONG", "lot": 0.01,
+            "entry_price": 2064.0, "entry_time_utc": "2026-01-01T13:00:00+00:00",
+            "open_time_epoch": 1767272400, "owner_symbol": "XAUUSD", "owner_magic": 240206,
+            "owner_comment": "s24_v206", "signal_bar_time": "2026-01-01T12:59:00+00:00",
+            "timeout_at_utc": "2026-01-01T13:30:00+00:00", "fixed_stop": 2059.0, "target": 2069.0,
+        }]
+        runner.executor = RecordingExecutor(positions=[live], orders=[])
+        runner.executor.repair_r1_position = lambda **_kwargs: self.fail(
+            "quote-less reconciliation must be broker read-only"
+        )
+        runner._save_state = lambda: None
+
+        lane.reconcile_without_quote("stale_quote_time")
+
+        self.assertEqual(lane.state["blocked_reason"], "v206_quote_clock_invalid")
+        self.assertEqual(lane.state["blocked_details"]["cause"], "stale_quote_time")
 
     def test_invalid_active_core_peak_is_normalized_for_conservative_rebuild(self):
         state = {"basket": [persisted_position()], "basket_peak_pnl_usd": "broken"}
@@ -1279,6 +1457,52 @@ class S24SafetyRegressionTests(unittest.TestCase):
         self.assertEqual(executor.open_calls, 1)
         self.assertEqual(len(runner._st(strategy)["basket"]), 1)
         self.assertEqual(runner._st(strategy)["sync_block_reason"], "post_open_inventory_identity_invalid")
+
+    def test_post_open_requires_exact_returned_fill_tuple_before_persisting(self):
+        signal_time = pd.Timestamp.now(tz="UTC").floor("min") - pd.Timedelta(minutes=1)
+        row = pd.Series(
+            {"Open": 2064.0, "Close": 2064.0, "AskOpen": 2064.03},
+            name=signal_time,
+        )
+        cases = {
+            "wrong_side": {"type": s24.ORDER_TYPE_SELL},
+            "wrong_volume": {"volume": 0.02},
+            "invalid_fill": {"open_price": 0.0},
+            "missing_open_time": {"open_time": 0},
+        }
+        for label, override in cases.items():
+            with self.subTest(label=label):
+                params = params_copy()
+                params["live_trading_enabled"] = True
+                runner = s24.S24NoAdverseRunner(params)
+                runner.state = runner._default_state()
+                strategy = params["strategies"][0]
+
+                class MismatchedFillExecutor(RecordingExecutor):
+                    def open_position(self, *_args, **kwargs):
+                        self.open_calls += 1
+                        position = live_position()
+                        position.ticket = 9001
+                        position.identifier = 9901
+                        position.comment = kwargs["comment"]
+                        position.open_time = int((signal_time + pd.Timedelta(minutes=1)).timestamp())
+                        for name, value in override.items():
+                            setattr(position, name, value)
+                        self.positions = [position]
+                        self.last_open_identifier = 9901
+                        return 9001
+
+                executor = MismatchedFillExecutor(positions=[], orders=[])
+                runner.executor = executor
+                runner._save_state = lambda: None
+                runner._trade_row = lambda *_args, **_kwargs: None
+
+                runner._open_entry(strategy, "LONG", row, executor.get_symbol_info("XAUUSD"))
+
+                state = runner._st(strategy)
+                self.assertEqual(state["basket"], [])
+                self.assertIsNotNone(state["pending_open_opportunity_id"])
+                self.assertEqual(state["sync_block_reason"], "unresolved_open_action")
 
     def test_confirmed_or_unresolved_close_is_not_submitted_twice(self):
         params = params_copy()
@@ -1894,6 +2118,9 @@ class S24SafetyRegressionTests(unittest.TestCase):
         params = params_copy()
         seed = s24.S24NoAdverseRunner(params)._default_state()
         strategy_id = params["strategies"][0]["id"]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        seed["strategies"].pop(params["strategies"][1]["id"])
         seed["strategies"][strategy_id].pop("last_closed_entry_signal_bars")
         original = s24.STATE_FILE
         with tempfile.TemporaryDirectory() as root:
@@ -1972,6 +2199,9 @@ class S24SafetyRegressionTests(unittest.TestCase):
         params = params_copy()
         seed = s24.S24NoAdverseRunner(params)._default_state()
         strategy_id = params["strategies"][0]["id"]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        seed["strategies"].pop(params["strategies"][1]["id"])
         active = seed["strategies"][strategy_id]
         for key in (
             "entry_retry_after_utc", "entry_retry_signal_bar", "entry_retry_reason",
@@ -2020,6 +2250,9 @@ class S24SafetyRegressionTests(unittest.TestCase):
         params = params_copy()
         seed = s24.S24NoAdverseRunner(params)._default_state()
         strategy = params["strategies"][0]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        seed["strategies"].pop(params["strategies"][1]["id"])
         active = seed["strategies"][strategy["id"]]
         active.pop("position_signal_identity_required")
         position = persisted_position()
@@ -2405,6 +2638,313 @@ class S24SafetyRegressionTests(unittest.TestCase):
         lane.state["blocked_details"] = {"ticket": 1}
         lane._block("v206_inventory_unavailable")
         self.assertEqual(lane.state["blocked_reason"], "v206_timeout_close_unconfirmed")
+
+    def test_v206_restart_rejects_fill_from_second_before_submission(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        lane._repair_if_needed = lambda *_args, **_kwargs: None
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        pending = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": signal.isoformat(),
+            "entry_due_utc": (signal + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": (signal + pd.Timedelta(minutes=3)).isoformat(),
+            "started_utc": "2026-01-01T13:01:05.900000+00:00",
+            "flat_confirmations": 0,
+            "lot": 0.01,
+            "fixed_stop": 2059.0,
+            "owner_symbol": "XAUUSD",
+            "owner_magic": 240206,
+            "owner_comment": "s24_v206",
+        }
+        position = SimpleNamespace(
+            ticket=8206,
+            identifier=9206,
+            symbol="XAUUSD",
+            magic=240206,
+            comment="s24_v206",
+            type=s24.ORDER_TYPE_BUY,
+            volume=0.01,
+            open_price=2064.0,
+            open_time=int(pd.Timestamp("2026-01-01T13:01:04Z").timestamp()),
+            sl=2059.0,
+            tp=2069.0,
+        )
+
+        lane._adopt(position, pending)
+
+        self.assertEqual(lane.state["basket"], [])
+        self.assertEqual(lane.state["blocked_reason"], "v206_broker_open_time_unavailable")
+
+        lane.state["blocked_reason"] = None
+        lane.state["blocked_details"] = {}
+        pending["started_utc"] = "2026-01-01T13:01:05.900000"
+        position.open_time = int(pd.Timestamp("2026-01-01T13:01:05Z").timestamp())
+        lane._adopt(position, pending)
+
+        self.assertEqual(lane.state["basket"], [])
+        self.assertEqual(lane.state["blocked_reason"], "v206_pending_open_state_invalid")
+
+    def test_v206_restart_adoption_emits_complete_entry_evidence(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        lane.state["migration_pending"] = False
+        lane.state["migration_flat_confirmations"] = 3
+        lane.state["blocked_reason"] = None
+        lane.state["blocked_details"] = {}
+        lane._repair_if_needed = lambda *_args, **_kwargs: True
+        rows = []
+        lane._log = lambda event, **kwargs: rows.append((event, kwargs))
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        lane.state["pending_open"] = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": signal.isoformat(),
+            "entry_due_utc": (signal + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": (signal + pd.Timedelta(minutes=3)).isoformat(),
+            "started_utc": "2026-01-01T13:01:05.900000+00:00",
+            "flat_confirmations": 0,
+            "lot": 0.01,
+            "fixed_stop": 2059.0,
+            "owner_symbol": "XAUUSD",
+            "owner_magic": 240206,
+            "owner_comment": "s24_v206",
+        }
+        position = SimpleNamespace(
+            ticket=8206,
+            identifier=9206,
+            symbol="XAUUSD",
+            magic=240206,
+            comment="s24_v206",
+            type=s24.ORDER_TYPE_BUY,
+            volume=0.01,
+            open_price=2064.0,
+            open_time=int(pd.Timestamp("2026-01-01T13:01:05Z").timestamp()),
+            sl=2059.0,
+            tp=2069.0,
+        )
+        runner.executor = RecordingExecutor(positions=[position], orders=[])
+
+        self.assertTrue(lane._sync(pd.Timestamp("2026-01-01T13:01:06Z"), None))
+
+        self.assertEqual(len(lane.state["basket"]), 1)
+        self.assertTrue(any(
+            event == "v206_entry_recovered"
+            and row.get("opportunity_id") == f"v206:{signal.isoformat()}:LONG"
+            and row.get("side") == "LONG"
+            and row.get("lot") == 0.01
+            and row.get("entry_price") == 2064.0
+            for event, row in rows
+        ))
+
+    def test_v206_restart_rejects_fill_after_canonical_expiry(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        lane._repair_if_needed = lambda *_args, **_kwargs: True
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        expiry = signal + pd.Timedelta(minutes=3)
+        pending = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": signal.isoformat(),
+            "entry_due_utc": (signal + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": expiry.isoformat(),
+            "started_utc": "2026-01-01T13:02:59.900000+00:00",
+            "flat_confirmations": 0,
+            "lot": 0.01,
+            "fixed_stop": 2059.0,
+            "owner_symbol": "XAUUSD",
+            "owner_magic": 240206,
+            "owner_comment": "s24_v206",
+        }
+        position = SimpleNamespace(
+            ticket=8206, identifier=9206, symbol="XAUUSD", magic=240206,
+            comment="s24_v206", type=s24.ORDER_TYPE_BUY, volume=0.01,
+            open_price=2064.0, open_time=int((expiry + pd.Timedelta(seconds=1)).timestamp()),
+            sl=2059.0, tp=2069.0,
+        )
+
+        lane._adopt(position, pending)
+
+        self.assertEqual(lane.state["basket"], [])
+        self.assertEqual(lane.state["blocked_reason"], "v206_broker_open_time_unavailable")
+
+    def test_v206_pending_signal_rejects_non_explicit_utc_identity(self):
+        params = params_copy()
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        signal = pd.Timestamp("2026-01-01T13:00:00Z")
+        pending = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": "2026-01-01T13:00:00",
+            "entry_due_utc": "2026-01-01T13:01:00",
+            "entry_expiry_utc": "2026-01-01T13:03:00",
+            "fixed_stop": 2059.0,
+            "retry_after_utc": None,
+        }
+
+        self.assertEqual(lane._pending_signal_error(pending), "identity_or_clock_invalid")
+
+        fractional = pd.Timestamp("2026-01-01T13:00:00.500000Z")
+        pending.update({
+            "opportunity_id": f"v206:{fractional.isoformat()}:LONG",
+            "signal_bar_time": fractional.isoformat(),
+            "entry_due_utc": (fractional + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": (fractional + pd.Timedelta(minutes=3)).isoformat(),
+        })
+        self.assertEqual(lane._pending_signal_error(pending), "identity_or_clock_invalid")
+
+    def test_v206_confirmed_open_transitions_pending_to_basket_atomically(self):
+        params = params_copy()
+        params["live_trading_enabled"] = True
+        params["shadow_forward_enabled"] = False
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        lane.state["migration_pending"] = False
+        lane.state["migration_flat_confirmations"] = 3
+        lane.state["blocked_reason"] = None
+        lane.state["blocked_details"] = {}
+        lane._repair_if_needed = lambda *_args, **_kwargs: True
+        rows = []
+        lane._log = lambda event, **kwargs: rows.append((event, kwargs))
+        quote_time = pd.Timestamp.now(tz="UTC").floor("s")
+        signal = quote_time.floor("min") - pd.Timedelta(minutes=1)
+        lane.state["pending_signal"] = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": signal.isoformat(),
+            "entry_due_utc": (signal + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": (signal + pd.Timedelta(minutes=3)).isoformat(),
+            "fixed_stop": 2059.0,
+        }
+        position = SimpleNamespace(
+            ticket=8206,
+            identifier=9206,
+            symbol="XAUUSD",
+            magic=240206,
+            comment="s24_v206",
+            type=s24.ORDER_TYPE_BUY,
+            volume=0.01,
+            open_price=2064.0,
+            open_time=int(quote_time.timestamp()),
+            sl=2059.0,
+            tp=2069.0,
+        )
+
+        class ConfirmedExecutor(RecordingExecutor):
+            def open_r1_position(self, *_args, **_kwargs):
+                self.open_calls += 1
+                return SimpleNamespace(
+                    status="CONFIRMED",
+                    ticket=8206,
+                    identifier=9206,
+                    deal=10206,
+                    fill=2064.5,
+                    open_time=int((quote_time + pd.Timedelta(seconds=1)).timestamp()),
+                    reason="",
+                    raw_response="OK|R1",
+                )
+
+        executor = ConfirmedExecutor(positions=[position], orders=[])
+        info = executor.get_symbol_info("XAUUSD")
+        info.quote_time_msc = int(quote_time.timestamp() * 1000)
+        runner.executor = executor
+
+        lane._attempt_pending_signal(info, quote_time)
+
+        self.assertEqual(executor.open_calls, 1)
+        self.assertIsNone(lane.state["pending_signal"])
+        self.assertIsNone(lane.state["pending_open"])
+        self.assertEqual(len(lane.state["basket"]), 1)
+        confirmed_rows = [row for event, row in rows if event == "v206_entry_confirmed"]
+        self.assertEqual(len(confirmed_rows), 1)
+        self.assertEqual(confirmed_rows[0]["entry_price"], position.open_price)
+        self.assertEqual(
+            confirmed_rows[0]["executable_at"],
+            pd.Timestamp(position.open_time, unit="s", tz="UTC").isoformat(),
+        )
+
+    def test_v206_confirmed_fill_is_logged_when_protection_remains_pending(self):
+        params = params_copy()
+        params["live_trading_enabled"] = True
+        params["shadow_forward_enabled"] = False
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        runner._save_state = lambda: None
+        runner._trade_row = lambda *_args, **_kwargs: None
+        lane = runner.v206_lane
+        st = lane.state
+        st["migration_pending"] = False
+        st["migration_flat_confirmations"] = 3
+        st["blocked_reason"] = None
+        st["blocked_details"] = {}
+        rows = []
+        lane._log = lambda event, **kwargs: rows.append((event, kwargs))
+        quote_time = pd.Timestamp.now(tz="UTC").floor("s")
+        signal = quote_time.floor("min") - pd.Timedelta(minutes=1)
+        st["pending_signal"] = {
+            "opportunity_id": f"v206:{signal.isoformat()}:LONG",
+            "side": "LONG",
+            "signal_bar_time": signal.isoformat(),
+            "entry_due_utc": (signal + pd.Timedelta(minutes=1)).isoformat(),
+            "entry_expiry_utc": (signal + pd.Timedelta(minutes=3)).isoformat(),
+            "fixed_stop": 2059.0,
+        }
+        position = SimpleNamespace(
+            ticket=8206, identifier=9206, symbol="XAUUSD", magic=240206,
+            comment="s24_v206", type=s24.ORDER_TYPE_BUY, volume=0.01,
+            open_price=2064.0, open_time=int(quote_time.timestamp()),
+            sl=2059.0, tp=0.0,
+        )
+
+        class RepairPendingExecutor(RecordingExecutor):
+            def open_r1_position(self, *_args, **_kwargs):
+                self.open_calls += 1
+                return SimpleNamespace(
+                    status="REPAIR_REQUIRED", ticket=8206, identifier=9206,
+                    deal=10206, fill=2064.0, open_time=int(quote_time.timestamp()),
+                    reason="tp_setup_failed_after_confirmed_fill", raw_response="RECOVER|R1_TP_REQUIRED",
+                )
+
+            def repair_r1_position(self, **_kwargs):
+                return SimpleNamespace(ok=False, status="FAILED", raw_response="ERR|REPAIR_R1_FAILED")
+
+        executor = RepairPendingExecutor(positions=[position], orders=[])
+        info = executor.get_symbol_info("XAUUSD")
+        info.quote_time_msc = int(quote_time.timestamp() * 1000)
+        runner.executor = executor
+
+        lane._attempt_pending_signal(info, quote_time)
+
+        self.assertEqual(len(lane.state["basket"]), 1)
+        self.assertEqual(lane.state["blocked_reason"], "v206_server_protection_repair_failed")
+        self.assertEqual(lane.state["last_decision"]["outcome"], "entry_confirmed_protection_pending")
+        self.assertTrue(any(
+            event == "v206_entry_confirmed"
+            and row.get("reason") == "protection_pending"
+            and row.get("deal_id") == 10206
+            for event, row in rows
+        ))
 
     def test_v206_atomic_close_guard_clears_no_fill_receipt_and_does_not_resubmit(self):
         params = params_copy()
@@ -3195,7 +3735,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
         runner.executor = s24.FakeExecutor(positions=[], orders=[])
         runner.executor.get_symbol_info = lambda _symbol: None
         runner._save_state = lambda: None
-        runner._sync_strategy = lambda _strat: True
+        runner._sync_strategy = lambda _strat, **_kwargs: True
         runner._set_sync_block = lambda *_args, **_kwargs: None
 
         def fail_after_mutation(_reason):

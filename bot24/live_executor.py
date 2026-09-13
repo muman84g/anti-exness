@@ -32,7 +32,7 @@ S24_CORE_COMMENT_PREFIX = "s24_no_adverse"
 S24_RAD_MAGIC = 240207
 S24_RAD_COMMENT_PREFIX = "s24_rad070"
 REQUIRED_SHARED_ACCOUNT_COMMANDS = {
-    "ECHO", "CAPS", "ACCOUNT", "INFO", "HIST", "OPEN", "OPEN_R1", "REPAIR_R1", "CLOSE_R1",
+    "ECHO", "CAPS", "ACCOUNT", "INFO", "HIST", "OPEN", "OPEN_R1", "REPAIR_R1", "REPAIR_FIXED", "CLOSE_R1",
     "POSITIONS", "POSITION", "ORDERS", "CLOSEDEAL", "CLOSE",
 }
 
@@ -130,6 +130,20 @@ class CloseResult:
         return self.success
 
 
+@dataclass
+class FixedRepairResult:
+    success: bool
+    status: str
+    raw_response: str
+    ticket: int = 0
+    identifier: int = 0
+    fill: float = 0.0
+    sl: float = 0.0
+    tp: float = 0.0
+    retcode: int | None = None
+    position_type: int | None = None
+
+
 class MT5Executor:
     def __init__(self) -> None:
         self.last_order_error: str | None = None
@@ -137,6 +151,7 @@ class MT5Executor:
         self.last_open_deal: int | None = None
         self.last_open_price: float | None = None
         self.last_open_time: int | None = None
+        self.last_open_protection_confirmed: bool | None = None
 
     def get_bridge_capabilities(self) -> dict[str, Any] | None:
         res = ea_bridge.send_command("CAPS|", timeout=10)
@@ -329,6 +344,7 @@ class MT5Executor:
         self.last_open_deal = None
         self.last_open_price = None
         self.last_open_time = None
+        self.last_open_protection_confirmed = None
         try:
             lot_value = float(lot)
             sl_value = float(sl)
@@ -374,29 +390,108 @@ class MT5Executor:
             f"OPEN|{symbol}|{int(order_type)}|{lot_value:.2f}|{sl_text}|{tp_text}|{magic_value}|{safe_comment}|{deviation_value}|{expected_login_value}|{expected_server_value}|{expected_owned_positions_value}",
             timeout=15,
         )
-        if not res or not res.startswith("OK|"):
+        if not res or not (res.startswith("OK|") or res.startswith("RECOVER|RAD_PROTECTION_REQUIRED|")):
             self.last_order_error = res or "NO_RESPONSE"
             return None
         parts = res.split("|")
         try:
-            if len(parts) != 7:
-                raise ValueError(res)
-            ticket = _strict_int_text(parts[1])
-            identifier = _strict_int_text(parts[2])
-            deal = _strict_int_text(parts[3])
-            price = float(parts[4])
-            open_time = _strict_int_text(parts[5])
-            retcode = _strict_int_text(parts[6])
+            recovery = parts[0] == "RECOVER"
+            if recovery:
+                if (
+                    len(parts) != 9 or parts[1] != "RAD_PROTECTION_REQUIRED"
+                    or magic_value != S24_RAD_MAGIC or sl_value <= 0.0 or tp_value <= 0.0
+                ):
+                    raise ValueError(res)
+                offset = 2
+                modify_retcode = _strict_int_text(parts[8])
+                if modify_retcode < 0:
+                    raise ValueError(res)
+            else:
+                if len(parts) != 7:
+                    raise ValueError(res)
+                offset = 1
+            ticket = _strict_int_text(parts[offset])
+            identifier = _strict_int_text(parts[offset + 1])
+            deal = _strict_int_text(parts[offset + 2])
+            price = float(parts[offset + 3])
+            open_time = _strict_int_text(parts[offset + 4])
+            retcode = _strict_int_text(parts[offset + 5])
             if ticket <= 0 or identifier <= 0 or deal <= 0 or not math.isfinite(price) or price <= 0.0 or open_time <= 0 or retcode != TRADE_RETCODE_DONE:
                 raise ValueError(res)
             self.last_open_identifier = identifier
             self.last_open_deal = deal
             self.last_open_price = price
             self.last_open_time = open_time
+            self.last_open_protection_confirmed = not recovery
+            if recovery:
+                self.last_order_error = res
             return ticket
         except (TypeError, ValueError, OverflowError, IndexError):
             self.last_order_error = f"MALFORMED_OK:{res}"
             return None
+
+    def repair_fixed_position(
+        self,
+        *,
+        ticket: int,
+        expected_login: int,
+        expected_server: str,
+        expected_symbol: str,
+        expected_magic: int,
+        expected_comment: str,
+        expected_identifier: int,
+        stop_distance: float,
+        target_distance: float,
+        digits: int,
+    ) -> FixedRepairResult:
+        safe_comment = str(expected_comment).replace("|", "_").replace(",", "_")[:31]
+        try:
+            valid = (
+                int(ticket) > 0 and int(expected_login) > 0 and str(expected_server)
+                and str(expected_symbol) == "XAUUSD" and int(expected_magic) == S24_RAD_MAGIC
+                and _valid_rad_comment(safe_comment, allow_legacy=False)
+                and math.isclose(float(stop_distance), 18.0, rel_tol=0.0, abs_tol=1e-12)
+                and math.isclose(float(target_distance), 30.0, rel_tol=0.0, abs_tol=1e-12)
+                and int(expected_identifier) > 0 and 0 <= int(digits) <= 10
+                and all(token not in str(expected_server) for token in ("|", ",", "\r", "\n"))
+            )
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            return FixedRepairResult(False, "INVALID_REQUEST", "ERR|INVALID_REPAIR_FIXED_REQUEST")
+        command = (
+            f"REPAIR_FIXED|{int(ticket)}|{int(expected_login)}|{expected_server}|{expected_symbol}|"
+            f"{int(expected_magic)}|{safe_comment}|{int(expected_identifier)}|"
+            f"{float(stop_distance):.{int(digits)}f}|{float(target_distance):.{int(digits)}f}"
+        )
+        response = ea_bridge.send_command(command, timeout=15)
+        if not response or not response.startswith("OK|FIXED_REPAIRED|"):
+            return FixedRepairResult(False, "FAILED", response or "NO_RESPONSE")
+        parts = response.split("|")
+        try:
+            if len(parts) != 9:
+                raise ValueError(response)
+            result = FixedRepairResult(
+                True, "CONFIRMED", response,
+                ticket=_strict_int_text(parts[2]), identifier=_strict_int_text(parts[3]),
+                fill=float(parts[4]), sl=float(parts[5]), tp=float(parts[6]),
+                retcode=_strict_int_text(parts[7]), position_type=_strict_int_text(parts[8]),
+            )
+            expected_sl = result.fill - 18.0 if result.position_type == ORDER_TYPE_BUY else result.fill + 18.0
+            expected_tp = result.fill + 30.0 if result.position_type == ORDER_TYPE_BUY else result.fill - 30.0
+            tolerance = 0.5 * (10.0 ** -int(digits))
+            if (
+                result.ticket != int(ticket) or result.identifier != int(expected_identifier)
+                or result.position_type not in {ORDER_TYPE_BUY, ORDER_TYPE_SELL}
+                or result.retcode not in {TRADE_RETCODE_DONE, 10025}
+                or not all(math.isfinite(value) and value > 0.0 for value in (result.fill, result.sl, result.tp))
+                or not math.isclose(result.sl, expected_sl, rel_tol=0.0, abs_tol=tolerance)
+                or not math.isclose(result.tp, expected_tp, rel_tol=0.0, abs_tol=tolerance)
+            ):
+                raise ValueError(response)
+            return result
+        except (TypeError, ValueError, OverflowError, IndexError):
+            return FixedRepairResult(False, "MALFORMED_OK", response)
 
     def open_r1_position(
         self,

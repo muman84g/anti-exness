@@ -20,13 +20,68 @@ M30 buckets from confirmed M1 history, uses the frozen six-bar score and 0.70
 threshold, permits one 0.01-lot position, and applies an 18.0 price-distance SL,
 30.0 price-distance TP, and 360-minute maximum hold.  The existing core and
 v206 ownership, signals, sizing and exits are unchanged.  The matching bridge
-version is `2026-09-10-s24-rad070-v14`; compile and attach that EA before the
+version is `2026-09-14-s24-rad070-v20`; compile and attach that EA before the
 updated runner can pass capability preflight.
+
+RAD070 polls every five seconds, but creates a signal only from a newly
+completed M30 bucket. Entry may therefore differ from every-tick research when
+the live spread exceeds the 300-point guard or the broker slips the market
+fill. The initial protective order is anchored to the executable Ask for a
+Long and Bid for a Short. After the fill, bridge v20 recalculates and verifies
+SL 18.0 and TP 30.0 from the broker-confirmed fill. A failed modification
+returns the filled ticket/identifier; the runner durably adopts that owned
+position, blocks new RAD entries, and retries only the ownership-bound
+`REPAIR_FIXED` operation during reconciliation. Repair attempts use a durable
+30-second retry clock and raise the existing manual-attention path after three
+consecutive failures. Automatic repair stops at that boundary; an external
+exact protection correction can still be detected and clear the repair state.
+While repair is pending, new RAD entries remain blocked
+but an exactly reconciled owned position continues software basket-stop and
+maximum-hold monitoring. A restart between broker fill and basket persistence
+may adopt only one newly appeared position that exactly matches the durable
+pending OPEN identity, time window, ownership, side and lot. This applies to
+RAD070's first position and to the core lane's first/add fills; an existing core
+basket must also match live ownership exactly before the new fill is appended.
+For both core/RAD and v206 recovery, the broker open second may equal the
+truncated persisted submission second but may not precede it or exceed the
+canonical signal expiry second. Recovery clocks
+must carry an explicit zero UTC offset; timezone-less or non-UTC state is not
+used as signal, retry, or fill identity. The persisted signal bar must also be
+an exact M1 boundary; fractional-second identities cannot shift the release or
+expiry window. v206 converts pending-open into its owned basket through
+one validated state object, so the temporary basket-plus-pending shape is never
+re-read as durable corruption; restart adoption also records complete entry
+identity in the execution ledger. A broker-confirmed v206 fill is likewise
+recorded even when its post-fill target repair remains pending; protection
+status does not erase entry evidence. That record uses the re-queried broker
+position's fill and open time rather than an uncorroborated response echo.
+The 360-minute hold clock starts
+from broker-confirmed fill time and poll exits use the fresh broker quote clock;
+a quote timestamp before the fill fails closed. If confirmed-M1 history is
+temporarily unavailable, exact owned reconciliation and RAD's quote-clock
+target/stop/max-hold evaluation continue while new signal evaluation remains
+stopped. Persisted repair counts outside the reachable 0-3 range are rejected;
+if a valid repair cooldown survives without its matching entry block, the block
+is rebuilt before the cooldown can suppress another repair attempt.
+With live trading disabled, reconciliation may still verify the owned position,
+but it cannot submit `REPAIR_FIXED`; the repair remains durably deferred until
+live execution is explicitly enabled again.
+
+State generation v3 distinguishes the one supported pre-RAD v2 migration from
+later state loss. Only an exact v2 core-only file receives a fresh RAD
+container. Once v3 is present, a missing or extra strategy container fails the
+whole bot closed instead of recreating signal-consumption state. The complete
+RAD nested state shape and the strict non-boolean generation marker are also
+required. The root version is likewise a strict non-boolean integer, so string,
+floating-point, partial RAD signal, or partial repair identity cannot be
+default-filled into an apparently current state. A partial current-v3 core
+container is preserved in per-lane quarantine and replaced only by a blocked
+default; legacy field completion is limited to the explicit v2 migration.
 
 On 2026-09-13 the user explicitly accepted live-order routing for RAD070 with
 `live_trading_enabled=true` and `shadow_forward_enabled=false`.  That approval
 does not collapse the deployment boundary: a GitHub push alone does not pull
-the source on CentOS, compile/attach bridge v14, recreate the container, or
+the source on CentOS, compile/attach bridge v20, recreate the container, or
 prove that the lane is active at runtime.
 
 Close-ledger re-audit (2026-09-04): replay re-syncs readable evidence before
@@ -128,7 +183,7 @@ This installation deliberately uses the fixed local credentials in
 credential channel. Keep both files private and synchronized when the account
 connection is intentionally changed.
 
-The local `2026-09-02-s24-core-atomic-v13` bridge requires atomic account,
+The local `2026-09-14-s24-rad070-v20` bridge requires atomic account,
 hedging-mode, permission, inventory and exact ownership guards for both the
 existing core `OPEN`/`CLOSE` path and v206 `OPEN_R1`/`CLOSE_R1`. New core
 positions receive a durable opportunity-derived comment under the
@@ -195,12 +250,12 @@ of being adopted. Python ownership, executor OPEN/CLOSE policy, and the MQL5
 bridge apply the same boundary.
 All numeric fields on execution-bearing MQL5 commands are lexically validated
 before conversion. Empty, signed, exponent, non-decimal, or trailing-junk text
-is rejected before OPEN, CLOSE, R1 repair, or any trade API call.
+is rejected before OPEN, CLOSE, R1/fixed-protection repair, or any trade API call.
 The request-envelope expiry is also validated as unsigned integer text before
 conversion, so a malformed expiry never reaches command dispatch.
 Query commands use exact arity and strict numeric fields. `INFO` and `HIST`
 are pinned to XAUUSD, `HIST` is pinned to M1, and inventory queries accept only
-the core or v206 magic, preventing altered payloads from supplying another
+the core, v206 or RAD070 magic, preventing altered payloads from supplying another
 instrument's quote or bar stream to the bot.
 Exact OPEN rejections with MT5 retcode 10018, 10026 or 10027 are cleared as
 definitive no-fill only when both order and deal receipts are zero and complete
@@ -313,8 +368,10 @@ from a fresh broker quote; the outage cannot originate a new TP/SL/max-hold
 decision.
 If the INFO quote itself is temporarily unavailable, both core and v206 still
 run quote-less exact position/order/CLOSEDEAL reconciliation without advancing
-any time-based lifecycle. A recoverable quote block is added only after that
-sync and cannot replace an existing non-recoverable ambiguity. A quarantined
+any time-based lifecycle. This path is broker read-only: it may restore durable
+fill identity or consume an exactly proven close, but cannot submit a RAD070 or
+v206 protection repair until an admissible quote clock returns. A recoverable
+quote block is added only after that sync and cannot replace an existing non-recoverable ambiguity. A quarantined
 v206 snapshot containing a basket or in-flight OPEN/CLOSE receipt cannot pass
 the migration gate on flat confirmations alone.
 
@@ -331,6 +388,12 @@ state is already visible. Deal-based exact replay is idempotent, while a
 conflicting replay fails closed. Full-close reconciliation also preserves every
 originating entry signal-bar identity before clearing the basket, preventing a
 completed signal from being reused after restart.
+Before any newly returned OPEN position is admitted to durable state, the
+post-submit inventory must match the returned ticket and position identifier,
+the generated comment, requested side and lot, and a positive finite broker
+fill price and open time. A partial or contradictory fill tuple remains under
+the durable pending-OPEN receipt and fails closed instead of creating a state
+row that only a later poll could reject.
 The same state-first rule applies when atomic inventory proof establishes that
 an OPEN was not filled, and when a CLOSE is retryably rejected as market-closed
 or trade-permission-disabled.  Pending submission receipts are cleared and the
@@ -367,6 +430,11 @@ The process log uses size-based rotation at 10 MiB with five backups. Repeating
 data/synchronization diagnostics are coalesced and summarized every 300 seconds,
 preventing a persistent outage from growing `s24_bot.log` without bound while
 retaining the first event and repeat count.
+
+All bot24 test classes that construct the runner redirect the canonical state,
+passive log and passive state roots to per-test temporary directories. Test
+discovery therefore cannot depend on or normalize the configured runtime
+artifacts.
 
 The bridge compiles with `OPEN_R1`,
 `REPAIR_R1`, and `CLOSE_R1` at 0 errors / 0 warnings. Its response envelope,

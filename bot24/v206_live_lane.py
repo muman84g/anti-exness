@@ -99,6 +99,23 @@ def _utc(value: Any) -> pd.Timestamp | None:
     return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
 
 
+def _explicit_utc(value: Any) -> pd.Timestamp | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except Exception:
+        return None
+    if (
+        pd.isna(stamp)
+        or stamp.tzinfo is None
+        or stamp.utcoffset() is None
+        or stamp.utcoffset().total_seconds() != 0
+    ):
+        return None
+    return stamp.tz_convert("UTC")
+
+
 def _text(value: Any) -> str:
     stamp = _utc(value)
     return "" if stamp is None else stamp.isoformat()
@@ -524,10 +541,10 @@ class V206LiveLane:
         if not isinstance(pending, dict):
             return "not_object"
         side = str(pending.get("side") or "")
-        signal_bar = _utc(pending.get("signal_bar_time"))
-        due = _utc(pending.get("entry_due_utc"))
-        expiry = _utc(pending.get("entry_expiry_utc"))
-        started = _utc(pending.get("started_utc"))
+        signal_bar = _explicit_utc(pending.get("signal_bar_time"))
+        due = _explicit_utc(pending.get("entry_due_utc"))
+        expiry = _explicit_utc(pending.get("entry_expiry_utc"))
+        started = _explicit_utc(pending.get("started_utc"))
         flat_confirmations = pending.get("flat_confirmations")
         expected_id = f"v206:{signal_bar.isoformat()}:{side}" if signal_bar is not None else ""
         if (
@@ -535,6 +552,7 @@ class V206LiveLane:
             or side not in {"LONG", "SHORT"}
             or not all(isinstance(pending.get(key), str) for key in ("signal_bar_time", "entry_due_utc", "entry_expiry_utc", "started_utc"))
             or signal_bar is None or due is None or expiry is None or started is None
+            or signal_bar != signal_bar.floor("min")
             or due != signal_bar + pd.Timedelta(minutes=1)
             or expiry != due + pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 2)))
             or started < due or started > expiry
@@ -557,7 +575,8 @@ class V206LiveLane:
             return "identity_or_clock_invalid"
         return None
 
-    def _adopt(self, position: Any, pending: dict[str, Any]) -> None:
+    def _adopt(self, position: Any, pending: dict[str, Any], *, allow_protection_repair: bool = True) -> None:
+        st = self.state
         try:
             pending_error = self._pending_open_error(pending)
         except (TypeError, ValueError, OverflowError):
@@ -580,8 +599,8 @@ class V206LiveLane:
         live_time = pd.Timestamp(open_time, unit="s", tz="UTC") if open_time > 0 else None
         if (
             live_time is None or started is None or expiry is None
-            or live_time < started - pd.Timedelta(seconds=5)
-            or live_time > expiry + pd.Timedelta(seconds=30)
+            or live_time < started.floor("s")
+            or live_time > expiry.floor("s")
         ):
             self._block("v206_broker_open_time_unavailable", ticket=int(position.ticket))
             return
@@ -601,7 +620,7 @@ class V206LiveLane:
         ):
             self._block("v206_pending_fill_identity_invalid", ticket=ticket, identifier=identifier)
             return
-        self.state["basket"] = [{
+        st["basket"] = [{
             "ticket": ticket,
             "position_identifier": identifier,
             "side": side,
@@ -617,14 +636,14 @@ class V206LiveLane:
             "fixed_stop": fixed_stop,
             "target": float(getattr(position, "tp", 0.0) or 0.0),
         }]
-        self.state["pending_open"] = None
+        st["pending_open"] = None
         self._save()
         if not math.isclose(live_stop, fixed_stop, rel_tol=0.0, abs_tol=tolerance):
             self._block("v206_fixed_stop_missing_or_changed", ticket=ticket, expected_stop=fixed_stop, observed_stop=live_stop)
             return
-        self._repair_if_needed(position)
+        self._repair_if_needed(position, allow_repair=allow_protection_repair)
 
-    def _repair_if_needed(self, position: Any) -> bool:
+    def _repair_if_needed(self, position: Any, *, allow_repair: bool = True) -> bool:
         basket = list(self.state.get("basket") or [])
         if len(basket) != 1:
             return False
@@ -666,6 +685,10 @@ class V206LiveLane:
             if changed and prior_block != "v206_server_protection_repair_failed":
                 self._save()
             return True
+        if not allow_repair:
+            # Quote-less reconciliation may recover durable identity, but it
+            # must not mutate broker protection without an admissible quote.
+            return False
         result = self.runner.executor.repair_r1_position(
             ticket=int(position.ticket), expected_login=int(MT5_LOGIN), expected_server=str(MT5_SERVER),
             expected_symbol=self.symbol, expected_magic=int(self.cfg["magic"]),
@@ -910,7 +933,21 @@ class V206LiveLane:
                 self._block("v206_orders_unavailable")
                 return False
             if positions:
-                self._adopt(positions[0], pending)
+                self._adopt(positions[0], pending, allow_protection_repair=time_actions_allowed)
+                if self.state.get("basket"):
+                    recovered = self.state["basket"][0]
+                    self._log(
+                        "v206_entry_recovered",
+                        opportunity_id=str(pending["opportunity_id"]),
+                        ticket=int(recovered["ticket"]),
+                        position_identifier=int(recovered["position_identifier"]),
+                        side=str(recovered["side"]),
+                        lot=float(recovered["lot"]),
+                        entry_price=float(recovered["entry_price"]),
+                        price=float(recovered["entry_price"]),
+                        signal_bar_time=str(recovered["signal_bar_time"]),
+                        executable_at=str(recovered["entry_time_utc"]),
+                    )
                 return bool(self.state.get("basket")) and not bool(self.state.get("blocked_reason"))
             pending["flat_confirmations"] = int(pending.get("flat_confirmations", 0)) + 1
             if pending["flat_confirmations"] >= FLAT_CONFIRMATIONS:
@@ -977,7 +1014,7 @@ class V206LiveLane:
                     ),
                 )
                 self._save()
-            if not self._repair_if_needed(live):
+            if not self._repair_if_needed(live, allow_repair=time_actions_allowed):
                 return False
             # An atomic guard is definitive no-fill, so pending_close is
             # cleared at the rejection site.  Keep reconciliation active but
@@ -1230,16 +1267,17 @@ class V206LiveLane:
         if not isinstance(pending, dict):
             return "not_object"
         side = str(pending.get("side") or "")
-        signal_bar = _utc(pending.get("signal_bar_time"))
-        due = _utc(pending.get("entry_due_utc"))
-        expiry = _utc(pending.get("entry_expiry_utc"))
-        retry_after = _utc(pending.get("retry_after_utc"))
+        signal_bar = _explicit_utc(pending.get("signal_bar_time"))
+        due = _explicit_utc(pending.get("entry_due_utc"))
+        expiry = _explicit_utc(pending.get("entry_expiry_utc"))
+        retry_after = _explicit_utc(pending.get("retry_after_utc"))
         expected_id = f"v206:{signal_bar.isoformat()}:{side}" if signal_bar is not None else ""
         if (
             not isinstance(pending.get("side"), str)
             or side not in {"LONG", "SHORT"}
             or not all(isinstance(pending.get(key), str) for key in ("signal_bar_time", "entry_due_utc", "entry_expiry_utc"))
             or signal_bar is None or due is None or expiry is None
+            or signal_bar != signal_bar.floor("min")
             or due != signal_bar + pd.Timedelta(minutes=1)
             or expiry != due + pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 2)))
             or str(pending.get("opportunity_id") or "") != expected_id
@@ -1262,14 +1300,14 @@ class V206LiveLane:
         if error is not None:
             self._block("v206_pending_signal_state_invalid", cause=error)
             return
-        expiry = _utc(pending_signal["entry_expiry_utc"])
-        due = _utc(pending_signal["entry_due_utc"])
+        expiry = _explicit_utc(pending_signal["entry_expiry_utc"])
+        due = _explicit_utc(pending_signal["entry_due_utc"])
         if expiry is None or due is None:
             self._block("v206_pending_signal_state_invalid", cause="clock_missing")
             return
         if quote_time < due:
             return
-        retry_after = _utc(pending_signal.get("retry_after_utc"))
+        retry_after = _explicit_utc(pending_signal.get("retry_after_utc"))
         if retry_after is not None and quote_time < retry_after:
             return
         last_close = _utc(st.get("last_closed_at_utc"))
@@ -1278,7 +1316,7 @@ class V206LiveLane:
             and st.get("last_closed_side") == pending_signal.get("side")
             and due <= last_close
         ):
-            signal_bar = _utc(pending_signal.get("signal_bar_time"))
+            signal_bar = _explicit_utc(pending_signal.get("signal_bar_time"))
             st["last_consumed_signal_bar"] = (
                 signal_bar.isoformat() if signal_bar is not None else st.get("last_consumed_signal_bar")
             )
@@ -1466,14 +1504,19 @@ class V206LiveLane:
                 self._block("v206_post_open_returned_position_missing", ticket=int(result.ticket))
                 return
             self._adopt(matching[0], pending)
-            if self.state.get("basket") and not self.state.get("blocked_reason"):
+            if self.state.get("basket"):
+                confirmed = self.state["basket"][0]
                 st["entry_permission_reject_count"] = 0
-            if result.status == "CONFIRMED" and not self.state.get("blocked_reason"):
-                st["last_decision"] = {"signal_bar_time": pending["signal_bar_time"], "outcome": "entry_confirmed"}
-                self._log("v206_entry_confirmed", opportunity_id=pending["opportunity_id"], ticket=result.ticket,
-                          position_identifier=result.identifier, deal_id=result.deal, side=pending["side"],
-                          lot=float(self.cfg["lot"]), entry_price=result.fill, price=result.fill,
-                          signal_bar_time=pending["signal_bar_time"], executable_at=datetime.fromtimestamp(result.open_time, UTC).isoformat(),
+                protection_pending = bool(self.state.get("blocked_reason"))
+                st["last_decision"] = {
+                    "signal_bar_time": pending["signal_bar_time"],
+                    "outcome": "entry_confirmed_protection_pending" if protection_pending else "entry_confirmed",
+                }
+                self._log("v206_entry_confirmed", opportunity_id=pending["opportunity_id"], ticket=int(confirmed["ticket"]),
+                          position_identifier=int(confirmed["position_identifier"]), deal_id=result.deal, side=str(confirmed["side"]),
+                          lot=float(confirmed["lot"]), entry_price=float(confirmed["entry_price"]), price=float(confirmed["entry_price"]),
+                          signal_bar_time=str(confirmed["signal_bar_time"]), executable_at=str(confirmed["entry_time_utc"]),
+                          reason="protection_pending" if protection_pending else "",
                           note=result.raw_response)
                 self._save()
             return

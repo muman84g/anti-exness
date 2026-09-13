@@ -75,7 +75,10 @@ UTC = timezone.utc
 EXPECTED_S24_MAGIC = 200024
 EXPECTED_RAD_MAGIC = 240207
 EXPECTED_BRIDGE_NAME = "BotBridge_s24"
-EXPECTED_BRIDGE_VERSION = "2026-09-10-s24-rad070-v14"
+EXPECTED_BRIDGE_VERSION = "2026-09-14-s24-rad070-v20"
+S24_STATE_VERSION = 3
+RAD070_STATE_GENERATION = 1
+LEGACY_V2_STRATEGY_IDS = {"visual_no_adverse_c_target16"}
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
     "unresolved_open_action",
@@ -217,6 +220,25 @@ def parse_ts(value: Any) -> pd.Timestamp | None:
         return None
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def parse_explicit_utc_ts(value: Any) -> pd.Timestamp | None:
+    """Parse only timestamps that carry an explicit zero UTC offset."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if (
+        pd.isna(ts)
+        or ts.tzinfo is None
+        or ts.utcoffset() is None
+        or ts.utcoffset().total_seconds() != 0
+    ):
+        return None
     return ts.tz_convert("UTC")
 
 
@@ -997,7 +1019,8 @@ class S24NoAdverseRunner:
 
     def _default_state(self) -> dict[str, Any]:
         return {
-            "version": 2,
+            "version": S24_STATE_VERSION,
+            "rad070_state_generation": RAD070_STATE_GENERATION,
             "bot": "bot24",
             "strategy_id": self.params["strategy_id"],
             "last_saved_utc": None,
@@ -1036,6 +1059,8 @@ class S24NoAdverseRunner:
                     "entry_retry_signal_bar": None,
                     "entry_retry_reason": None,
                     "entry_permission_reject_count": 0,
+                    "protection_repair_retry_after_utc": None,
+                    "protection_repair_failure_count": 0,
                     "last_core_quote_time_utc": None,
                     "close_retry_after_utc": None,
                     "close_permission_reject_count": 0,
@@ -1158,15 +1183,25 @@ class S24NoAdverseRunner:
             return "sync_block_reason_invalid"
         if not isinstance(state.get("sync_block_details"), dict):
             return "sync_block_details_invalid"
-        for key in ("flat_clear_confirmation_count", "close_permission_reject_count", "entry_permission_reject_count", "time_close_stable_count"):
+        for key in (
+            "flat_clear_confirmation_count", "close_permission_reject_count",
+            "entry_permission_reject_count", "protection_repair_failure_count",
+            "time_close_stable_count",
+        ):
             value = state.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 return f"{key}_invalid"
+        protection_retry_after = parse_ts(state.get("protection_repair_retry_after_utc"))
+        protection_failure_count = int(state.get("protection_repair_failure_count", 0))
+        if protection_failure_count > 3:
+            return "protection_repair_failure_count_invalid"
+        if bool(protection_retry_after) != (protection_failure_count > 0):
+            return "protection_repair_retry_identity_invalid"
         for key in (
             "last_closed_at_utc", "last_closed_signal_bar", "last_consumed_signal_bar", "cooldown_until_utc", "last_evaluated_bar",
             "last_exit_evaluated_bar", "pending_open_started_utc", "last_core_quote_time_utc",
             "entry_retry_after_utc", "entry_retry_signal_bar", "close_retry_after_utc", "time_close_defer_started_utc", "last_signal_bar",
-            "manual_alert_last_at_utc",
+            "manual_alert_last_at_utc", "protection_repair_retry_after_utc",
         ):
             if state.get(key) not in (None, "") and (
                 not isinstance(state.get(key), str) or parse_ts(state.get(key)) is None
@@ -1410,24 +1445,76 @@ class S24NoAdverseRunner:
             state = None
             load_error = f"{type(exc).__name__}: {exc}"
         observed = state if isinstance(state, dict) else {}
-        try:
-            version_matches = int(observed.get("version", 0)) == int(default["version"])
-        except (TypeError, ValueError, OverflowError):
-            version_matches = False
+        raw_version = observed.get("version")
+        observed_version = raw_version if isinstance(raw_version, int) and not isinstance(raw_version, bool) else None
+        expected_root_keys = set(default)
+        expected_v2_root_keys = expected_root_keys - {"rad070_state_generation"}
+        observed_root_keys = set(observed)
+        root_keys_match = (
+            observed_root_keys == expected_v2_root_keys
+            if observed_version == 2
+            else observed_root_keys == expected_root_keys
+        )
+        last_saved = observed.get("last_saved_utc")
+        last_saved_matches = (
+            last_saved is None
+            or (isinstance(last_saved, str) and parse_ts(last_saved) is not None)
+        )
         strategies = observed.get("strategies")
         # Top-level corruption has unknown ownership and remains fatal.  One
         # malformed strategy container can be isolated to that lane below.
         quarantine = observed.get("quarantined_strategy_states")
         shadow_quarantine = observed.get("quarantined_shadow_runner_states", {})
         shape_matches = (
-            isinstance(strategies, dict)
+            root_keys_match
+            and last_saved_matches
+            and isinstance(strategies, dict)
             and isinstance(quarantine, dict)
             and isinstance(shadow_quarantine, dict)
+            and isinstance(observed.get("v206"), dict)
+        )
+        expected_strategy_ids = set(default["strategies"])
+        observed_strategy_ids = set(strategies) if isinstance(strategies, dict) else set()
+        known_v2_pre_rad = (
+            shape_matches
+            and observed.get("bot") == default["bot"]
+            and observed.get("strategy_id") == default["strategy_id"]
+            and observed_version == 2
+            and observed_strategy_ids == LEGACY_V2_STRATEGY_IDS
+            and "rad070_state_generation" not in observed
+        )
+        migrated_from_v2 = False
+        if known_v2_pre_rad:
+            migrated_from_v2 = True
+            state = observed
+            state["version"] = S24_STATE_VERSION
+            state["rad070_state_generation"] = RAD070_STATE_GENERATION
+            rad_id = "range_autocorrelation_direction_rad070"
+            state["strategies"][rad_id] = copy.deepcopy(default["strategies"][rad_id])
+            observed = state
+            strategies = state["strategies"]
+            observed_version = S24_STATE_VERSION
+            observed_strategy_ids = set(strategies)
+            logging.warning("S24 migrated the one supported pre-RAD v2 state generation to v3")
+        version_matches = observed_version == S24_STATE_VERSION
+        generation_matches = (
+            isinstance(observed.get("rad070_state_generation"), int)
+            and not isinstance(observed.get("rad070_state_generation"), bool)
+            and observed.get("rad070_state_generation") == RAD070_STATE_GENERATION
+        )
+        current_strategy_shapes_match = migrated_from_v2 or (
+            observed_version == S24_STATE_VERSION
+            and isinstance(strategies.get("range_autocorrelation_direction_rad070"), dict)
+            and set(strategies["range_autocorrelation_direction_rad070"])
+            == set(default["strategies"]["range_autocorrelation_direction_rad070"])
         )
         identity_matches = (
             observed.get("bot") == default["bot"]
             and observed.get("strategy_id") == default["strategy_id"]
             and version_matches
+            and generation_matches
+            and observed_strategy_ids == expected_strategy_ids
+            and current_strategy_shapes_match
         )
         if not identity_matches or not shape_matches:
             self._fatal_state_identity_mismatch = True
@@ -1458,26 +1545,38 @@ class S24NoAdverseRunner:
             for strat in self.params["strategies"]:
                 sid = str(strat["id"])
                 candidate_state = state["strategies"].get(sid)
+                current_key_error = (
+                    "current_state_keys_invalid"
+                    if (
+                        not migrated_from_v2
+                        and isinstance(candidate_state, dict)
+                        and set(candidate_state) != set(default["strategies"][sid])
+                    )
+                    else None
+                )
                 if isinstance(candidate_state, dict):
-                    # V10 state files predate exact entry-signal closure evidence.
-                    # Adding the empty evidence container is lossless and keeps
-                    # any broker-owned basket available for reconciliation.
-                    candidate_state.setdefault("last_closed_entry_signal_bars", [])
-                    candidate_state.setdefault("entry_retry_after_utc", None)
-                    candidate_state.setdefault("entry_retry_signal_bar", None)
-                    candidate_state.setdefault("entry_retry_reason", None)
-                    candidate_state.setdefault("entry_permission_reject_count", 0)
-                    if "position_signal_identity_required" not in candidate_state:
-                        legacy_basket = candidate_state.get("basket")
-                        has_missing_signal_identity = (
-                            isinstance(legacy_basket, list)
-                            and bool(legacy_basket)
-                            and any(
-                                isinstance(row, dict) and parse_ts(row.get("signal_bar_time")) is None
-                                for row in legacy_basket
+                    if migrated_from_v2:
+                        # The one supported v2 -> v3 migration may fill fields
+                        # introduced before RAD. Current v3 containers must be
+                        # complete and are never repaired with defaults.
+                        candidate_state.setdefault("last_closed_entry_signal_bars", [])
+                        candidate_state.setdefault("entry_retry_after_utc", None)
+                        candidate_state.setdefault("entry_retry_signal_bar", None)
+                        candidate_state.setdefault("entry_retry_reason", None)
+                        candidate_state.setdefault("entry_permission_reject_count", 0)
+                        candidate_state.setdefault("protection_repair_retry_after_utc", None)
+                        candidate_state.setdefault("protection_repair_failure_count", 0)
+                        if "position_signal_identity_required" not in candidate_state:
+                            legacy_basket = candidate_state.get("basket")
+                            has_missing_signal_identity = (
+                                isinstance(legacy_basket, list)
+                                and bool(legacy_basket)
+                                and any(
+                                    isinstance(row, dict) and parse_ts(row.get("signal_bar_time")) is None
+                                    for row in legacy_basket
+                                )
                             )
-                        )
-                        candidate_state["position_signal_identity_required"] = not has_missing_signal_identity
+                            candidate_state["position_signal_identity_required"] = not has_missing_signal_identity
                     self._normalize_time_close_spread_container(candidate_state)
                     if self._normalize_core_peak_container(candidate_state):
                         logging.warning(
@@ -1499,7 +1598,7 @@ class S24NoAdverseRunner:
                             shadow_error,
                         )
                 try:
-                    state_error = self._core_state_shape_error(strat, candidate_state)
+                    state_error = current_key_error or self._core_state_shape_error(strat, candidate_state)
                 except Exception as exc:
                     state_error = f"shape_check_exception:{type(exc).__name__}"
                 if state_error is not None:
@@ -1539,9 +1638,7 @@ class S24NoAdverseRunner:
                         )
         state.setdefault("quarantined_strategy_states", {})
         state.setdefault("quarantined_shadow_runner_states", {})
-        state.setdefault("strategies", {})
         for sid, st in default["strategies"].items():
-            state["strategies"].setdefault(sid, st)
             for key, value in st.items():
                 state["strategies"][sid].setdefault(key, value)
             runner_default = st["shadow_runner"]
@@ -1887,6 +1984,284 @@ class S24NoAdverseRunner:
             and self._owned_position(strat, live_pos)
         )
 
+    def _ensure_rad_fixed_protection(
+        self,
+        strat: dict[str, Any],
+        state_pos: dict[str, Any],
+        live_pos: Any,
+        *,
+        allow_repair: bool = True,
+    ) -> bool:
+        if str(strat.get("mode")) != "rad070_m30":
+            return True
+        if not self._state_matches_live(strat, state_pos, live_pos):
+            self._set_sync_block(
+                strat, "rad_fixed_protection_ownership_mismatch",
+                {"ticket": int(getattr(live_pos, "ticket", 0) or 0)}, recoverable=False,
+            )
+            self._save_state()
+            return False
+        digits = int(self.params.get("price_digits", 3))
+        point = float(self.params.get("point_size", 0.001))
+        fill = float(getattr(live_pos, "open_price", 0.0) or 0.0)
+        side = self._side_from_record(live_pos)
+        stop_distance = float(strat.get("broker_stop_distance", 0.0) or 0.0)
+        target_distance = float(strat.get("broker_target_distance", 0.0) or 0.0)
+        exact_sl = normalize_price(fill - stop_distance if side == "LONG" else fill + stop_distance, digits)
+        exact_tp = normalize_price(fill + target_distance if side == "LONG" else fill - target_distance, digits)
+        current_sl = float(getattr(live_pos, "sl", 0.0) or 0.0)
+        current_tp = float(getattr(live_pos, "tp", 0.0) or 0.0)
+        exact = (
+            point > 0.0 and fill > 0.0
+            and math.isclose(current_sl, exact_sl, rel_tol=0.0, abs_tol=point * 0.5)
+            and math.isclose(current_tp, exact_tp, rel_tol=0.0, abs_tol=point * 0.5)
+        )
+        if exact:
+            st = self._st(strat)
+            repair_state_changed = (
+                st.get("protection_repair_retry_after_utc") is not None
+                or int(st.get("protection_repair_failure_count", 0)) != 0
+            )
+            repair_block_cleared = st.get("sync_block_reason") == "rad_fixed_protection_repair_required"
+            st["protection_repair_retry_after_utc"] = None
+            st["protection_repair_failure_count"] = 0
+            if repair_block_cleared:
+                self._set_sync_block(strat, None)
+            if repair_state_changed or repair_block_cleared:
+                self._save_state()
+            return True
+        st = self._st(strat)
+        if not self.live_enabled:
+            self._set_sync_block(
+                strat,
+                "live_disabled_with_owned_inventory",
+                {
+                    "tickets": [int(live_pos.ticket)],
+                    "deferred_action": "rad_fixed_protection_repair",
+                },
+                recoverable=True,
+            )
+            self._save_state()
+            return False
+        if not allow_repair:
+            # Inventory and close-history reconciliation remains available
+            # when INFO is missing or its quote clock is inadmissible, but a
+            # broker-side protection mutation requires an admissible quote.
+            self._set_sync_block(
+                strat,
+                "rad_fixed_protection_repair_required",
+                {"ticket": int(live_pos.ticket), "error": "quote_clock_unavailable_for_repair"},
+                recoverable=True,
+            )
+            self._save_state()
+            return False
+        failures_so_far = int(st.get("protection_repair_failure_count", 0))
+        if failures_so_far >= 3:
+            if (
+                st.get("sync_block_reason") != "rad_fixed_protection_repair_required"
+                and (
+                    not st.get("sync_block_new_entries")
+                    or bool(st.get("sync_block_recoverable"))
+                )
+            ):
+                self._set_sync_block(
+                    strat,
+                    "rad_fixed_protection_repair_required",
+                    {"ticket": int(live_pos.ticket), "error": "automatic_repair_limit_reached"},
+                    recoverable=False,
+                )
+                self._save_state()
+            return False
+        now = utc_now()
+        retry_after = parse_ts(st.get("protection_repair_retry_after_utc"))
+        if retry_after is not None and retry_after > now + pd.Timedelta(seconds=60):
+            self._set_sync_block(
+                strat,
+                "rad_fixed_protection_repair_required",
+                {"ticket": int(live_pos.ticket), "error": "durable_repair_clock_invalid"},
+                recoverable=False,
+            )
+            self._save_state()
+            return False
+        if retry_after is not None and now < retry_after:
+            # A durable cooldown must never exist without a matching entry
+            # block.  Rebuild a missing/recoverable block after a partial or
+            # manually edited state write while retaining any unrelated
+            # non-recoverable reconciliation block.
+            if (
+                st.get("sync_block_reason") != "rad_fixed_protection_repair_required"
+                and (
+                    not st.get("sync_block_new_entries")
+                    or bool(st.get("sync_block_recoverable"))
+                )
+            ):
+                self._set_sync_block(
+                    strat,
+                    "rad_fixed_protection_repair_required",
+                    {"ticket": int(live_pos.ticket), "error": "durable_repair_cooldown_active"},
+                    recoverable=True,
+                )
+                self._save_state()
+            return False
+        repair = getattr(self.executor, "repair_fixed_position", None)
+        if not callable(repair):
+            self._set_sync_block(strat, "rad_fixed_protection_repair_required", {"ticket": int(live_pos.ticket), "error": "repair_command_unavailable"}, recoverable=True)
+            self._save_state()
+            return False
+        result = repair(
+            ticket=int(live_pos.ticket), expected_login=int(MT5_LOGIN), expected_server=str(MT5_SERVER),
+            expected_symbol=str(self.params.get("mt5_symbol", self.params["symbol"])),
+            expected_magic=int(strat["magic"]), expected_comment=str(live_pos.comment),
+            expected_identifier=int(live_pos.identifier), stop_distance=stop_distance,
+            target_distance=target_distance, digits=digits,
+        )
+        if not bool(getattr(result, "success", False)):
+            failures = failures_so_far + 1
+            st["protection_repair_failure_count"] = min(failures, 3)
+            st["protection_repair_retry_after_utc"] = dt_text(now + pd.Timedelta(seconds=30))
+            self._set_sync_block(
+                strat, "rad_fixed_protection_repair_required",
+                {"ticket": int(live_pos.ticket), "error": str(getattr(result, "raw_response", "repair_failed"))},
+                recoverable=failures < 3,
+            )
+            self._save_state()
+            return False
+        st["protection_repair_retry_after_utc"] = None
+        st["protection_repair_failure_count"] = 0
+        if st.get("sync_block_reason") in {None, "rad_fixed_protection_repair_required"}:
+            self._set_sync_block(strat, None)
+        self._trade_row("position_lifecycle_recovered", strat, ticket=int(live_pos.ticket), reason="rad_fixed_protection_repaired")
+        self._save_state()
+        return True
+
+    def _recover_pending_open_fill(
+        self,
+        strat: dict[str, Any],
+        positions: list[Any],
+        *,
+        orders_available: bool,
+        orders: list[Any],
+    ) -> bool:
+        """Adopt one uniquely provable crash-after-fill core or RAD position."""
+
+        if not orders_available or orders:
+            return False
+        st = self._st(strat)
+        state_basket = list(st.get("basket") or [])
+        pending_id = st.get("pending_open_opportunity_id")
+        pending_started = parse_explicit_utc_ts(st.get("pending_open_started_utc"))
+        if not isinstance(pending_id, str) or pending_started is None:
+            return False
+        prefix = f"s24-open:{strat['id']}:"
+        if not pending_id.startswith(prefix):
+            return False
+        try:
+            signal_and_prefix, side, ordinal_text = pending_id.rsplit(":", 2)
+            ordinal = int(ordinal_text)
+        except (TypeError, ValueError):
+            return False
+        if side not in {"LONG", "SHORT"} or signal_and_prefix[:len(prefix)] != prefix:
+            return False
+        signal_text = signal_and_prefix[len(prefix):]
+        signal_bar = parse_explicit_utc_ts(signal_text)
+        if signal_bar is None or signal_bar != signal_bar.floor("min"):
+            return False
+        entry_due = signal_bar + pd.Timedelta(minutes=1)
+        entry_expiry = entry_due + pd.Timedelta(minutes=float(self.params.get("max_signal_delay_minutes", 2.0)))
+        state_by_identifier = {
+            int(row.get("position_identifier") or row.get("ticket") or 0): row
+            for row in state_basket
+            if isinstance(row, dict)
+        }
+        live_by_identifier = {
+            int(getattr(row, "identifier", 0) or getattr(row, "ticket", 0)): row
+            for row in positions
+        }
+        if (
+            ordinal != len(state_basket) + 1
+            or ordinal > int(strat.get("max_positions", 0) or 0)
+            or len(state_by_identifier) != len(state_basket)
+            or len(live_by_identifier) != len(positions)
+            or len(positions) != len(state_basket) + 1
+            or any(str(row.get("side") or "") != side for row in state_basket)
+            or any(
+                identifier not in live_by_identifier
+                or not self._state_matches_live(strat, state_row, live_by_identifier[identifier])
+                for identifier, state_row in state_by_identifier.items()
+            )
+        ):
+            return False
+        new_positions = [
+            row for identifier, row in live_by_identifier.items()
+            if identifier not in state_by_identifier
+        ]
+        if len(new_positions) != 1:
+            return False
+        live_pos = new_positions[0]
+        expected_comment = f"{strat['comment_prefix']}:{hashlib.sha256(pending_id.encode('utf-8')).hexdigest()[:10]}"
+        broker_open_epoch = int(getattr(live_pos, "open_time", 0) or 0)
+        broker_open_time = pd.Timestamp(broker_open_epoch, unit="s", tz="UTC") if broker_open_epoch > 0 else None
+        live_entry_price = float(getattr(live_pos, "open_price", 0.0) or 0.0)
+        valid = (
+            entry_due <= pending_started <= entry_expiry
+            and broker_open_time is not None
+            and pending_started.floor("s") <= broker_open_time <= entry_expiry.floor("s")
+            and self._owned_position(strat, live_pos)
+            and str(getattr(live_pos, "comment", "") or "") == expected_comment
+            and self._side_from_record(live_pos) == side
+            and math.isclose(float(getattr(live_pos, "volume", 0.0) or 0.0), float(strat.get("lot", 0.0) or 0.0), rel_tol=0.0, abs_tol=1e-9)
+            and int(getattr(live_pos, "ticket", 0) or 0) > 0
+            and int(getattr(live_pos, "identifier", 0) or 0) > 0
+            and math.isfinite(live_entry_price)
+            and live_entry_price > 0.0
+        )
+        if not valid:
+            return False
+        st["basket"] = [*state_basket, {
+            "ticket": int(live_pos.ticket),
+            "position_identifier": int(live_pos.identifier),
+            "side": side,
+            "lot": float(live_pos.volume),
+            "entry_price": live_entry_price,
+            "entry_time_utc": dt_text(broker_open_time),
+            "open_time_epoch": broker_open_epoch,
+            "owner_symbol": str(live_pos.symbol),
+            "owner_magic": int(live_pos.magic),
+            "owner_comment": str(live_pos.comment),
+            "signal_bar_time": dt_text(signal_bar),
+            "close_submission_started_utc": None,
+            "close_requested": False,
+            "shadow": False,
+        }]
+        if not state_basket:
+            st["basket_peak_pnl_usd"] = None
+        st["last_add_price"] = live_entry_price
+        st["last_signal_bar"] = dt_text(signal_bar)
+        st["last_exit_evaluated_bar"] = dt_text(signal_bar)
+        self._clear_pending_open(strat)
+        st["entry_retry_after_utc"] = None
+        st["entry_retry_signal_bar"] = None
+        st["entry_retry_reason"] = None
+        st["entry_permission_reject_count"] = 0
+        if st.get("sync_block_reason") in {None, "live_positions_without_state", "unresolved_open_action"}:
+            self._set_sync_block(strat, None)
+        self._save_state()
+        self._trade_row(
+            "position_lifecycle_recovered", strat, ticket=int(live_pos.ticket),
+            position_identifier=int(live_pos.identifier),
+            side=side,
+            lot=float(live_pos.volume),
+            entry_price=live_entry_price,
+            price=live_entry_price,
+            reason=(
+                "rad_crash_after_fill_adopted"
+                if str(strat.get("mode")) == "rad070_m30"
+                else "core_crash_after_fill_adopted"
+            ),
+            signal_bar_time=dt_text(signal_bar), executable_at=dt_text(broker_open_time),
+        )
+        return True
+
     def _state_ownership_proven(self, strat: dict[str, Any], state_pos: dict[str, Any]) -> bool:
         return (
             int(state_pos.get("position_identifier") or state_pos.get("ticket") or 0) > 0
@@ -1939,6 +2314,8 @@ class S24NoAdverseRunner:
         st["last_closed_entry_signal_bars"] = closed_entry_signal_bars
         st["position_signal_identity_required"] = True
         st["last_consumed_signal_bar"] = dt_text(max(consumed_candidates)) if consumed_candidates else None
+        st["protection_repair_retry_after_utc"] = None
+        st["protection_repair_failure_count"] = 0
         self._reset_time_close_spread_state(strat)
 
     def _clear_pending_open(self, strat: dict[str, Any]) -> None:
@@ -1961,11 +2338,20 @@ class S24NoAdverseRunner:
         parts = str(error or "").split("|")
         if len(parts) != 5 or parts[0] != "ERR":
             return None
+
+        def canonical_uint(value: str, prefix: str = "") -> int:
+            if prefix and not value.startswith(prefix):
+                raise ValueError(value)
+            text = value[len(prefix):]
+            if not text or not text.isascii() or not text.isdecimal():
+                raise ValueError(value)
+            return int(text)
+
         try:
-            retcode = int(parts[1])
-            order = int(parts[2].removeprefix("ORDER=")) if parts[2].startswith("ORDER=") else -1
-            deal = int(parts[3].removeprefix("DEAL=")) if parts[3].startswith("DEAL=") else -1
-            last_error = int(parts[4].removeprefix("LAST=")) if parts[4].startswith("LAST=") else -1
+            retcode = canonical_uint(parts[1])
+            order = canonical_uint(parts[2], "ORDER=")
+            deal = canonical_uint(parts[3], "DEAL=")
+            last_error = canonical_uint(parts[4], "LAST=")
         except (TypeError, ValueError, OverflowError):
             return None
         return retcode if retcode in {10018, 10026, 10027} and order == 0 and deal == 0 and last_error >= 0 else None
@@ -2420,7 +2806,7 @@ class S24NoAdverseRunner:
             deal = self.executor.get_position_close_deal(position_id, 0)
         return deal
 
-    def _sync_strategy(self, strat: dict[str, Any]) -> bool:
+    def _sync_strategy(self, strat: dict[str, Any], *, allow_protection_repair: bool = True) -> bool:
         symbol = str(self.params.get("mt5_symbol", self.params["symbol"]))
         st = self._st(strat)
         positions = self.executor.get_positions(symbol, int(strat["magic"]))
@@ -2563,6 +2949,14 @@ class S24NoAdverseRunner:
                 self._set_sync_block(strat, "invalid_close_submission_state", {"ticket": state_pos.get("ticket")}, recoverable=False)
                 return False
         unresolved_open = bool(st.get("pending_open_opportunity_id"))
+        if (
+            positions and unresolved_open
+            and self._recover_pending_open_fill(
+                strat, positions, orders_available=orders_available, orders=orders,
+            )
+        ):
+            state_basket = list(st.get("basket") or [])
+            unresolved_open = False
         if not state_basket and positions:
             self._set_sync_block(
                 strat,
@@ -2640,6 +3034,14 @@ class S24NoAdverseRunner:
                             ),
                         )
                         self._save_state()
+                    if not self._ensure_rad_fixed_protection(
+                        strat,
+                        state_pos,
+                        live_pos,
+                        allow_repair=allow_protection_repair,
+                    ):
+                        if st.get("sync_block_reason") != "rad_fixed_protection_repair_required":
+                            return False
                     if (
                         state_pos.get("close_submission_started_utc") is not None
                         and st.get("sync_block_reason") == "market_closed_close_inventory_unconfirmed"
@@ -2805,7 +3207,7 @@ class S24NoAdverseRunner:
                 if not (
                     not self.live_enabled
                     and st.get("sync_block_reason") == "live_disabled_with_owned_inventory"
-                ):
+                ) and st.get("sync_block_reason") != "rad_fixed_protection_repair_required":
                     clear_recoverable_sync_block_after_clean_sync(
                         symbol_key=strat["id"],
                         state=st,
@@ -2819,6 +3221,15 @@ class S24NoAdverseRunner:
                 and not orders_available
                 and st.get("sync_block_reason") == "orders_unavailable"
                 and bool(st.get("sync_block_recoverable"))
+            ):
+                return True
+            if (
+                remaining_state
+                and len(remaining_state) == len(state_basket)
+                and (
+                    st.get("sync_block_reason") == "rad_fixed_protection_repair_required"
+                    or int(st.get("protection_repair_failure_count", 0)) > 0
+                )
             ):
                 return True
         return not bool(st.get("sync_block_new_entries"))
@@ -3147,7 +3558,7 @@ class S24NoAdverseRunner:
                     self._set_sync_block(strat, "fixed_exit_contract_invalid", recoverable=False)
                     self._save_state()
                     return
-                request_sl = normalize_price((bid - stop_distance) if side == "LONG" else (ask + stop_distance), digits)
+                request_sl = normalize_price((ask - stop_distance) if side == "LONG" else (bid + stop_distance), digits)
                 request_tp = normalize_price((ask + target_distance) if side == "LONG" else (bid - target_distance), digits)
             ticket = self.executor.open_position(
                 symbol,
@@ -3199,6 +3610,16 @@ class S24NoAdverseRunner:
                     if int(pos.ticket) == int(ticket)
                     and int(getattr(pos, "identifier", 0) or 0) == expected_identifier
                     and str(getattr(pos, "comment", "") or "") == order_comment
+                    and int(getattr(pos, "type", -1)) == order_type
+                    and math.isclose(
+                        float(getattr(pos, "volume", 0.0) or 0.0),
+                        lot,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    and math.isfinite(float(getattr(pos, "open_price", 0.0) or 0.0))
+                    and float(getattr(pos, "open_price", 0.0) or 0.0) > 0.0
+                    and int(getattr(pos, "open_time", 0) or 0) > 0
                 ]
                 if len(matches) != 1 or len(owned) != len(positions_before) + 1:
                     self._set_sync_block(
@@ -3339,6 +3760,11 @@ class S24NoAdverseRunner:
                     recoverable=True,
                 )
         self._save_state()
+        if self.live_enabled and confirmed is not None and not self._ensure_rad_fixed_protection(strat, st["basket"][-1], confirmed):
+            self._trade_row(
+                "entry_protection_pending", strat, ticket=ticket or "", side=side,
+                reason="rad_fixed_protection_repair_required", signal_bar_time=str(price_row.name),
+            )
         self._trade_row(
             "entry",
             strat,
@@ -3354,6 +3780,52 @@ class S24NoAdverseRunner:
             executable_at=dt_text(broker_entry_time) if broker_entry_time is not None else dt_text(persisted_entry_time),
             note=note,
         )
+
+    def _evaluate_owned_basket_exit(
+        self,
+        strat: dict[str, Any],
+        evaluation_time: pd.Timestamp | datetime,
+        bid: float,
+        ask: float,
+    ) -> tuple[float, str | None] | None:
+        """Evaluate an owned basket from an explicit causal clock and quote."""
+
+        st = self._st(strat)
+        pnl = self._basket_pnl(strat, bid, ask)
+        entry_times = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
+        valid_entry_times = [ts for ts in entry_times if ts is not None]
+        if len(valid_entry_times) != len(entry_times) or not valid_entry_times:
+            self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
+            self._save_state()
+            return None
+        causal_time = pd.Timestamp(evaluation_time)
+        earliest_entry_time = min(valid_entry_times)
+        if causal_time < earliest_entry_time:
+            self._set_sync_block(
+                strat,
+                "exit_quote_before_fill",
+                {
+                    "evaluation_time_utc": dt_text(causal_time),
+                    "earliest_entry_time_utc": dt_text(earliest_entry_time),
+                },
+                recoverable=True,
+            )
+            self._save_state()
+            return None
+        held = int((causal_time - earliest_entry_time).total_seconds() // 60)
+        previous_peak = st.get("basket_peak_pnl_usd")
+        peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
+        st["basket_peak_pnl_usd"] = peak
+        reason = str(st.get("pending_close_reason") or "") or None
+        if reason is None and pnl >= float(strat["basket_target_usd"]):
+            reason = "basket_target"
+        elif reason is None and pnl <= -float(strat["basket_stop_usd"]):
+            reason = "basket_stop"
+        elif reason is None and int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
+            reason = "failure_to_progress"
+        elif reason is None and held >= int(strat["max_hold_bars"]):
+            reason = "max_hold"
+        return pnl, reason
 
     def _run_strategy(self, strat: dict[str, Any], bars: pd.DataFrame, info: Any) -> None:
         st = self._st(strat)
@@ -3375,26 +3847,11 @@ class S24NoAdverseRunner:
         evaluate_exit = exit_clock == "poll" or st.get("last_exit_evaluated_bar") != dt_text(now_bar)
         if st["basket"] and evaluate_exit:
             st["last_exit_evaluated_bar"] = dt_text(now_bar)
-            pnl = self._basket_pnl(strat, bid, ask)
-            entry_times = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
-            valid_entry_times = [ts for ts in entry_times if ts is not None]
-            if not valid_entry_times:
-                self._set_sync_block(strat, "state_entry_time_invalid", recoverable=False)
-                self._save_state()
+            evaluation_time = self._quote_time_utc(info) if exit_clock == "poll" else now_bar
+            evaluated = self._evaluate_owned_basket_exit(strat, evaluation_time, bid, ask)
+            if evaluated is None:
                 return
-            held = max(0, int((now_bar - min(valid_entry_times)).total_seconds() // 60))
-            previous_peak = st.get("basket_peak_pnl_usd")
-            peak = float(pnl) if previous_peak is None else max(float(previous_peak), float(pnl))
-            st["basket_peak_pnl_usd"] = peak
-            reason = str(st.get("pending_close_reason") or "") or None
-            if reason is None and pnl >= float(strat["basket_target_usd"]):
-                reason = "basket_target"
-            elif reason is None and pnl <= -float(strat["basket_stop_usd"]):
-                reason = "basket_stop"
-            elif reason is None and int(strat.get("failure_to_progress_bars", 0)) > 0 and held >= int(strat["failure_to_progress_bars"]) and peak < float(strat.get("failure_to_progress_peak_usd", 0.0)):
-                reason = "failure_to_progress"
-            elif reason is None and held >= int(strat["max_hold_bars"]):
-                reason = "max_hold"
+            pnl, reason = evaluated
             if reason:
                 self._close_basket(strat, reason, now, pnl)
                 return
@@ -3488,7 +3945,7 @@ class S24NoAdverseRunner:
                 )
             for strat in self.params["strategies"]:
                 if bool(strat.get("enabled", True)):
-                    self._sync_strategy(strat)
+                    self._sync_strategy(strat, allow_protection_repair=False)
                     self._set_sync_block(
                         strat,
                         "symbol_info_failed" if info is None else "runtime_quote_clock_invalid",
@@ -3555,7 +4012,7 @@ class S24NoAdverseRunner:
             self._last_status_log = now
 
     def _manage_core_without_history(self, info: Any) -> None:
-        """Reconcile inventory and retry only an already-persisted close intent."""
+        """Reconcile inventory and keep quote-clock exits alive without M1 history."""
         for strat in self.params["strategies"]:
             if not bool(strat.get("enabled", True)):
                 continue
@@ -3580,8 +4037,7 @@ class S24NoAdverseRunner:
                         note="outcome=not_evaluated_data_unavailable",
                     )
                     self._save_state()
-            reason = st.get("pending_close_reason")
-            if not synced or not self.live_enabled or not st.get("basket") or not isinstance(reason, str) or not reason:
+            if not synced or not self.live_enabled or not st.get("basket"):
                 continue
             bid = float(getattr(info, "bid", 0.0) or 0.0)
             ask = float(getattr(info, "ask", 0.0) or 0.0)
@@ -3595,7 +4051,20 @@ class S24NoAdverseRunner:
                 self._save_state()
                 continue
             price_row = pd.Series({"Open": bid, "Close": bid, "AskOpen": ask}, name=quote_time)
-            self._close_basket(strat, reason, price_row, self._basket_pnl(strat, bid, ask))
+            reason = st.get("pending_close_reason")
+            pnl = self._basket_pnl(strat, bid, ask)
+            if str(strat.get("exit_clock", "confirmed_m1")) == "poll":
+                previous_peak = st.get("basket_peak_pnl_usd")
+                evaluated = self._evaluate_owned_basket_exit(strat, quote_time, bid, ask)
+                if evaluated is None:
+                    continue
+                pnl, reason = evaluated
+                if reason is None:
+                    if st.get("basket_peak_pnl_usd") != previous_peak:
+                        self._save_state()
+                    continue
+            if isinstance(reason, str) and reason:
+                self._close_basket(strat, reason, price_row, pnl)
 
 
 class FakeDM:
