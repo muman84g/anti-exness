@@ -22,6 +22,9 @@ from v206_live_lane import default_v206_state
 
 def params_copy() -> dict:
     params = json.loads(json.dumps(s24.load_params()))
+    # Most regression fixtures exercise the enabled entry paths explicitly.
+    params["core_entry_enabled"] = True
+    params["v206_enabled"] = True
     params["_suppress_manual_alerts"] = True
     params["runner_shadow"]["enabled"] = False
     params["runner_shadow"]["opportunity_observer"]["enabled"] = False
@@ -890,6 +893,7 @@ class S24SafetyRegressionTests(unittest.TestCase):
 
     def test_core_persists_one_no_signal_decision_receipt_per_bar(self):
         params = params_copy()
+        params["core_entry_enabled"] = True
         runner = s24.S24NoAdverseRunner(params)
         runner.state = runner._default_state()
         strategy = params["strategies"][0]
@@ -918,6 +922,48 @@ class S24SafetyRegressionTests(unittest.TestCase):
         })
         receipts = [row for row in rows if row[0] == "strategy_decision"]
         self.assertEqual(len(receipts), 1)
+
+    def test_core_entry_switch_blocks_new_open_but_keeps_owned_exit_management(self):
+        params = params_copy()
+        params["core_entry_enabled"] = False
+        runner = s24.S24NoAdverseRunner(params)
+        runner.state = runner._default_state()
+        strategy = params["strategies"][0]
+        runner.executor = RecordingExecutor(positions=[], orders=[])
+        runner._save_state = lambda: None
+        rows = []
+        runner._trade_row = lambda event, *_args, **kwargs: rows.append((event, kwargs))
+        runner._signal_decision = lambda *_args: self.fail("disabled core must not evaluate a new signal")
+        bar_time = pd.Timestamp.now(tz="UTC").floor("min")
+        bars = pd.DataFrame(
+            [
+                {"Open": 2064.0, "High": 2064.1, "Low": 2063.9, "Close": 2064.0, "AskOpen": 2064.1},
+                {"Open": 2064.0, "High": 2064.1, "Low": 2063.9, "Close": 2064.0, "AskOpen": 2064.1},
+            ],
+            index=[bar_time - pd.Timedelta(minutes=1), bar_time],
+        )
+        info = runner.executor.get_symbol_info()
+        info.quote_time_msc = int(bar_time.timestamp() * 1000)
+
+        runner._run_strategy(strategy, bars, info)
+
+        self.assertEqual(runner.executor.open_calls, 0)
+        self.assertEqual(runner._st(strategy)["last_decision"]["reason"], "core_entry_disabled")
+        self.assertTrue(any(event == "strategy_decision" and row.get("reason") == "core_entry_disabled" for event, row in rows))
+
+        state = runner._st(strategy)
+        state["basket"] = [persisted_position()]
+        runner.executor = RecordingExecutor(positions=[live_position()], orders=[])
+        runner._evaluate_owned_basket_exit = lambda *_args, **_kwargs: (16.0, "basket_target")
+        runner._close_basket = lambda *_args, **_kwargs: rows.append(("owned_exit_managed", {}))
+        next_bars = bars.copy()
+        next_bars.index = pd.DatetimeIndex([bar_time, bar_time + pd.Timedelta(minutes=1)])
+        next_info = runner.executor.get_symbol_info()
+        next_info.quote_time_msc = int((bar_time + pd.Timedelta(minutes=1)).timestamp() * 1000)
+
+        runner._run_strategy(strategy, next_bars, next_info)
+
+        self.assertTrue(any(event == "owned_exit_managed" for event, _row in rows))
 
     def test_live_disabled_preflight_still_requires_account_and_quote_identity(self):
         params = params_copy()

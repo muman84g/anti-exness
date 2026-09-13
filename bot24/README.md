@@ -1,5 +1,14 @@
 # Bot24 Visual No-Adverse C
 
+## 2026-09-14 entry allocation
+
+New live entries are enabled only for RAD070. `core_entry_enabled=false` blocks
+new `visual_no_adverse_c_target16` entries, and `v206_enabled=false` blocks new
+v206 entries. Both ownership namespaces and durable state remain configured so
+any already-owned core or v206 position is still reconciled and closed by its
+existing lifecycle rules. The passive core shadow runner remains enabled for
+continued observation and does not place orders.
+
 ## 2026-09-10 UTC 13:30 corrected HL overlay
 
 The overlay `utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001`

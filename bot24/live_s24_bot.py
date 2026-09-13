@@ -753,7 +753,7 @@ class S24NoAdverseRunner:
 
     @staticmethod
     def _config_error(params: dict[str, Any]) -> str | None:
-        for key in ("enabled", "live_trading_enabled", "shadow_forward_enabled"):
+        for key in ("enabled", "live_trading_enabled", "shadow_forward_enabled", "core_entry_enabled"):
             if not isinstance(params.get(key), bool):
                 return f"{key}_not_boolean"
         if bool(params["enabled"]) and bool(params["live_trading_enabled"]) and bool(params["shadow_forward_enabled"]):
@@ -3927,6 +3927,25 @@ class S24NoAdverseRunner:
         if st.get("last_evaluated_bar") == dt_text(now_bar):
             return
         st["last_evaluated_bar"] = dt_text(now_bar)
+        if (
+            str(strat.get("id")) == "visual_no_adverse_c_target16"
+            and not bool(self.params.get("core_entry_enabled", False))
+        ):
+            st["last_decision"] = {
+                "signal_bar_time": dt_text(now_bar),
+                "outcome": "not_evaluated",
+                "reason": "core_entry_disabled",
+                "side": None,
+            }
+            self._trade_row(
+                "strategy_decision",
+                strat,
+                reason="core_entry_disabled",
+                signal_bar_time=dt_text(now_bar),
+                note="outcome=not_evaluated;entry_only_switch=false",
+            )
+            self._save_state()
+            return
         entry_block = self._entry_submission_block_reason(strat)
         if entry_block:
             self._trade_row("entry_skip", strat, reason=entry_block, note="final_open_guard")
@@ -4248,6 +4267,8 @@ def self_test() -> None:
 
 def _run_self_test() -> None:
     params = load_params()
+    params["core_entry_enabled"] = True
+    params["v206_enabled"] = True
     params["_suppress_manual_alerts"] = True
     params["live_trading_enabled"] = False
     params["shadow_forward_enabled"] = True

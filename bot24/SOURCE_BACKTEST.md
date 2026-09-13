@@ -1,5 +1,15 @@
 # Source Backtest
 
+## 2026-09-14 core and v206 entry pause
+
+- Live allocation: RAD070 remains enabled for new entries; core uses
+  `core_entry_enabled=false` and v206 uses `v206_enabled=false`.
+- This is an entry-only pause based on the reviewed forward/actual-execution
+  evidence. It does not alter either frozen strategy identity, parameters,
+  ownership namespace, persisted state, reconciliation, or exit handling.
+- Existing core/v206 inventory remains managed. The passive core shadow runner
+  remains enabled to collect no-order evidence.
+
 ## 2026-09-10 UTC 13:30 corrected HL local implementation
 
 - Policy/hash: `utc1230_rise020_signal_invert_1330_1335_long_rearm020_v001` / `85831ad64224fad5e64a7959f4aa5f5d1ec512ece45c38bb49fdb931e89a4706`.
