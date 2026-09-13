@@ -144,6 +144,39 @@ class S24RAD070Tests(unittest.TestCase):
         self.assertTrue(runner._fatal_state_identity_mismatch)
         self.assertTrue(all(runner._st(row)["sync_block_reason"] == "state_identity_mismatch" for row in params["strategies"]))
 
+    def test_deployed_rad_v2_migration_accepts_only_the_exact_historical_schema(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        for state in seed["strategies"].values():
+            state.pop("protection_repair_retry_after_utc")
+            state.pop("protection_repair_failure_count")
+
+        root_mutations = {
+            "missing_root": lambda row: row.pop("quarantined_shadow_runner_states"),
+            "extra_root": lambda row: row.update({"foreign_root": True}),
+            "missing_core_strategy": lambda row: row["strategies"].pop(params["strategies"][0]["id"]),
+            "extra_strategy": lambda row: row["strategies"].update({"foreign_lane": {}}),
+        }
+        for name, mutate in root_mutations.items():
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(seed))
+                mutate(candidate)
+                self.assertTrue(self._load_seed(params, candidate)._fatal_state_identity_mismatch)
+
+        for strategy in params["strategies"]:
+            sid = strategy["id"]
+            for key in tuple(seed["strategies"][sid]):
+                with self.subTest(strategy=sid, missing_key=key):
+                    candidate = json.loads(json.dumps(seed))
+                    candidate["strategies"][sid].pop(key)
+                    self.assertTrue(self._load_seed(params, candidate)._fatal_state_identity_mismatch)
+            with self.subTest(strategy=sid, extra_key="foreign_field"):
+                candidate = json.loads(json.dumps(seed))
+                candidate["strategies"][sid]["foreign_field"] = None
+                self.assertTrue(self._load_seed(params, candidate)._fatal_state_identity_mismatch)
+
     def test_current_v3_missing_rad_container_fails_closed(self):
         params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
         seed = s24.S24NoAdverseRunner(params)._default_state()
