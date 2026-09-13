@@ -662,7 +662,7 @@ services:
       - BOT_MANUAL_ALERT_WEBHOOK_URL=${BOT_MANUAL_ALERT_WEBHOOK_URL:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 
-  # ---- Bot 24 (S24 XAUUSD shadow-first) ----
+  # ---- Bot 24 (S24 XAUUSD core + v206 + RAD070 live lanes) ----
   exness-bot-24:
     image: exness-bot:latest
     container_name: exness-bot-24

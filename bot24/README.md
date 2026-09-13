@@ -23,6 +23,12 @@ v206 ownership, signals, sizing and exits are unchanged.  The matching bridge
 version is `2026-09-10-s24-rad070-v14`; compile and attach that EA before the
 updated runner can pass capability preflight.
 
+On 2026-09-13 the user explicitly accepted live-order routing for RAD070 with
+`live_trading_enabled=true` and `shadow_forward_enabled=false`.  That approval
+does not collapse the deployment boundary: a GitHub push alone does not pull
+the source on CentOS, compile/attach bridge v14, recreate the container, or
+prove that the lane is active at runtime.
+
 Close-ledger re-audit (2026-09-04): replay re-syncs readable evidence before
 consuming state; preflight rejects incomplete tails and duplicate/conflicting
 deal ownership. Core and v206 derived close-state changes share one rollback
