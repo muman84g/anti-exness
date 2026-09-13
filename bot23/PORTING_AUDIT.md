@@ -1,5 +1,32 @@
 # Bot23 porting audit
 
+## 2026-09-13 M15 terminal-safe Long lane 23
+
+- Current candidate: `bot23-m15-terminal-safe-on-v012`.
+- Required bridge: `2026-09-13-s23-m15-terminal-v35`.
+- Added one independent Long-only lane: lane 23, magic 230045, comment
+  `s23_m15_l1`, 0.01 lot, capacity one.
+- Signal uses only completed broker-Bid M1: M15 compression at 0.60 of the
+  prior-four M15-range median, followed by a completed M5 close above the
+  compressed High. Partial M5 and missing constituent M1 fail closed.
+- `America/New_York` controls entry `[14:00,16:05)` and hard-flat 16:50,
+  automatically mapping summer/winter JST without a host-time fixed offset.
+- Normal close is confirmed fill plus 45 minutes. At hard-flat the lane bypasses
+  spread defer, while retaining durable close intent and ownership until exact
+  broker-flat/deal reconciliation.
+- The submission deadline is checked both before and after the durable OPEN
+  reservation. A filesystem write cannot carry an order across NY16:05.
+- State-v3 migration adds only the empty lane and policy identity to a proven
+  prior-generation state. Existing lane state is preserved; a current-generation
+  missing/foreign M15 identity fails closed.
+- Params, Python executor, EA source, Compose mount, source map, attribution and
+  tests use the same lane/magic/comment/policy/bridge identity.
+- Research/live signal comparison on identical tick-derived Bid M1 was exact:
+  DEV 27/27, Leakcheck 5/5, Forward 11/11 raw pulses; no missing or extra times.
+- Local full suite: 520/520 PASS; compile, self-test, configuration, ownership
+  and Compose checks PASS. No Git action, deployment, restart, EA attachment,
+  runtime state mutation, account access or real order was performed.
+
 ## 2026-09-04 legacy inventory query correction
 
 Observed v31 startup failure: the Python legacy-flat preflight queried magic

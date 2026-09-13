@@ -64,6 +64,14 @@ from t0530_edge_overlay import (
     in_release_session as in_t0530_edge_release_session,
     latest_signal as latest_t0530_edge_signal,
 )
+from m15_terminal_overlay import (
+    POLICY_ID as M15_TERMINAL_POLICY_ID,
+    POLICY_PARAMS_HASH as M15_TERMINAL_POLICY_PARAMS_HASH,
+    entry_deadline_at as m15_terminal_entry_deadline_at,
+    hard_flat_due_at as m15_terminal_hard_flat_due_at,
+    in_entry_window as in_m15_terminal_entry_window,
+    latest_long_signal as latest_m15_terminal_long_signal,
+)
 from utc1330_hl_overlay import (
     POLICY_ID as UTC1330_HL_POLICY_ID,
     POLICY_PARAMS_HASH as UTC1330_HL_POLICY_PARAMS_HASH,
@@ -89,15 +97,16 @@ EXPECTED_PRE_EU30_MAGICS = (230031, 230032, 230033)
 EXPECTED_TREND_RECOVERY_MAGICS = (230034,)
 EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_Q01_MAGICS = (230044,)
+EXPECTED_M15_TERMINAL_MAGICS = (230045,)
 RETIRED_STRATEGY_IDS = frozenset(
     f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)
 )
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-jst1113-b4c-on-v011"
+EXPECTED_CANDIDATE_ID = "bot23-m15-terminal-safe-on-v012"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-12-s23-multisymbol-history-v34"
+EXPECTED_BRIDGE_VERSION = "2026-09-13-s23-m15-terminal-v35"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -118,6 +127,12 @@ EXPECTED_Q01_WARMUP_M5_BARS = 110
 EXPECTED_Q01_ATR_PERIOD = 20
 EXPECTED_Q01_FEED_GAP_SECONDS = 300
 EXPECTED_Q01_LIVE_TRADING_ENABLED = False
+EXPECTED_M15_TERMINAL_HOLD_MINUTES = 45
+EXPECTED_M15_TERMINAL_MAX_POSITIONS = 1
+EXPECTED_M15_TERMINAL_TIMEZONE = "America/New_York"
+EXPECTED_M15_TERMINAL_ENTRY_START = "14:00"
+EXPECTED_M15_TERMINAL_ENTRY_END_EXCLUSIVE = "16:05"
+EXPECTED_M15_TERMINAL_HARD_FLAT = "16:50"
 EXPECTED_MORNING_POLICY_ID = "jst0911_stable001_param_15_55_45_v001"
 EXPECTED_MORNING_POLICY_PARAMS_HASH = "c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e"
 EXPECTED_MORNING_SESSION_START_UTC = 0
@@ -362,6 +377,7 @@ _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "t0530_edge_enabled",
     "q01_variance_release_enabled",
     "q01_live_trading_enabled",
+    "m15_terminal_enabled",
     "drop_latest_m1_bar",
 )
 
@@ -373,6 +389,7 @@ _STRATEGY_CONFIG_COLLECTIONS = (
     "trend_recovery_strategies",
     "t0530_edge_strategies",
     "q01_variance_release_strategies",
+    "m15_terminal_strategies",
 )
 
 _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
@@ -383,6 +400,7 @@ _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "trend_recovery_strategies": ("reverse_long_stop_trend_lane_1",),
     "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
     "q01_variance_release_strategies": ("q01_variance_release_lane_1",),
+    "m15_terminal_strategies": ("ny1400_m15_long_lane_1",),
 }
 UNPUBLISHED_OPEN_ERRORS = {
     "ERR|COMMAND_BUSY", "ERR|CLAIM_BUSY", "ERR|LOCK_TIMEOUT",
@@ -417,6 +435,7 @@ _STATE_GENERATION_CONTRACTS = (
     ("q01_policy_id", "q01_params_hash", "q01_variance_release_strategies", (
         "q01_last_evaluated_m5_bar",
     )),
+    ("m15_terminal_policy_id", "m15_terminal_params_hash", "m15_terminal_strategies", ()),
 )
 
 _CORE_LANE_STATE_KEYS = ("lane_id", "basket", "basket_sequence", "current_basket_id")
@@ -462,11 +481,15 @@ _STRATEGY_KEYS_BY_COLLECTION = {
         "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
         "lot", "hold_minutes", "max_positions", "cooldown",
     }),
+    "m15_terminal_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
 }
 
 
 def validate_strategy_topology_config(params: dict[str, Any]) -> None:
-    """Freeze all 22 lane state namespaces and executable row schemas."""
+    """Freeze all 18 active lane state namespaces and executable row schemas."""
     observed_ids: list[str] = []
     for collection in _STRATEGY_CONFIG_COLLECTIONS:
         rows = params.get(collection)
@@ -619,6 +642,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "q01_breakout_lookback_bars", "q01_hold_minutes",
         "q01_max_positions", "q01_max_signal_delay_minutes", "q01_m1_bars",
         "q01_warmup_m5_bars", "q01_atr_period", "q01_feed_gap_seconds",
+        "m15_terminal_hold_minutes", "m15_terminal_max_positions",
     )
     for key in exact_top_level_integers:
         value = params.get(key)
@@ -651,6 +675,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "expected_pre_eu30_magics", "expected_trend_recovery_magics",
         "expected_t0530_edge_magics",
         "expected_q01_magics",
+        "expected_m15_terminal_magics",
     )
     for key in expected_magic_keys:
         values = params.get(key)
@@ -997,6 +1022,7 @@ class S23HorizontalInventoryRunner:
         self._retired_state_pruned = False
         self._t0530_edge_state_migrated = False
         self._q01_state_migrated = False
+        self._m15_terminal_state_migrated = False
         self.state = self._load_state()
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
@@ -1113,11 +1139,14 @@ class S23HorizontalInventoryRunner:
     def _q01_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("q01_variance_release_strategies", []))
 
+    def _m15_terminal_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("m15_terminal_strategies", []))
+
     def _legacy_signal_strategies(self) -> list[dict[str, Any]]:
         return (
             list(self.params.get("strategies", [])) + self._morning_strategies()
             + self._midday_strategies() + self._pre_eu30_strategies()
-            + self._trend_recovery_strategies()
+            + self._trend_recovery_strategies() + self._m15_terminal_strategies()
         )
 
     def _all_strategies(self) -> list[dict[str, Any]]:
@@ -1129,6 +1158,7 @@ class S23HorizontalInventoryRunner:
             + self._trend_recovery_strategies()
             + self._t0530_edge_strategies()
             + self._q01_strategies()
+            + self._m15_terminal_strategies()
         )
 
     def _entry_admission_block(self, at_utc: datetime):
@@ -1301,6 +1331,8 @@ class S23HorizontalInventoryRunner:
                 "q01_policy_id": str(self.params.get("q01_policy_id", EXPECTED_Q01_POLICY_ID)),
                 "q01_params_hash": str(self.params.get("q01_params_hash", EXPECTED_Q01_POLICY_PARAMS_HASH)),
                 "q01_last_evaluated_m5_bar": None,
+                "m15_terminal_policy_id": str(self.params.get("m15_terminal_policy_id", M15_TERMINAL_POLICY_ID)),
+                "m15_terminal_params_hash": str(self.params.get("m15_terminal_params_hash", M15_TERMINAL_POLICY_PARAMS_HASH)),
                 "trend_recovery": {
                     "active": False,
                     "episode_id": None,
@@ -1642,6 +1674,8 @@ class S23HorizontalInventoryRunner:
         observed_t0530_edge_policy_hash = observed_routing.get("t0530_edge_params_hash")
         observed_q01_policy_id = observed_routing.get("q01_policy_id")
         observed_q01_policy_hash = observed_routing.get("q01_params_hash")
+        observed_m15_terminal_policy_id = observed_routing.get("m15_terminal_policy_id")
+        observed_m15_terminal_policy_hash = observed_routing.get("m15_terminal_params_hash")
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -1925,6 +1959,37 @@ class S23HorizontalInventoryRunner:
                     "observed_policy_hash": observed_q01_policy_hash,
                     "expected_policy_id": expected_q01_policy_id,
                     "expected_policy_hash": expected_q01_policy_hash,
+                }
+        expected_m15_terminal_policy_id = str(
+            self.params.get("m15_terminal_policy_id", M15_TERMINAL_POLICY_ID)
+        )
+        expected_m15_terminal_policy_hash = str(
+            self.params.get("m15_terminal_params_hash", M15_TERMINAL_POLICY_PARAMS_HASH)
+        )
+        if observed_m15_terminal_policy_id is None and observed_m15_terminal_policy_hash is None:
+            routing["m15_terminal_policy_id"] = expected_m15_terminal_policy_id
+            routing["m15_terminal_params_hash"] = expected_m15_terminal_policy_hash
+            self._m15_terminal_state_migrated = True
+            logging.warning(
+                "S23 M15 terminal state initialized to %s; all existing strategy state was preserved",
+                expected_m15_terminal_policy_id,
+            )
+        elif (
+            observed_m15_terminal_policy_id != expected_m15_terminal_policy_id
+            or observed_m15_terminal_policy_hash != expected_m15_terminal_policy_hash
+        ):
+            for strat in self._m15_terminal_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "m15_terminal_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_m15_terminal_policy_id,
+                    "observed_policy_hash": observed_m15_terminal_policy_hash,
+                    "expected_policy_id": expected_m15_terminal_policy_id,
+                    "expected_policy_hash": expected_m15_terminal_policy_hash,
                 }
         return state
 
@@ -2268,6 +2333,8 @@ class S23HorizontalInventoryRunner:
             return "t0530_edge"
         if lane_id == 22:
             return "q01_variance_release"
+        if lane_id == 23:
+            return "m15_terminal_long"
         return "unknown"
 
     def _signal_attribution(
@@ -4416,7 +4483,7 @@ class S23HorizontalInventoryRunner:
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
                 return self._preflight_reject("broker_quote_clock_unavailable")
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated:
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated:
             try:
                 self._save_state()
             except Exception:
@@ -4431,6 +4498,8 @@ class S23HorizontalInventoryRunner:
             self._trend_recovery_state_migrated = False
             self._retired_state_pruned = False
             self._t0530_edge_state_migrated = False
+            self._q01_state_migrated = False
+            self._m15_terminal_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -4718,8 +4787,44 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_q01_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics
-        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01]
+        if not bool(self.params.get("m15_terminal_enabled", False)):
+            return "m15_terminal_disabled"
+        if str(self.params.get("m15_terminal_policy_id") or "") != M15_TERMINAL_POLICY_ID:
+            return "invalid_m15_terminal_policy_id"
+        if str(self.params.get("m15_terminal_params_hash") or "") != M15_TERMINAL_POLICY_PARAMS_HASH:
+            return "invalid_m15_terminal_params_hash"
+        if str(self.params.get("m15_terminal_timezone") or "") != EXPECTED_M15_TERMINAL_TIMEZONE:
+            return "invalid_m15_terminal_timezone"
+        if str(self.params.get("m15_terminal_entry_start") or "") != EXPECTED_M15_TERMINAL_ENTRY_START:
+            return "invalid_m15_terminal_entry_start"
+        if str(self.params.get("m15_terminal_entry_end_exclusive") or "") != EXPECTED_M15_TERMINAL_ENTRY_END_EXCLUSIVE:
+            return "invalid_m15_terminal_entry_end"
+        if str(self.params.get("m15_terminal_hard_flat") or "") != EXPECTED_M15_TERMINAL_HARD_FLAT:
+            return "invalid_m15_terminal_hard_flat"
+        if int(self.params.get("m15_terminal_hold_minutes") or 0) != EXPECTED_M15_TERMINAL_HOLD_MINUTES:
+            return "invalid_m15_terminal_hold"
+        if int(self.params.get("m15_terminal_max_positions") or 0) != EXPECTED_M15_TERMINAL_MAX_POSITIONS:
+            return "invalid_m15_terminal_max_positions"
+        m15_terminal = [row for row in self._m15_terminal_strategies() if bool(row.get("enabled", True))]
+        m15_terminal_magics = [int(row.get("magic") or 0) for row in m15_terminal]
+        configured_m15_terminal_magics = tuple(int(value) for value in self.params.get("expected_m15_terminal_magics", []))
+        if tuple(m15_terminal_magics) != EXPECTED_M15_TERMINAL_MAGICS or configured_m15_terminal_magics != EXPECTED_M15_TERMINAL_MAGICS:
+            return "invalid_m15_terminal_magics"
+        if [int(row.get("lane_id") or 0) for row in m15_terminal] != [23]:
+            return "invalid_m15_terminal_lane_ids"
+        for row in m15_terminal:
+            expected = {
+                "spec_id": M15_TERMINAL_POLICY_ID,
+                "signal_id": "m15_compression_release_long_only",
+                "comment_prefix": "s23_m15_l1", "lot": 0.01,
+                "hold_minutes": EXPECTED_M15_TERMINAL_HOLD_MINUTES,
+                "max_positions": 1, "cooldown": 0,
+            }
+            lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
+            if lane_drift:
+                return f"invalid_m15_terminal_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
+        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
             return "duplicate_combined_ownership_namespace"
         admission_clock = self.params.get("eu_entry_admission_clock")
@@ -6422,6 +6527,7 @@ class S23HorizontalInventoryRunner:
         opportunity: dict[str, Any] | None = None,
         apply_portfolio_rearm: bool = True,
         use_confirmed_fill_time: bool = False,
+        submission_deadline_utc: datetime | pd.Timestamp | None = None,
     ) -> bool:
         st = self._st(strat)
         if not bool(self.params.get("enabled", True)):
@@ -6488,6 +6594,15 @@ class S23HorizontalInventoryRunner:
         ask = float(getattr(info, "ask", price_row.get("AskOpen", price_row["Open"])))
         bid = float(getattr(info, "bid", price_row["Open"]))
         entry_price = normalize_price(ask if side == "LONG" else bid, digits)
+        submission_deadline = None
+        if submission_deadline_utc is not None:
+            submission_deadline = parse_ts(submission_deadline_utc)
+            if submission_deadline is None:
+                self._trade_row(
+                    "entry_skip", strat, reason="submission_deadline_invalid",
+                    signal_bar_time=str(price_row.name), note="final_open_guard",
+                )
+                return False
         if self.live_enabled:
             host_clock = utc_now()
             quote_time = self._broker_quote_time(info, host_clock)
@@ -6527,6 +6642,23 @@ class S23HorizontalInventoryRunner:
                         f"host_submit_utc={dt_text(host_submit_time)};"
                         f"broker_quote_utc={dt_text(quote_time) if quote_time is not None else None};"
                         f"max_delta_seconds={max_delta_text}"
+                    ),
+                )
+                return False
+            if (
+                submission_deadline is not None
+                and (
+                    host_submit_time >= submission_deadline
+                    or quote_time >= submission_deadline
+                )
+            ):
+                self._trade_row(
+                    "entry_skip", strat, reason="submission_deadline_elapsed",
+                    signal_bar_time=str(price_row.name),
+                    note=(
+                        f"host_submit_utc={dt_text(host_submit_time)};"
+                        f"broker_quote_utc={dt_text(quote_time)};"
+                        f"deadline_utc={dt_text(submission_deadline)}"
                     ),
                 )
                 return False
@@ -6697,6 +6829,16 @@ class S23HorizontalInventoryRunner:
                 )
             ):
                 post_reservation_block = "broker_quote_clock_out_of_bounds"
+            if (
+                post_reservation_block is None
+                and submission_deadline is not None
+                and actual_quote_time is not None
+                and (
+                    actual_submit_time >= submission_deadline
+                    or actual_quote_time >= submission_deadline
+                )
+            ):
+                post_reservation_block = "submission_deadline_elapsed"
             if post_reservation_block is not None:
                 self._clear_pending_open(strat)
                 self._save_state()
@@ -7430,6 +7572,8 @@ class S23HorizontalInventoryRunner:
         close_reason: str,
         *,
         defer_for_spread: bool = True,
+        hard_due_utc: datetime | pd.Timestamp | None = None,
+        hard_close_reason: str | None = None,
     ) -> bool:
         st = self._st(strat)
         if st.get("pending_close_reason"):
@@ -7453,6 +7597,14 @@ class S23HorizontalInventoryRunner:
         # Once filled, this lane owns an absolute UTC lifecycle. Session/DST
         # classification is intentionally absent from the close deadline.
         due = fixed_hold_due_at(valid_entries, int(strat["hold_minutes"]))
+        hard_due = None
+        if hard_due_utc is not None:
+            hard_due = parse_ts(hard_due_utc)
+            if hard_due is None:
+                self._set_sync_block(strat, "hard_close_clock_invalid", recoverable=False)
+                self._save_state()
+                return True
+            due = min(due, hard_due)
         quote_time_msc = getattr(info, "quote_time_msc", None)
         if quote_time_msc is None:
             if self.live_enabled:
@@ -7471,6 +7623,8 @@ class S23HorizontalInventoryRunner:
         # Host/poll clock drift must neither advance nor delay the deadline.
         if quote_time < due:
             return False if at_utc < due else True
+        hard_close_active = bool(hard_due is not None and quote_time >= hard_due)
+        effective_defer_for_spread = bool(defer_for_spread and not hard_close_active)
         raw_retry_after = st.get("time_close_retry_after_utc")
         retry_after = self._validated_time_close_retry_after(strat, quote_time)
         raw_defer_started = st.get("time_close_defer_started_utc")
@@ -7538,7 +7692,7 @@ class S23HorizontalInventoryRunner:
                 ),
             )
             self._save_state()
-        if not defer_for_spread:
+        if not effective_defer_for_spread:
             # Q01's frozen lifecycle exits on the first executable quote even
             # when spread is wide. Discard any stale generic defer residue.
             st["time_close_defer_started_utc"] = None
@@ -7557,7 +7711,7 @@ class S23HorizontalInventoryRunner:
         spread_points = max(0.0, ask - bid) / point if point > 0 else math.inf
         spread_cap = (
             float(self.params.get("fixed_hold_close_max_spread_points", 300.0))
-            if defer_for_spread
+            if effective_defer_for_spread
             else math.inf
         )
         wide_seen = bool(st.get("time_close_wide_seen"))
@@ -7590,7 +7744,12 @@ class S23HorizontalInventoryRunner:
                     return True
         pnl = self._basket_pnl(strat, bid, ask)
         row = pd.Series({"Open": bid, "Close": bid, "AskOpen": ask}, name=quote_time)
-        result = self._close_basket(strat, close_reason, row, pnl)
+        effective_close_reason = (
+            str(hard_close_reason)
+            if hard_close_active and hard_close_reason
+            else close_reason
+        )
+        result = self._close_basket(strat, effective_close_reason, row, pnl)
         if result == "market_closed":
             st["time_close_retry_after_utc"] = dt_text(
                 quote_time + pd.Timedelta(seconds=float(self.params.get("fixed_hold_market_closed_retry_seconds", 60.0)))
@@ -7884,6 +8043,142 @@ class S23HorizontalInventoryRunner:
             return
         routing["t0530_edge_last_evaluated_bar"] = signal_bar_text
         self._save_state()
+
+    def _monitor_m15_terminal_position(
+        self, strat: dict[str, Any], info: Any,
+        poll_time: datetime | pd.Timestamp | None = None,
+    ) -> bool:
+        entries = [parse_ts(pos.get("entry_time_utc")) for pos in self._basket_rows(strat)]
+        valid_entries = [stamp for stamp in entries if stamp is not None]
+        hard_due = m15_terminal_hard_flat_due_at(min(valid_entries)) if valid_entries else None
+        return self._monitor_fixed_hold_position(
+            strat, info, poll_time, "m15_terminal_fixed_hold",
+            defer_for_spread=True,
+            hard_due_utc=hard_due,
+            hard_close_reason="m15_terminal_hard_flat",
+        )
+
+    def _process_m15_terminal_exits(
+        self, info: Any, poll_time: pd.Timestamp,
+    ) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        group_enabled = bool(self.params.get("m15_terminal_enabled", False))
+        quote_time = self._broker_quote_time(info, poll_time)
+        session_active = bool(quote_time is not None and in_m15_terminal_entry_window(quote_time))
+        for strat in self._m15_terminal_strategies():
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            needs_reconciliation = bool(
+                session_active or st.get("basket") or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason") or st.get("sync_block_new_entries")
+            )
+            if not needs_reconciliation:
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                self._trade_row("entry_skip", strat, reason=st.get("sync_block_reason"), note="sync_block")
+                self._save_state()
+                readiness[lane_id] = False
+                continue
+            exit_blocked = self._monitor_m15_terminal_position(strat, info, poll_time)
+            readiness[lane_id] = bool(
+                group_enabled and strat.get("enabled", True) and session_active and not exit_blocked
+            )
+        return readiness
+
+    def _process_m15_terminal_entries(
+        self, bars: pd.DataFrame, price_row: pd.Series, info: Any,
+        poll_time: pd.Timestamp, readiness: dict[int, bool],
+    ) -> None:
+        if not bool(self.params.get("m15_terminal_enabled", False)):
+            return
+        strategies = [row for row in self._m15_terminal_strategies() if bool(row.get("enabled", True))]
+        if not strategies:
+            return
+        strat = strategies[0]
+        signal_bar = parse_ts(price_row.name)
+        if signal_bar is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        quote_time = self._broker_quote_time(info, poll_time)
+        if (
+            poll_time < release_time
+            or not in_m15_terminal_entry_window(release_time)
+            or quote_time is None
+            or not in_m15_terminal_entry_window(quote_time)
+        ):
+            return
+        signal_bar_text = dt_text(signal_bar)
+        if not self._reserve_lane_evaluation_bar(strat, signal_bar_text, "m15_terminal_decision"):
+            return
+        try:
+            long_signal = latest_m15_terminal_long_signal(bars)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            self._trade_row(
+                "m15_terminal_decision", strat, reason="signal_input_invalid",
+                signal_bar_time=signal_bar_text,
+                note=f"{type(exc).__name__}:{exc}",
+            )
+            return
+        if not long_signal:
+            self._trade_row(
+                "m15_terminal_decision", strat, reason="no_long_signal",
+                signal_bar_time=signal_bar_text,
+            )
+            return
+        opportunity_id = (
+            f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|"
+            f"{strat['signal_id']}|LONG"
+        )
+        st = self._st(strat)
+        if not readiness.get(int(strat["lane_id"]), False):
+            self._trade_row(
+                "m15_terminal_decision", strat, opportunity_id=opportunity_id,
+                side="LONG", reason="exit_or_sync_or_session_block",
+                signal_bar_time=signal_bar_text,
+            )
+            return
+        if st["basket"] or len(st["basket"]) >= int(strat.get("max_positions", 1)):
+            self._trade_row(
+                "m15_terminal_decision", strat, opportunity_id=opportunity_id,
+                side="LONG", reason="lane_capacity_full", signal_bar_time=signal_bar_text,
+            )
+            return
+        point = float(self.params.get("point_size", 0.001))
+        spread_points = max(0.0, float(info.ask) - float(info.bid)) / point if point > 0 else math.inf
+        if spread_points > float(self.params.get("max_entry_spread_points", 300.0)):
+            self._trade_row(
+                "m15_terminal_decision", strat, opportunity_id=opportunity_id,
+                side="LONG", reason="spread_guard", signal_bar_time=signal_bar_text,
+            )
+            return
+        stale = stale_signal_decision(
+            signal_bar_text, timeframe_hours=1.0 / 60.0,
+            max_delay_minutes=float(self.params.get("max_signal_delay_minutes", 2.0)),
+            now_utc=poll_time, options=self.safety,
+        )
+        if stale.stale:
+            self._trade_row(
+                "m15_terminal_decision", strat, opportunity_id=opportunity_id,
+                side="LONG", reason="stale_signal_skip", signal_bar_time=signal_bar_text,
+                note=f"entry_due={stale.entry_due_utc} latest={stale.latest_allowed_utc}",
+            )
+            return
+        deadline = m15_terminal_entry_deadline_at(release_time)
+        opportunity = {
+            "opportunity_id": opportunity_id, "source": "m15_terminal",
+            "side": "LONG", "raw_side": "LONG", "effective_side": "LONG",
+            "event_time": signal_bar_text, "release_time": dt_text(release_time),
+            "available_time": dt_text(release_time), "decision_time": dt_text(poll_time),
+            "executable_at": dt_text(poll_time),
+        }
+        self._open_entry(
+            strat, "LONG", price_row, info,
+            note="m15_compression_release_long_only_terminal_safe",
+            execution_time=poll_time, admission_time=quote_time,
+            opportunity=opportunity, apply_portfolio_rearm=False,
+            use_confirmed_fill_time=True, submission_deadline_utc=deadline,
+        )
 
     def _attempt_q01_forced_close(
         self,
@@ -9267,6 +9562,7 @@ class S23HorizontalInventoryRunner:
         trend_recovery_readiness = self._process_trend_recovery_exits(info, quote_time)
         t0530_edge_readiness = self._process_t0530_edge_exits(info, quote_time)
         q01_readiness = self._process_q01_exits(info, quote_time)
+        m15_terminal_readiness = self._process_m15_terminal_exits(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -9302,6 +9598,9 @@ class S23HorizontalInventoryRunner:
         self._process_midday_entries(bars, price_row, info, poll_time, midday_readiness)
         self._process_pre_eu30_entries(bars, price_row, info, poll_time, pre_eu30_readiness)
         self._process_trend_recovery_entry(price_row, info, poll_time, trend_recovery_readiness)
+        self._process_m15_terminal_entries(
+            bars, price_row, info, poll_time, m15_terminal_readiness,
+        )
         # Match the ordered-tick replay: observe the frozen balanced-book
         # range at the first processing of each completed M1, before this
         # poll's basket exits can change the local inventory state.

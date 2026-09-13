@@ -23,6 +23,7 @@ S23_OPEN_POLICY = {
     230034: "s23_tr_l1",
     **{230039 + lane: f"s23_ed_l{lane}" for lane in range(1, 5)},
     230044: "s23_q01_l1",
+    230045: "s23_m15_l1",
 }
 REQUIRED_SHARED_ACCOUNT_COMMANDS = {
     "ECHO", "CAPS", "ACCOUNT", "INFO", "HIST", "HISTPAGE", "TICKS",

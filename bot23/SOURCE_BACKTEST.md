@@ -1,9 +1,32 @@
 # Source Backtest
 
+## 2026-09-13 M15 terminal-safe Long integration
+
+- Current candidate: `bot23-m15-terminal-safe-on-v012`.
+- Current bridge: `2026-09-13-s23-m15-terminal-v35`.
+- Frozen signal: completed Bid M15 compression at 0.60 of the prior-four M15
+  median, followed by a completed M5 close above the compressed High; Long only,
+  capacity one, 0.01 lot, confirmed-fill plus 45 minutes.
+- Operational clock: `America/New_York`; entry `[14:00,16:05)`, last completed
+  M5 release 16:00, hard flat 16:50. This is JST03:00-05:05 / 05:50 in US
+  summer and JST04:00-06:05 / 06:50 in winter.
+- Safety delta from the broader research parent: no new entry near the terminal,
+  and force-close at 16:50 even when spread is wide. Durable ownership and
+  broker-flat reconciliation remain mandatory.
+- Frozen Stress evidence: DEV 14 trades, +46.9555, PF 2.313477, MTM DD 29.8165;
+  Leakcheck 5, +40.4085, PF 4.307293, DD 34.066; Forward 8, +21.112,
+  PF 1.960073, DD 19.092. The scored periods were summer-time observations;
+  winter mapping is verified operationally but has no separate PnL sample.
+- Ownership: independent lane 23, magic 230045, comment `s23_m15_l1`.
+- Evidence source:
+  `C:/Users/muuma/Downloads/codex-temp/bot23_all_jst_hours_dev_20260912/M15_TERMINAL_SAFETY_FIXED_EVAL_REPORT_ja.md`.
+- Local implementation and no-order verification only. No CentOS placement,
+  EA compilation/attachment, service restart, live reconciliation, or order was performed.
+
 ## 2026-09-12 JST11-13 B4C replacement
 
-- Current candidate: `bot23-jst1113-b4c-on-v011`.
-- Current bridge: `2026-09-12-s23-multisymbol-history-v34`.
+- Candidate at that snapshot: `bot23-jst1113-b4c-on-v011`.
+- Bridge at that snapshot: `2026-09-12-s23-multisymbol-history-v34`.
 - JST11-13 runs only `b4c_accel_pre_session_up`; LONG is never routed.
 - Cross-asset features use completed EURUSD/GBPUSD/AUDUSD/USDJPY M1 available
   at the XAUUSD signal release instant. A late live poll is trimmed back to that
@@ -23,7 +46,7 @@
 - Decision: remove the session-VWAP signal from bot23. The strategy/config rows,
   runtime signal/history/entry/exit/retry paths, Python and EA OPEN authorization,
   dedicated module/tests, and Docker Compose mount were removed.
-- Current topology: 17 strategies. The older session-VWAP material below is retained
+- Topology at that snapshot: 17 strategies. The older session-VWAP material below is retained
   only as historical source evidence and does not describe executable behavior.
 
 ## 2026-09-10 UTC 13:30 corrected HL local implementation
@@ -82,7 +105,9 @@ alone does not prove that a quoted close row is complete.
 - Feed gap: a quote interval over 300 seconds closes at the first arrival quote. Feed-gap and fixed-hold exits do not defer for wide spread. Exact market-closed no-fill retains a durable close intent and retries from fresh broker quote time.
 - Ownership: independent lane 22, magic 230044, comment `s23_q01_l1`; Q01 does not reuse any existing basket or signal identity.
 - Evidence status: fixed DEV/Leakcheck/Forward tick evidence is inherited from the frozen research package. This local port verifies implementation parity and lifecycle safety; it does not create a fresh holdout or live-runtime result.
-- Local candidate: `bot23-t0530-edge-on-q01-hl-on-v010`; bridge `2026-09-04-s23-close-claim-v33`.
+- Candidate at Q01 integration: `bot23-t0530-edge-on-q01-hl-on-v010`; bridge at
+  that snapshot: `2026-09-04-s23-close-claim-v33`. Current identity is recorded
+  in the first section.
 - Runtime boundary: no CentOS/MT5 placement, restart, attachment, account access, state repair, or order execution was performed.
 
 ## 2026-08-31 t0530 edge-break best integration
@@ -93,7 +118,7 @@ alone does not prove that a quoted close row is complete.
 - Evidence label: DEV-selected / known leakcheck; historical forward is decision-ineligible and did not pass the promotion gate.
 - Local implementation authorization does not promote the research evidence to fresh holdout, forward, or live evidence.
 - Full DEV tick reconstruction: research mid 139 events, Bid 139 events, implementation 139 events; exact event-time and direction match, including live continuity/OHLC guards.
-- Runtime boundary: the later local candidate is `bot23-t0530-edge-on-q01-hl-on-v010`; Q01 evaluation, t0530 edge and the corrected HL overlay remain locally enabled; session-VWAP is removed. No CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
+- Runtime boundary at that snapshot: candidate `bot23-t0530-edge-on-q01-hl-on-v010` retained Q01 evaluation, t0530 edge and the corrected HL overlay; session-VWAP was removed. Current identity is recorded in the first section. No CentOS/MT5 placement, restart, attachment, account access, or order execution was performed.
 
 ## 2026-08-29 NY 05:30-08:30 session-VWAP fixed candidate (historical; removed 2026-09-11)
 
@@ -147,7 +172,7 @@ alone does not prove that a quoted close row is complete.
    broker position open time before it can monitor and later reconcile that close lifecycle.
    Malformed durable OPEN-retry or ZA cooldown timestamps fail closed for new exposure. A non-finite persisted ZA basket peak is
    conservatively reset from current executable PnL so the fixed failure-to-progress exit cannot be disabled by damaged state.
-   State shape validation includes routing and all 17 lane dictionaries. Basket sequence is validated before OPEN; broker entry
+   State shape validation at that snapshot included routing and all 17 lane dictionaries. Basket sequence is validated before OPEN; broker entry
    price is restored during exact owned sync; malformed frozen ATR uses fixed exits. Invalid fixed-hold defer state is reset before
    a due close, malformed virtual trend state is invalidated without entry, and malformed session close identity blocks signal reuse.
   Every bot-managed 10018 close uses a fresh-broker-quote 60-second cooldown without a reconciliation block. ZA FTP/max-hold

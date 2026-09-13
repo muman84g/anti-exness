@@ -629,6 +629,7 @@ services:
       - ./bot23/position_lifecycle_clock.py:/app/bot23/position_lifecycle_clock.py:ro
       - ./bot23/jst1300_pre_eu30_strategy.py:/app/bot23/jst1300_pre_eu30_strategy.py:ro
       - ./bot23/t0530_edge_overlay.py:/app/bot23/t0530_edge_overlay.py:ro
+      - ./bot23/m15_terminal_overlay.py:/app/bot23/m15_terminal_overlay.py:ro
       - ./bot23/shadow_opportunity_observer.py:/app/bot23/shadow_opportunity_observer.py:ro
       - ./bot23/shadow_state_tagger.py:/app/bot23/shadow_state_tagger.py:ro
       - ./bot23/live_data_fetcher.py:/app/bot23/live_data_fetcher.py:ro

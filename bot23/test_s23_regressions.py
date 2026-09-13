@@ -21,6 +21,7 @@ import pandas as pd
 import live_manual_alerts
 import live_executor
 import live_s23_bot
+import m15_terminal_overlay
 from ea_bridge import EABridgeServer
 from live_s23_bot import (
     EXPECTED_MIDDAY_MAGICS,
@@ -31,6 +32,7 @@ from live_s23_bot import (
     EXPECTED_Q01_MAGICS,
     EXPECTED_Q01_POLICY_ID,
     EXPECTED_Q01_POLICY_PARAMS_HASH,
+    EXPECTED_M15_TERMINAL_MAGICS,
     EXPECTED_S23_MAGIC,
     EXPECTED_S23_MAGICS,
     LEGACY_S23_MAGICS,
@@ -220,7 +222,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         owned = source.split("bool IsOwnedMagic(", 1)[1].split("}", 1)[0]
         query = source.split("bool IsInventoryQueryMagic(", 1)[1].split("}", 1)[0]
         self.assertIn("magic >= 230023 && magic <= 230034", owned)
-        self.assertIn("magic >= 230040 && magic <= 230044", owned)
+        self.assertIn("magic >= 230040 && magic <= 230045", owned)
         self.assertNotIn("230035", owned)
         self.assertNotIn("200023", owned)
         self.assertIn("return IsOwnedMagic(magic) || magic == 200023;", query)
@@ -1018,7 +1020,7 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         self.assertEqual(
             params["candidate_id"],
-            "bot23-jst1113-b4c-on-v011",
+            "bot23-m15-terminal-safe-on-v012",
         )
         self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])
@@ -1833,9 +1835,11 @@ class Bot23ZARegressionTests(unittest.TestCase):
         with patch.object(live_s23_bot.os.path, "exists", return_value=False):
             baseline = S23HorizontalInventoryRunner(params)
         session_id = params["t0530_edge_strategies"][0]["id"]
+        m15_id = params["m15_terminal_strategies"][0]["id"]
         za_id = params["strategies"][0]["id"]
         corruptions = (
             lambda state: state["strategies"].pop(session_id),
+            lambda state: state["strategies"].pop(m15_id),
             lambda state: state["strategies"][session_id].pop("basket"),
             lambda state: state["strategies"][za_id].pop("basket_sequence"),
             lambda state: state["strategies"][session_id].__setitem__("basket", {}),
@@ -1855,6 +1859,7 @@ class Bot23ZARegressionTests(unittest.TestCase):
             lambda state: state["routing"].pop("trend_recovery"),
             lambda state: state["routing"].pop("long_target_rearm_request_utc"),
             lambda state: state["routing"].pop("t0530_edge_params_hash"),
+            lambda state: state["routing"].pop("m15_terminal_params_hash"),
             lambda state: state["routing"].pop("entry_policy_params_hash"),
             lambda state: (
                 state["routing"].pop("entry_policy_id"),
@@ -6109,7 +6114,10 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         registered = observer.calls[1][1]
         self.assertEqual(registered["opportunity"]["effective_side"], "LONG")
         self.assertEqual(registered["context"]["portfolio_positions"], 0)
-        self.assertEqual(registered["context"]["lane_positions"], {str(lane): 0 for lane in range(1, 13)})
+        self.assertEqual(
+            registered["context"]["lane_positions"],
+            {**{str(lane): 0 for lane in range(1, 13)}, "23": 0},
+        )
         self.assertEqual(observer.calls[2][1]["consumed_lane_id"], 2)
 
     def test_policy_rejected_raw_opportunity_is_registered_before_rejection(self):
@@ -10075,7 +10083,7 @@ class Bot23TrendRecoveryRegressionTests(unittest.TestCase):
 class SignalEvaluationAttributionTests(unittest.TestCase):
     def test_every_lane_has_explicit_signal_identity(self):
         runner, _strategy, _state = make_runner(live=False)
-        self.assertEqual(len(runner._all_strategies()), 17)
+        self.assertEqual(len(runner._all_strategies()), 18)
         for strategy in runner._all_strategies():
             with self.subTest(strategy=strategy["id"]):
                 self.assertTrue(str(strategy.get("spec_id") or ""))
@@ -10359,6 +10367,245 @@ class SignalEvaluationAttributionTests(unittest.TestCase):
         self.assertFalse(state["basket"])
         self.assertEqual(state["last_closed_reason"], "basket_target")
         self.assertEqual(state["daily_realized_pnl_usd"], 1.0)
+
+
+class Bot23M15TerminalSafetyRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _compression_release_bars(end: str = "2026-07-01T19:19:00Z") -> pd.DataFrame:
+        index = pd.date_range(end=pd.Timestamp(end), periods=80, freq="1min", tz="UTC")
+        rows = []
+        for stamp in index:
+            block = (stamp.minute // 15) + stamp.hour * 4
+            if block == ((pd.Timestamp(end).hour * 4) + 0):
+                high, low, close = 2002.0, 1998.0, 2000.0
+            elif stamp >= pd.Timestamp("2026-07-01T19:15:00Z"):
+                high, low, close = 2004.0, 2001.0, 2003.0
+            else:
+                high, low, close = 2005.0, 1995.0, 2000.0
+            rows.append((2000.0, high, low, close))
+        return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close"], index=index)
+
+    def test_signal_waits_for_completed_m5_bar(self):
+        bars = self._compression_release_bars()
+        self.assertTrue(m15_terminal_overlay.latest_long_signal(bars))
+        self.assertFalse(m15_terminal_overlay.latest_long_signal(bars.iloc[:-1]))
+
+    def test_signal_fails_closed_when_latest_m5_has_a_missing_m1(self):
+        bars = self._compression_release_bars().drop(pd.Timestamp("2026-07-01T19:17:00Z"))
+        self.assertFalse(m15_terminal_overlay.latest_long_signal(bars))
+
+    def test_invalid_signal_input_is_contained_to_lane_23(self):
+        runner, _strategy, _state = make_runner(live=False)
+        strat = runner._m15_terminal_strategies()[0]
+        release = pd.Timestamp("2026-07-01T19:20:00Z")
+        bars = self._compression_release_bars()
+        bars["Close"] = bars["Close"].astype(object)
+        bars.loc[bars.index[-1], "Close"] = "invalid"
+        info = SimpleNamespace(
+            bid=2000.0, ask=2000.1, quote_time_msc=int(release.timestamp() * 1000),
+        )
+        with patch.object(runner, "_trade_row") as audit, patch.object(runner, "_open_entry") as opened:
+            runner._process_m15_terminal_entries(
+                bars, bars.iloc[-1], info, release, {int(strat["lane_id"]): True},
+            )
+        opened.assert_not_called()
+        self.assertTrue(any(call.kwargs.get("reason") == "signal_input_invalid" for call in audit.call_args_list))
+
+    def test_dst_mapping_and_half_open_entry_boundary(self):
+        summer = pd.Timestamp("2026-07-01T20:00:00Z")
+        winter = pd.Timestamp("2026-12-01T21:00:00Z")
+        self.assertTrue(m15_terminal_overlay.in_entry_window(summer))
+        self.assertTrue(m15_terminal_overlay.in_entry_window(winter))
+        self.assertFalse(m15_terminal_overlay.in_entry_window(pd.Timestamp("2026-07-01T20:05:00Z")))
+        self.assertFalse(m15_terminal_overlay.in_entry_window(pd.Timestamp("2026-12-01T21:05:00Z")))
+        self.assertEqual(
+            m15_terminal_overlay.hard_flat_due_at(summer),
+            pd.Timestamp("2026-07-01T20:50:00Z"),
+        )
+        self.assertEqual(
+            m15_terminal_overlay.hard_flat_due_at(winter),
+            pd.Timestamp("2026-12-01T21:50:00Z"),
+        )
+
+    def test_us_dst_transition_changes_jst_mapping_without_fixed_offset(self):
+        est_start = pd.Timestamp("2026-03-07T19:00:00Z")
+        edt_start = pd.Timestamp("2026-03-09T18:00:00Z")
+        self.assertTrue(m15_terminal_overlay.in_entry_window(est_start))
+        self.assertTrue(m15_terminal_overlay.in_entry_window(edt_start))
+        self.assertEqual(est_start.tz_convert("Asia/Tokyo").hour, 4)
+        self.assertEqual(edt_start.tz_convert("Asia/Tokyo").hour, 3)
+        self.assertEqual(
+            m15_terminal_overlay.hard_flat_due_at(est_start),
+            pd.Timestamp("2026-03-07T21:50:00Z"),
+        )
+        self.assertEqual(
+            m15_terminal_overlay.hard_flat_due_at(edt_start),
+            pd.Timestamp("2026-03-09T20:50:00Z"),
+        )
+
+    def test_lane_23_ownership_and_policy_are_frozen(self):
+        params = load_params(str(Path(__file__).with_name("s23_params.json")))
+        self.assertEqual(params["expected_m15_terminal_magics"], list(EXPECTED_M15_TERMINAL_MAGICS))
+        self.assertEqual(params["m15_terminal_policy_id"], m15_terminal_overlay.POLICY_ID)
+        self.assertEqual(params["m15_terminal_params_hash"], m15_terminal_overlay.POLICY_PARAMS_HASH)
+        lane = params["m15_terminal_strategies"][0]
+        self.assertEqual((lane["lane_id"], lane["magic"], lane["comment_prefix"]), (23, 230045, "s23_m15_l1"))
+
+    def test_pre_m15_state_migration_preserves_all_existing_lanes(self):
+        seed, _strategy, _state = make_runner(live=True)
+        legacy = seed._default_state()
+        legacy["routing"].pop("m15_terminal_policy_id")
+        legacy["routing"].pop("m15_terminal_params_hash")
+        lane_id = seed._m15_terminal_strategies()[0]["id"]
+        legacy["strategies"].pop(lane_id)
+        preserved_id = seed.params["strategies"][0]["id"]
+        legacy["strategies"][preserved_id]["cooldown_until_bar"] = 12345
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+            state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                migrated = S23HorizontalInventoryRunner(json.loads(json.dumps(seed.params)))
+            self.assertTrue(migrated._m15_terminal_state_migrated)
+            self.assertEqual(migrated.state["strategies"][preserved_id]["cooldown_until_bar"], 12345)
+            self.assertEqual(migrated.state["strategies"][lane_id]["basket"], [])
+        finally:
+            os.unlink(state_path)
+
+    def test_foreign_m15_policy_blocks_only_lane_23_without_rewrite(self):
+        seed, _strategy, _state = make_runner(live=True)
+        state = seed._default_state()
+        state["routing"]["m15_terminal_policy_id"] = "foreign-policy"
+        state["routing"]["m15_terminal_params_hash"] = "f" * 64
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle)
+            state_path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", state_path):
+                loaded = S23HorizontalInventoryRunner(json.loads(json.dumps(seed.params)))
+            lane = loaded._st(loaded._m15_terminal_strategies()[0])
+            self.assertEqual(lane["sync_block_reason"], "m15_terminal_policy_identity_mismatch")
+            self.assertFalse(lane["sync_block_recoverable"])
+            self.assertIsNone(loaded._st(loaded.params["strategies"][0])["sync_block_reason"])
+            self.assertEqual(loaded.state["routing"]["m15_terminal_policy_id"], "foreign-policy")
+        finally:
+            os.unlink(state_path)
+
+    def test_hard_flat_bypasses_existing_wide_spread_defer(self):
+        runner, _strategy, _state = make_runner(live=False)
+        strat = runner._m15_terminal_strategies()[0]
+        state = runner._st(strat)
+        entered = pd.Timestamp("2026-07-01T19:00:00Z")
+        state["basket"] = [{
+            "side": "LONG", "lot": 0.01, "entry_price": 2000.0,
+            "entry_time_utc": dt_text(entered),
+        }]
+        state["basket_sequence"] = 1
+        state["current_basket_id"] = "L23-B000001"
+        normal_due = entered + pd.Timedelta(minutes=45)
+        wide = SimpleNamespace(
+            bid=2000.0, ask=2001.0,
+            quote_time_msc=int(normal_due.timestamp() * 1000),
+        )
+        with patch.object(runner, "_close_basket", return_value="requested") as close:
+            self.assertTrue(runner._monitor_m15_terminal_position(strat, wide, normal_due))
+            close.assert_not_called()
+            hard_due = pd.Timestamp("2026-07-01T20:50:00Z")
+            wide.quote_time_msc = int(hard_due.timestamp() * 1000)
+            self.assertTrue(runner._monitor_m15_terminal_position(strat, wide, hard_due))
+            self.assertEqual(close.call_args.args[1], "m15_terminal_hard_flat")
+            self.assertFalse(state["time_close_wide_seen"])
+
+    def test_entry_at_exclusive_ny_1605_boundary_is_never_submitted(self):
+        runner, _strategy, _state = make_runner(live=False)
+        strat = runner._m15_terminal_strategies()[0]
+        boundary = pd.Timestamp("2026-07-01T20:05:00Z")
+        bars = pd.DataFrame(
+            {"Open": [2000.0], "High": [2001.0], "Low": [1999.0], "Close": [2000.5]},
+            index=[boundary - pd.Timedelta(minutes=1)],
+        )
+        info = SimpleNamespace(
+            bid=2000.0, ask=2000.1, quote_time_msc=int(boundary.timestamp() * 1000),
+        )
+        with patch.object(runner, "_open_entry") as opened, patch.object(
+            live_s23_bot, "latest_m15_terminal_long_signal", return_value=True,
+        ):
+            runner._process_m15_terminal_entries(
+                bars, bars.iloc[-1], info, boundary, {int(strat["lane_id"]): True},
+            )
+        opened.assert_not_called()
+
+    def test_live_open_rechecks_deadline_after_durable_reservation(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat = runner._m15_terminal_strategies()[0]
+        state = runner._st(strat)
+        executor = CountingExecutor()
+        runner.executor = executor
+        before = pd.Timestamp("2026-07-01T20:04:59Z")
+        after = pd.Timestamp("2026-07-01T20:05:01Z")
+        row = pd.Series(
+            {"Open": 2000.0, "AskOpen": 2000.1},
+            name=pd.Timestamp("2026-07-01T19:59:00Z"),
+        )
+        info = SimpleNamespace(bid=2000.0, ask=2000.1)
+        opportunity = {"opportunity_id": "m15-deadline-test", "decision_time": dt_text(before)}
+        with patch.object(live_s23_bot, "utc_now", side_effect=[before.to_pydatetime(), after.to_pydatetime()]), patch.object(
+            runner, "_broker_quote_time", side_effect=[before, after],
+        ), patch.object(runner, "_new_basket_block_reason", return_value=None), patch.object(
+            runner, "_entry_submission_block_reason", return_value=None,
+        ), patch.object(runner, "_broker_entry_contract_error", return_value=None):
+            opened = runner._open_entry(
+                strat, "LONG", row, info,
+                execution_time=before, admission_time=before,
+                opportunity=opportunity, apply_portfolio_rearm=False,
+                submission_deadline_utc=pd.Timestamp("2026-07-01T20:05:00Z"),
+            )
+        self.assertFalse(opened)
+        self.assertEqual(executor.open_calls, 0)
+        self.assertIsNone(state["pending_open_opportunity_id"])
+        self.assertIsNone(state["pending_open_started_utc"])
+
+    def test_live_open_rejects_host_deadline_crossing_with_lagging_broker_quote(self):
+        runner, _strategy, _state = make_runner(live=True)
+        strat = runner._m15_terminal_strategies()[0]
+        state = runner._st(strat)
+        executor = CountingExecutor()
+        runner.executor = executor
+        before = pd.Timestamp("2026-07-01T20:04:59Z")
+        after = pd.Timestamp("2026-07-01T20:05:01Z")
+        row = pd.Series(
+            {"Open": 2000.0, "AskOpen": 2000.1},
+            name=pd.Timestamp("2026-07-01T19:59:00Z"),
+        )
+        info = SimpleNamespace(bid=2000.0, ask=2000.1)
+        opportunity = {"opportunity_id": "m15-host-deadline-test", "decision_time": dt_text(before)}
+        with patch.object(
+            live_s23_bot, "utc_now",
+            side_effect=[before.to_pydatetime(), after.to_pydatetime()],
+        ), patch.object(
+            runner, "_broker_quote_time", side_effect=[before, before],
+        ), patch.object(
+            runner, "_new_basket_block_reason", return_value=None,
+        ), patch.object(
+            runner, "_entry_submission_block_reason", return_value=None,
+        ), patch.object(runner, "_broker_entry_contract_error", return_value=None):
+            opened = runner._open_entry(
+                strat, "LONG", row, info,
+                execution_time=before, admission_time=before,
+                opportunity=opportunity, apply_portfolio_rearm=False,
+                submission_deadline_utc=pd.Timestamp("2026-07-01T20:05:00Z"),
+            )
+        self.assertFalse(opened)
+        self.assertEqual(executor.open_calls, 0)
+        self.assertIsNone(state["pending_open_opportunity_id"])
+        self.assertIsNone(state["pending_open_started_utc"])
+
+    def test_bridge_allows_only_the_new_exact_magic_comment_pair(self):
+        source = Path(__file__).with_name("BotBridge_s23.mq5").read_text(encoding="utf-8")
+        self.assertIn('if(magic == 230045)', source)
+        self.assertIn('return "s23_m15_l1";', source)
+        self.assertIn("magic >= 230040 && magic <= 230045", source)
+        self.assertEqual(live_executor.S23_OPEN_POLICY[230045], "s23_m15_l1")
 
 
 if __name__ == "__main__":

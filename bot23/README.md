@@ -1,11 +1,38 @@
 # Bot23 integrated inventory and independent session overlays
 
-## 2026-09-12 current candidate
+## 2026-09-13 current candidate
 
-Current candidate is `bot23-jst1113-b4c-on-v011`; its required EA bridge is
-`2026-09-12-s23-multisymbol-history-v34`. JST11:00-13:00 uses only the B4C
-SHORT strategy described below. Deployment, EA compilation/attachment, service recreation and
-live multi-symbol availability are not proved by the local checks.
+Current candidate is `bot23-m15-terminal-safe-on-v012`; its required EA bridge is
+`2026-09-13-s23-m15-terminal-v35`. It preserves the B4C-only JST11:00-13:00
+route and adds the independent M15 terminal-safe Long lane described below.
+Deployment, EA compilation/attachment, service recreation and live runtime
+identity are not proved by the local checks.
+
+## M15 compression / M5 release terminal-safe Long (2026-09-13 local implementation)
+
+The frozen `m15_compression_release_long_only_jst0300_0555` idea is implemented
+as independent lane 23 (magic 230045, comment `s23_m15_l1`). It uses completed
+broker-Bid M1 bars only: an M15 range at or below 60% of the median range of the
+prior four completed M15 bars arms the next release checks, and the completed
+M5 close above that compressed High emits a Long pulse. Short is never routed.
+Missing constituent M1 bars fail closed, and a partial live M5 bar cannot emit.
+
+The operational clock is `America/New_York`: entry is permitted from 14:00
+inclusive through 16:05 exclusive, so the last eligible completed M5 release is
+16:00. This maps automatically to JST03:00-05:05 in US summer time and
+JST04:00-06:05 in winter time. Capacity is one 0.01-lot position. Normal close
+is confirmed fill plus 45 minutes; every remaining owned position is force-close
+eligible at NY16:50 (JST05:50 summer / JST06:50 winter). That hard close bypasses
+the ordinary wide-spread defer but retains the durable close intent and owned
+state until broker-flat reconciliation. Entry eligibility is checked again at
+the actual OPEN submission boundary, preventing a reservation write from
+crossing the exclusive 16:05 deadline.
+
+Frozen terminal-safe Stress evidence is DEV 14 trades / +46.9555 / PF 2.313477 /
+MTM DD 29.8165, Leakcheck 5 / +40.4085 / PF 4.307293 / DD 34.066, and Forward
+8 / +21.112 / PF 1.960073 / DD 19.092. The implementation does not retune from
+those out-of-sample results. The scored data were in the US summer-time regime;
+winter behavior is clock-contract coverage, not separate winter PnL evidence.
 
 ## UTC 13:30 corrected HL overlay (2026-09-10 local implementation)
 
@@ -35,7 +62,7 @@ The canonical EA artifact in this folder is the source `BotBridge_s23.mq5`.
 Compose copies it into MT5, removes any previously compiled binary, and compiles
 the selected `BotBridge_s23` during service startup. The runner constant and
 `expected_bridge_version` must both remain
-`2026-09-12-s23-multisymbol-history-v34`; every older EA is rejected by
+`2026-09-13-s23-m15-terminal-v35`; every older EA is rejected by
 preflight. Compilation and local tests are not deployment proof.
 
 ## Local IPC recovery correction (2026-09-04)
@@ -60,10 +87,12 @@ preflight. Compilation and local tests are not deployment proof.
   no-order regression suite. Local tests do not prove CentOS has this version.
 
 Bridge v32 correction (2026-09-04): POSITIONS/ORDERS may read retired magic
-200023 solely for cutover inventory checks. Executable ownership remains
-230023-230044; legacy inventory is not adopted or tradable. Nonempty or failed
-legacy queries still block startup. Runner and params require v32; compile and
-attach the matching EA before restarting. Local verification is not deployment.
+200023 solely for cutover inventory checks. Current executable ownership is
+230023-230034 and 230040-230045; retired 230035-230039 and legacy 200023 are not
+adopted or tradable. Nonempty or failed
+legacy queries still block startup. That historical correction required v32;
+the current runner and params require v35. Compile and attach the matching
+current EA before restarting. Local verification is not deployment.
 
 Close-ledger durability re-audit (2026-09-04): an existing confirmed-deal row is
 filesystem-synced again, including its parent directory, before replay can consume
@@ -79,7 +108,7 @@ session-VWAP strategy was removed after the extended Forward-tick replay fell to
 68 trades, PnL -74.786, PF 0.685 and MTM MDD 160.456. Its five strategy rows,
 signal/history implementation, runtime entry/exit/retry paths, Python and EA OPEN
 allowlists, dedicated tests, and Docker Compose mount are no longer present.
-The current runtime topology has 17 strategies. Historical sections below describe
+The runtime topology at that snapshot had 17 strategies. Historical sections below describe
 the removed candidate only and are not an activation or deployment instruction.
 
 ## Q01 completed-M5 variance-ratio release（採用・ローカル有効）
@@ -109,7 +138,7 @@ opportunity ID、group receipt、固定expiryを完全一致で検証し、破�
 
 `t0530_edge_break_fade`を既存17レーンと分離したlane 18-21
 （magic 230040-230043）へ移植しています。現在のローカル候補
-`bot23-t0530-edge-on-q01-hl-on-v010`では
+`bot23-m15-terminal-safe-on-v012`では
 `t0530_edge_enabled=true`です。CentOS/MT5への配置、
 再起動、live/forward確認はこのローカル候補の範囲外です。
 
@@ -216,7 +245,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-12-s23-multisymbol-history-v34` です。v34は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよび今後のread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-13-s23-m15-terminal-v35` です。v35は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`に加えてM15 lane 23 / magic 230045 / comment `s23_m15_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよび今後のread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
@@ -656,6 +685,11 @@ The first start also adds one empty Q01 lane and its frozen policy identity
 while preserving all 21 pre-existing lane states. Q01 owns magic 230044 and
 comment `s23_q01_l1`; a current-generation Q01 state with a missing required
 receipt or quote-clock field fails closed instead of being silently repaired.
+The first v012 start adds one empty M15 terminal lane and its frozen policy
+identity while preserving all 17 pre-existing active lane states. Retired
+session-VWAP lane state is removed rather than preserved. The new lane owns magic 230045
+and comment `s23_m15_l1`; a current-generation state missing lane 23 or carrying
+a foreign M15 policy identity fails closed rather than adopting inventory.
 On the first start with `reverse_d60`, the runner preserves existing baskets and
 unresolved OPEN reconciliation state but clears unsubmitted local pending
 entries created under the previous entry policy.
@@ -669,8 +703,9 @@ admission and automated close. After the lane is broker-flat, an unresolved
 OPEN reservation is cleared only after three consecutive clean bot-scoped flat
 position/order confirmations.
 
-Before restart, MT5 must be reconciled for the retired bot23 magic 200023 and
-active magics 230023-230044, with no unexplained pending orders. The runner independently
+Before restart, MT5 must be reconciled for the retired bot23 magics 200023 and
+230035-230039, and active magics 230023-230034 and 230040-230045, with no
+unexplained pending orders. The runner independently
 checks the retired namespace and refuses cutover if it is non-flat or cannot be
 queried. Preserve a compatible `state/s23_bot_state.json`; never reset state
 while any lane position or order exists. Because the close audit columns changed,
@@ -705,12 +740,14 @@ checkout root; otherwise that one external-artifact check is reported as
 skipped while the self-contained bot23 suite continues.
 
 Local release-candidate runner SHA-256:
-`c79284157a27a13bc16ea302278d4482395d53b6561d21487897a383bdea0911`.
+`8ba133c2a302efdcd49e5440cdceae8d10a1aef6fab85d8962ac7719dcfdb376`.
 
 Local release-candidate params SHA-256:
-`67faa225d255d4b4bc88b7f3c11bcd483a3510c9c1f65e3337a70bb21b722af5`.
+`e16d9235d39f022f5731810ef33156eda5c77eb1306a684a2fd3e938876a73ac`.
 Local release-candidate regression SHA-256:
-`21472106c24cf5ad38bc678ab9a6b2154d3c5fe6b11b7a87be7957324db4cbfe`.
+`fa6ed22ee6ce75c5369e7549b650f9234ee2bd3d7ad99782bcc70bc93546c7c3`.
+M15 terminal overlay SHA-256:
+`830093a67458203423540918659f0621e636dc50750a1d16d20410b3df22d8ba`.
 Entry-admission clock SHA-256:
 `fbdecc7be7d64e457a151c05cbb8f0496986c7d6de18dcd37b15104f6b28318b`.
 Position-lifecycle clock SHA-256:
@@ -722,11 +759,11 @@ Installed shadow-observer SHA-256:
 Installed shadow-observer regression SHA-256:
 `5dd72132c92de2aea1f43fe992cf738354529238d2cf503b4605c0c8a4c76f4d`.
 Installed executor SHA-256:
-`ea0c5f6d48f6fa36bccfd602e2ac4aaf4ea0f2245920af6e137a21c38cc41489`.
+`653ff21950e114356eba80c4e9ab55e596271e3fbb783b543b7024a3006b3590`.
 Installed bridge-source SHA-256:
-`d40491d6b25eafd402ea3de7b94161da2bffa26347381dbc25387a45d6a165f5`.
-Installed bridge-binary SHA-256:
-`e9135ec12d9c8f2cc84591f3b1842942644b5db060c62cd82bf75408fb03234d`.
+`dc03aa5e0219db06168ae1db3df6610de8ee1bbf2f121ac7a107938acf7eed54`.
+No v35 bridge binary was compiled in this local pass; binary identity remains
+an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
 process identity must be verified separately; these hashes do not replace the
 canonical research identities in `SOURCE_BACKTEST.md`.
