@@ -77,7 +77,7 @@ EXPECTED_RAD_MAGIC = 240207
 EXPECTED_BRIDGE_NAME = "BotBridge_s24"
 EXPECTED_BRIDGE_VERSION = "2026-09-14-s24-rad070-v20"
 S24_STATE_VERSION = 3
-RAD070_STATE_GENERATION = 1
+RAD070_STATE_GENERATION = 2
 LEGACY_V2_STRATEGY_IDS = {"visual_no_adverse_c_target16"}
 FLAT_AUTO_CLEAR_SYNC_REASONS = {
     "open_success_position_not_confirmed",
@@ -1503,22 +1503,67 @@ class S24NoAdverseRunner:
                 for sid, expected_keys in v2_rad_strategy_keys.items()
             )
         )
+        known_v3_generation1 = (
+            shape_matches
+            and observed.get("bot") == default["bot"]
+            and observed.get("strategy_id") == default["strategy_id"]
+            and observed_version == S24_STATE_VERSION
+            and isinstance(observed.get("rad070_state_generation"), int)
+            and not isinstance(observed.get("rad070_state_generation"), bool)
+            and observed.get("rad070_state_generation") == 1
+            and observed_strategy_ids == expected_strategy_ids
+            and all(
+                isinstance(strategies.get(sid), dict)
+                and set(strategies[sid]) == set(expected)
+                for sid, expected in default["strategies"].items()
+            )
+        )
+        rad_id = "range_autocorrelation_direction_rad070"
+        rad_state = strategies.get(rad_id) if isinstance(strategies, dict) else None
+        legacy_rad_bootstrap_tombstone = (
+            (known_v2_with_rad or known_v3_generation1)
+            and isinstance(rad_state, dict)
+            and rad_id in quarantine
+            and quarantine.get(rad_id) is None
+            and rad_state.get("basket") == []
+            and rad_state.get("pending_open_opportunity_id") is None
+            and rad_state.get("pending_open_started_utc") is None
+            and rad_state.get("pending_close_reason") is None
+            and rad_state.get("pending_close_signal_bar") is None
+            and rad_state.get("sync_block_new_entries") is True
+            and rad_state.get("sync_block_reason") == "state_container_invalid"
+            and rad_state.get("sync_block_recoverable") is False
+            and rad_state.get("sync_block_details")
+            == {"cause": "not_object", "quarantine_key": rad_id}
+        )
         migrated_from_v2 = False
-        if known_v2_pre_rad or known_v2_with_rad:
-            migrated_from_v2 = True
+        if known_v2_pre_rad or known_v2_with_rad or known_v3_generation1:
+            migrated_from_v2 = bool(known_v2_pre_rad or known_v2_with_rad)
             state = observed
-            state["version"] = S24_STATE_VERSION
+            if migrated_from_v2:
+                state["version"] = S24_STATE_VERSION
             state["rad070_state_generation"] = RAD070_STATE_GENERATION
             if known_v2_pre_rad:
-                rad_id = "range_autocorrelation_direction_rad070"
                 state["strategies"][rad_id] = copy.deepcopy(default["strategies"][rad_id])
+            elif legacy_rad_bootstrap_tombstone:
+                # The first RAD deployment treated the absent pre-RAD lane as a
+                # malformed container and persisted a blocked empty replacement.
+                # Clear only that exact, inactive v2 bootstrap artifact.  Any
+                # other quarantine or lifecycle evidence remains fail-closed.
+                state["quarantined_strategy_states"].pop(rad_id)
+                state["strategies"][rad_id]["sync_block_new_entries"] = False
+                state["strategies"][rad_id]["sync_block_reason"] = None
+                state["strategies"][rad_id]["sync_block_recoverable"] = False
+                state["strategies"][rad_id]["sync_block_details"] = {}
+                logging.warning("S24 cleared exact inactive legacy RAD070 bootstrap tombstone")
             observed = state
             strategies = state["strategies"]
             observed_version = S24_STATE_VERSION
             observed_strategy_ids = set(strategies)
             logging.warning(
-                "S24 migrated supported %s v2 state generation to v3",
-                "pre-RAD" if known_v2_pre_rad else "deployed-RAD",
+                "S24 migrated supported %s state to RAD070 generation %s",
+                "pre-RAD v2" if known_v2_pre_rad else ("deployed-RAD v2" if known_v2_with_rad else "v3 generation 1"),
+                RAD070_STATE_GENERATION,
             )
         version_matches = observed_version == S24_STATE_VERSION
         generation_matches = (

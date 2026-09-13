@@ -93,7 +93,7 @@ class S24RAD070Tests(unittest.TestCase):
 
         self.assertFalse(runner._fatal_state_identity_mismatch)
         self.assertEqual(runner.state["version"], 3)
-        self.assertEqual(runner.state["rad070_state_generation"], 1)
+        self.assertEqual(runner.state["rad070_state_generation"], 2)
         self.assertEqual(runner.state["strategies"][core_id]["cooldown_until_bar"], 7)
         self.assertEqual(runner.state["strategies"][rad_id]["basket"], [])
 
@@ -122,12 +122,100 @@ class S24RAD070Tests(unittest.TestCase):
 
         self.assertFalse(runner._fatal_state_identity_mismatch)
         self.assertEqual(runner.state["version"], 3)
-        self.assertEqual(runner.state["rad070_state_generation"], 1)
+        self.assertEqual(runner.state["rad070_state_generation"], 2)
         self.assertEqual(runner.state["strategies"][core_id]["cooldown_until_bar"], 7)
         self.assertEqual(runner.state["strategies"][rad_id]["cooldown_until_bar"], 11)
         self.assertEqual(runner.state["strategies"][rad_id]["basket"], [rad_position])
         self.assertIsNone(runner.state["strategies"][rad_id]["protection_repair_retry_after_utc"])
         self.assertEqual(runner.state["strategies"][rad_id]["protection_repair_failure_count"], 0)
+
+    def test_exact_inactive_rad_v2_bootstrap_tombstone_is_cleared(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        rad_id = params["strategies"][1]["id"]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        for state in seed["strategies"].values():
+            state.pop("protection_repair_retry_after_utc")
+            state.pop("protection_repair_failure_count")
+        rad_state = seed["strategies"][rad_id]
+        rad_state.update({
+            "sync_block_new_entries": True,
+            "sync_block_reason": "state_container_invalid",
+            "sync_block_recoverable": False,
+            "sync_block_details": {"cause": "not_object", "quarantine_key": rad_id},
+        })
+        seed["quarantined_strategy_states"][rad_id] = None
+
+        runner = self._load_seed(params, seed)
+
+        self.assertFalse(runner._fatal_state_identity_mismatch)
+        self.assertNotIn(rad_id, runner.state["quarantined_strategy_states"])
+        self.assertFalse(runner.state["strategies"][rad_id]["sync_block_new_entries"])
+        self.assertIsNone(runner.state["strategies"][rad_id]["sync_block_reason"])
+
+    def test_rad_v2_bootstrap_tombstone_with_lifecycle_evidence_stays_blocked(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        rad_id = params["strategies"][1]["id"]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        for state in seed["strategies"].values():
+            state.pop("protection_repair_retry_after_utc")
+            state.pop("protection_repair_failure_count")
+        rad_state = seed["strategies"][rad_id]
+        rad_state.update({
+            "pending_open_opportunity_id": "unknown-live-opportunity",
+            "sync_block_new_entries": True,
+            "sync_block_reason": "state_container_invalid",
+            "sync_block_recoverable": False,
+            "sync_block_details": {"cause": "not_object", "quarantine_key": rad_id},
+        })
+        seed["quarantined_strategy_states"][rad_id] = None
+
+        runner = self._load_seed(params, seed)
+
+        self.assertTrue(runner.state["strategies"][rad_id]["sync_block_new_entries"])
+        self.assertEqual(runner.state["strategies"][rad_id]["sync_block_reason"], "state_container_invalid")
+        self.assertIn(rad_id, runner.state["quarantined_strategy_states"])
+
+    def test_v3_generation1_rad_bootstrap_tombstone_is_cleared_once(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        rad_id = params["strategies"][1]["id"]
+        seed["rad070_state_generation"] = 1
+        seed["strategies"][rad_id].update({
+            "sync_block_new_entries": True,
+            "sync_block_reason": "state_container_invalid",
+            "sync_block_recoverable": False,
+            "sync_block_details": {"cause": "not_object", "quarantine_key": rad_id},
+        })
+        seed["quarantined_strategy_states"][rad_id] = None
+
+        runner = self._load_seed(params, seed)
+
+        self.assertEqual(runner.state["rad070_state_generation"], 2)
+        self.assertFalse(runner.state["strategies"][rad_id]["sync_block_new_entries"])
+        self.assertIsNone(runner.state["strategies"][rad_id]["sync_block_reason"])
+        self.assertNotIn(rad_id, runner.state["quarantined_strategy_states"])
+
+    def test_current_generation_rad_bootstrap_tombstone_is_never_auto_cleared(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        rad_id = params["strategies"][1]["id"]
+        seed["strategies"][rad_id].update({
+            "sync_block_new_entries": True,
+            "sync_block_reason": "state_container_invalid",
+            "sync_block_recoverable": False,
+            "sync_block_details": {"cause": "not_object", "quarantine_key": rad_id},
+        })
+        seed["quarantined_strategy_states"][rad_id] = None
+
+        runner = self._load_seed(params, seed)
+
+        self.assertTrue(runner.state["strategies"][rad_id]["sync_block_new_entries"])
+        self.assertEqual(runner.state["strategies"][rad_id]["sync_block_reason"], "state_container_invalid")
+        self.assertIn(rad_id, runner.state["quarantined_strategy_states"])
 
     def test_deployed_rad_v2_state_with_unknown_shape_still_fails_closed(self):
         params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
