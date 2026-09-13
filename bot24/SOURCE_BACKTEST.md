@@ -59,8 +59,10 @@ so the lane is treated as operationally independent rather than a duplicate.
   Disabling live trading also disables `REPAIR_FIXED`: owned inventory remains
   reconcilable, but broker protection mutation is deferred until live execution
   is explicitly enabled again.
-- Root state generation v3 allows only the exact pre-RAD v2 core-only
-  migration. Missing or extra v3 strategy containers fail closed, preventing
+- Root state generation v3 allows the exact pre-RAD v2 core-only migration and
+  the exact deployed-RAD v2 two-container migration. The former creates only
+  the new RAD container; the latter preserves both existing containers and
+  fills only the new protection-repair defaults. Missing or extra v3 strategy containers fail closed, preventing
   lost RAD signal-consumption identity from reopening a completed M30 signal.
   A partial RAD nested container, non-integer root version, or boolean generation
   marker also fails closed. A partial current-v3 core container is quarantined

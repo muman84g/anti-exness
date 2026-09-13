@@ -67,9 +67,11 @@ With live trading disabled, reconciliation may still verify the owned position,
 but it cannot submit `REPAIR_FIXED`; the repair remains durably deferred until
 live execution is explicitly enabled again.
 
-State generation v3 distinguishes the one supported pre-RAD v2 migration from
-later state loss. Only an exact v2 core-only file receives a fresh RAD
-container. Once v3 is present, a missing or extra strategy container fails the
+State generation v3 distinguishes the supported pre-RAD and deployed-RAD v2
+migrations from later state loss. Only an exact v2 core-only file receives a
+fresh RAD container; an exact deployed-RAD v2 file preserves both existing
+strategy containers and receives only the new protection-repair defaults.
+Once v3 is present, a missing or extra strategy container fails the
 whole bot closed instead of recreating signal-consumption state. The complete
 RAD nested state shape and the strict non-boolean generation marker are also
 required. The root version is likewise a strict non-boolean integer, so string,

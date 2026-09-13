@@ -97,6 +97,53 @@ class S24RAD070Tests(unittest.TestCase):
         self.assertEqual(runner.state["strategies"][core_id]["cooldown_until_bar"], 7)
         self.assertEqual(runner.state["strategies"][rad_id]["basket"], [])
 
+    def test_exact_deployed_rad_v2_state_migrates_without_recreating_lanes(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        core_id, rad_id = [row["id"] for row in params["strategies"]]
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        for state in seed["strategies"].values():
+            state.pop("protection_repair_retry_after_utc")
+            state.pop("protection_repair_failure_count")
+        seed["strategies"][core_id]["cooldown_until_bar"] = 7
+        seed["strategies"][rad_id]["cooldown_until_bar"] = 11
+        rad_position = {
+            "ticket": 1001, "position_identifier": 7001, "side": "LONG", "lot": 0.01,
+            "entry_price": 2000.0, "entry_time_utc": "2026-09-13T06:00:00+00:00",
+            "open_time_epoch": int(pd.Timestamp("2026-09-13T06:00:00Z").timestamp()),
+            "owner_symbol": "XAUUSD", "owner_magic": 240207,
+            "owner_comment": "s24_rad070:abc123def0", "signal_bar_time": "2026-09-13T05:59:00+00:00",
+            "close_submission_started_utc": None, "close_requested": False, "shadow": False,
+        }
+        seed["strategies"][rad_id]["basket"] = [rad_position]
+
+        runner = self._load_seed(params, seed)
+
+        self.assertFalse(runner._fatal_state_identity_mismatch)
+        self.assertEqual(runner.state["version"], 3)
+        self.assertEqual(runner.state["rad070_state_generation"], 1)
+        self.assertEqual(runner.state["strategies"][core_id]["cooldown_until_bar"], 7)
+        self.assertEqual(runner.state["strategies"][rad_id]["cooldown_until_bar"], 11)
+        self.assertEqual(runner.state["strategies"][rad_id]["basket"], [rad_position])
+        self.assertIsNone(runner.state["strategies"][rad_id]["protection_repair_retry_after_utc"])
+        self.assertEqual(runner.state["strategies"][rad_id]["protection_repair_failure_count"], 0)
+
+    def test_deployed_rad_v2_state_with_unknown_shape_still_fails_closed(self):
+        params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
+        seed = s24.S24NoAdverseRunner(params)._default_state()
+        seed["version"] = 2
+        seed.pop("rad070_state_generation")
+        for state in seed["strategies"].values():
+            state.pop("protection_repair_retry_after_utc")
+            state.pop("protection_repair_failure_count")
+        seed["strategies"][params["strategies"][1]["id"]].pop("last_consumed_signal_bar")
+
+        runner = self._load_seed(params, seed)
+
+        self.assertTrue(runner._fatal_state_identity_mismatch)
+        self.assertTrue(all(runner._st(row)["sync_block_reason"] == "state_identity_mismatch" for row in params["strategies"]))
+
     def test_current_v3_missing_rad_container_fails_closed(self):
         params = json.loads((ROOT / "s24_params.json").read_text(encoding="utf-8"))
         seed = s24.S24NoAdverseRunner(params)._default_state()

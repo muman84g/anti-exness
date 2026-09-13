@@ -1483,19 +1483,43 @@ class S24NoAdverseRunner:
             and observed_strategy_ids == LEGACY_V2_STRATEGY_IDS
             and "rad070_state_generation" not in observed
         )
+        v2_rad_strategy_keys = {
+            sid: set(candidate) - {
+                "protection_repair_retry_after_utc",
+                "protection_repair_failure_count",
+            }
+            for sid, candidate in default["strategies"].items()
+        }
+        known_v2_with_rad = (
+            shape_matches
+            and observed.get("bot") == default["bot"]
+            and observed.get("strategy_id") == default["strategy_id"]
+            and observed_version == 2
+            and observed_strategy_ids == expected_strategy_ids
+            and "rad070_state_generation" not in observed
+            and all(
+                isinstance(strategies.get(sid), dict)
+                and set(strategies[sid]) == expected_keys
+                for sid, expected_keys in v2_rad_strategy_keys.items()
+            )
+        )
         migrated_from_v2 = False
-        if known_v2_pre_rad:
+        if known_v2_pre_rad or known_v2_with_rad:
             migrated_from_v2 = True
             state = observed
             state["version"] = S24_STATE_VERSION
             state["rad070_state_generation"] = RAD070_STATE_GENERATION
-            rad_id = "range_autocorrelation_direction_rad070"
-            state["strategies"][rad_id] = copy.deepcopy(default["strategies"][rad_id])
+            if known_v2_pre_rad:
+                rad_id = "range_autocorrelation_direction_rad070"
+                state["strategies"][rad_id] = copy.deepcopy(default["strategies"][rad_id])
             observed = state
             strategies = state["strategies"]
             observed_version = S24_STATE_VERSION
             observed_strategy_ids = set(strategies)
-            logging.warning("S24 migrated the one supported pre-RAD v2 state generation to v3")
+            logging.warning(
+                "S24 migrated supported %s v2 state generation to v3",
+                "pre-RAD" if known_v2_pre_rad else "deployed-RAD",
+            )
         version_matches = observed_version == S24_STATE_VERSION
         generation_matches = (
             isinstance(observed.get("rad070_state_generation"), int)
