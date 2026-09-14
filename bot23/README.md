@@ -744,12 +744,18 @@ checkout root; otherwise that one external-artifact check is reported as
 skipped while the self-contained bot23 suite continues.
 
 Local release-candidate runner SHA-256:
-`8ba133c2a302efdcd49e5440cdceae8d10a1aef6fab85d8962ac7719dcfdb376`.
+`d959d3c92dda00976951d2550b4a5df5723934d7c116bb228e146668d307bf7d`.
 
 Local release-candidate params SHA-256:
-`e16d9235d39f022f5731810ef33156eda5c77eb1306a684a2fd3e938876a73ac`.
+`2c1d791ed3187370251d711fad4d27d32c3876314952f79f526a7c2046bc0a1c`.
 Local release-candidate regression SHA-256:
-`fa6ed22ee6ce75c5369e7549b650f9234ee2bd3d7ad99782bcc70bc93546c7c3`.
+`5d66404c40a2490a9a8b4cb1e33c56d2e88d3af9aaa135ac0b4ce07c63528647`.
+Late-reclaim H7 overlay SHA-256:
+`207b616aec5c132dc9a8fa7a413248c8de12c7a30aceff2c549d7451e797c7b9`.
+Late-reclaim H7 regression SHA-256:
+`053856295a2c6e54a2be5aabbbff163bb0ab5755e8161e3123b2e97dbc5328cd`.
+Raw-tick parser/collector SHA-256:
+`868ffaeeea343fd7497bd5adf1b359a85970fc23bc2e13ad049d7e9533340687`.
 M15 terminal overlay SHA-256:
 `830093a67458203423540918659f0621e636dc50750a1d16d20410b3df22d8ba`.
 Entry-admission clock SHA-256:
@@ -763,9 +769,9 @@ Installed shadow-observer SHA-256:
 Installed shadow-observer regression SHA-256:
 `5dd72132c92de2aea1f43fe992cf738354529238d2cf503b4605c0c8a4c76f4d`.
 Installed executor SHA-256:
-`653ff21950e114356eba80c4e9ab55e596271e3fbb783b543b7024a3006b3590`.
+`a375321cd86e7842e8fd1ec445f13641fe4e5ef34e88f25596379e6dfa65304a`.
 Installed bridge-source SHA-256:
-`dc03aa5e0219db06168ae1db3df6610de8ee1bbf2f121ac7a107938acf7eed54`.
+`8ce0755dc91e06234388f233d03ffafc2fc42672da693f47e5a3c4c8d116ae9d`.
 No v36 bridge binary was compiled in this local pass; binary identity remains
 an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
