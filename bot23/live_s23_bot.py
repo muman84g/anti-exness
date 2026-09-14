@@ -72,6 +72,14 @@ from m15_terminal_overlay import (
     in_entry_window as in_m15_terminal_entry_window,
     latest_long_signal as latest_m15_terminal_long_signal,
 )
+from late_reclaim_h7_overlay import (
+    POLICY_ID as H7_POLICY_ID,
+    POLICY_PARAMS_HASH as H7_POLICY_PARAMS_HASH,
+    fetch_ticks as fetch_h7_ticks,
+    minute_feature as h7_minute_feature,
+    signal as h7_signal,
+)
+from ea_bridge import ea_bridge
 from utc1330_hl_overlay import (
     POLICY_ID as UTC1330_HL_POLICY_ID,
     POLICY_PARAMS_HASH as UTC1330_HL_POLICY_PARAMS_HASH,
@@ -98,15 +106,16 @@ EXPECTED_TREND_RECOVERY_MAGICS = (230034,)
 EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_Q01_MAGICS = (230044,)
 EXPECTED_M15_TERMINAL_MAGICS = (230045,)
+EXPECTED_H7_MAGICS = (230046,)
 RETIRED_STRATEGY_IDS = frozenset(
     f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)
 )
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-m15-terminal-safe-on-v012"
+EXPECTED_CANDIDATE_ID = "bot23-late-reclaim-h7-on-v001"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-13-s23-m15-terminal-v35"
+EXPECTED_BRIDGE_VERSION = "2026-09-14-s23-late-reclaim-h7-v36"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -378,6 +387,7 @@ _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "q01_variance_release_enabled",
     "q01_live_trading_enabled",
     "m15_terminal_enabled",
+    "h7_enabled",
     "drop_latest_m1_bar",
 )
 
@@ -390,6 +400,7 @@ _STRATEGY_CONFIG_COLLECTIONS = (
     "t0530_edge_strategies",
     "q01_variance_release_strategies",
     "m15_terminal_strategies",
+    "h7_strategies",
 )
 
 _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
@@ -401,6 +412,7 @@ _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "t0530_edge_strategies": tuple(f"ny0530_edge_lane_{index}" for index in range(1, 5)),
     "q01_variance_release_strategies": ("q01_variance_release_lane_1",),
     "m15_terminal_strategies": ("ny1400_m15_long_lane_1",),
+    "h7_strategies": ("xauusd_late_reclaim_h7_lane_1",),
 }
 UNPUBLISHED_OPEN_ERRORS = {
     "ERR|COMMAND_BUSY", "ERR|CLAIM_BUSY", "ERR|LOCK_TIMEOUT",
@@ -436,6 +448,9 @@ _STATE_GENERATION_CONTRACTS = (
         "q01_last_evaluated_m5_bar",
     )),
     ("m15_terminal_policy_id", "m15_terminal_params_hash", "m15_terminal_strategies", ()),
+    ("h7_policy_id", "h7_params_hash", "h7_strategies", (
+        "h7_last_condition", "h7_last_signal_minute", "h7_last_evaluated_bar",
+    )),
 )
 
 _CORE_LANE_STATE_KEYS = ("lane_id", "basket", "basket_sequence", "current_basket_id")
@@ -482,6 +497,10 @@ _STRATEGY_KEYS_BY_COLLECTION = {
         "lot", "hold_minutes", "max_positions", "cooldown",
     }),
     "m15_terminal_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
+    "h7_strategies": frozenset({
         "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
         "lot", "hold_minutes", "max_positions", "cooldown",
     }),
@@ -676,6 +695,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "expected_t0530_edge_magics",
         "expected_q01_magics",
         "expected_m15_terminal_magics",
+        "expected_h7_magics",
     )
     for key in expected_magic_keys:
         values = params.get(key)
@@ -1023,6 +1043,8 @@ class S23HorizontalInventoryRunner:
         self._t0530_edge_state_migrated = False
         self._q01_state_migrated = False
         self._m15_terminal_state_migrated = False
+        self._h7_state_migrated = False
+        self._h7_features: list[Any] = []
         self.state = self._load_state()
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
@@ -1142,6 +1164,9 @@ class S23HorizontalInventoryRunner:
     def _m15_terminal_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("m15_terminal_strategies", []))
 
+    def _h7_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("h7_strategies", []))
+
     def _legacy_signal_strategies(self) -> list[dict[str, Any]]:
         return (
             list(self.params.get("strategies", [])) + self._morning_strategies()
@@ -1159,6 +1184,7 @@ class S23HorizontalInventoryRunner:
             + self._t0530_edge_strategies()
             + self._q01_strategies()
             + self._m15_terminal_strategies()
+            + self._h7_strategies()
         )
 
     def _entry_admission_block(self, at_utc: datetime):
@@ -1333,6 +1359,11 @@ class S23HorizontalInventoryRunner:
                 "q01_last_evaluated_m5_bar": None,
                 "m15_terminal_policy_id": str(self.params.get("m15_terminal_policy_id", M15_TERMINAL_POLICY_ID)),
                 "m15_terminal_params_hash": str(self.params.get("m15_terminal_params_hash", M15_TERMINAL_POLICY_PARAMS_HASH)),
+                "h7_policy_id": str(self.params.get("h7_policy_id", H7_POLICY_ID)),
+                "h7_params_hash": str(self.params.get("h7_params_hash", H7_POLICY_PARAMS_HASH)),
+                "h7_last_condition": False,
+                "h7_last_signal_minute": None,
+                "h7_last_evaluated_bar": None,
                 "trend_recovery": {
                     "active": False,
                     "episode_id": None,
@@ -1676,6 +1707,8 @@ class S23HorizontalInventoryRunner:
         observed_q01_policy_hash = observed_routing.get("q01_params_hash")
         observed_m15_terminal_policy_id = observed_routing.get("m15_terminal_policy_id")
         observed_m15_terminal_policy_hash = observed_routing.get("m15_terminal_params_hash")
+        observed_h7_policy_id = observed_routing.get("h7_policy_id")
+        observed_h7_policy_hash = observed_routing.get("h7_params_hash")
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -1990,6 +2023,27 @@ class S23HorizontalInventoryRunner:
                     "observed_policy_hash": observed_m15_terminal_policy_hash,
                     "expected_policy_id": expected_m15_terminal_policy_id,
                     "expected_policy_hash": expected_m15_terminal_policy_hash,
+                }
+        expected_h7_policy_id = str(self.params.get("h7_policy_id", H7_POLICY_ID))
+        expected_h7_policy_hash = str(self.params.get("h7_params_hash", H7_POLICY_PARAMS_HASH))
+        if observed_h7_policy_id is None and observed_h7_policy_hash is None:
+            routing["h7_policy_id"] = expected_h7_policy_id
+            routing["h7_params_hash"] = expected_h7_policy_hash
+            self._h7_state_migrated = True
+            logging.warning("S23 H7 state initialized to %s; all existing strategy state was preserved", expected_h7_policy_id)
+        elif observed_h7_policy_id != expected_h7_policy_id or observed_h7_policy_hash != expected_h7_policy_hash:
+            for strat in self._h7_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = "h7_policy_identity_mismatch"
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = {
+                    "observed_policy_id": observed_h7_policy_id,
+                    "observed_policy_hash": observed_h7_policy_hash,
+                    "expected_policy_id": expected_h7_policy_id,
+                    "expected_policy_hash": expected_h7_policy_hash,
                 }
         return state
 
@@ -2335,6 +2389,8 @@ class S23HorizontalInventoryRunner:
             return "q01_variance_release"
         if lane_id == 23:
             return "m15_terminal_long"
+        if lane_id == 24:
+            return "late_reclaim_h7"
         return "unknown"
 
     def _signal_attribution(
@@ -4483,7 +4539,7 @@ class S23HorizontalInventoryRunner:
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
                 return self._preflight_reject("broker_quote_clock_unavailable")
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated:
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated or self._h7_state_migrated:
             try:
                 self._save_state()
             except Exception:
@@ -4500,6 +4556,7 @@ class S23HorizontalInventoryRunner:
             self._t0530_edge_state_migrated = False
             self._q01_state_migrated = False
             self._m15_terminal_state_migrated = False
+            self._h7_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -4823,8 +4880,18 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_m15_terminal_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics
-        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal]
+        if str(self.params.get("h7_policy_id") or "") != H7_POLICY_ID:
+            return "invalid_h7_policy_id"
+        if str(self.params.get("h7_params_hash") or "") != H7_POLICY_PARAMS_HASH:
+            return "invalid_h7_params_hash"
+        h7 = [row for row in self._h7_strategies() if bool(row.get("enabled", True))]
+        h7_magics = [int(row.get("magic") or 0) for row in h7]
+        if tuple(h7_magics) != EXPECTED_H7_MAGICS or tuple(self.params.get("expected_h7_magics", [])) != EXPECTED_H7_MAGICS:
+            return "invalid_h7_magics"
+        if [int(row.get("lane_id") or 0) for row in h7] != [24]:
+            return "invalid_h7_lane_ids"
+        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics + h7_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal + h7]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
             return "duplicate_combined_ownership_namespace"
         admission_clock = self.params.get("eu_entry_admission_clock")
@@ -8180,6 +8247,103 @@ class S23HorizontalInventoryRunner:
             use_confirmed_fill_time=True, submission_deadline_utc=deadline,
         )
 
+    def _process_h7_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        for strat in self._h7_strategies():
+            lane_id = int(strat["lane_id"])
+            st = self._st(strat)
+            if not (bool(self.params.get("h7_enabled", False)) or st.get("basket")):
+                readiness[lane_id] = False
+                continue
+            if not self._sync_strategy(strat):
+                readiness[lane_id] = False
+                continue
+            blocked = self._monitor_fixed_hold_position(
+                strat, info, poll_time, "late_reclaim_h7_fixed_hold"
+            )
+            readiness[lane_id] = bool(
+                self.params.get("h7_enabled", False) and strat.get("enabled", True) and not blocked
+            )
+        return readiness
+
+    def _h7_completed_features(self, signal_bar: pd.Timestamp) -> list[Any]:
+        end = signal_bar + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
+        cached_last = self._h7_features[-1].minute_msc if self._h7_features else None
+        start = (
+            pd.Timestamp(cached_last + 60_000, unit="ms", tz="UTC")
+            if cached_last is not None
+            else signal_bar - pd.Timedelta(minutes=61)
+        )
+        if start > signal_bar:
+            return self._h7_features
+        ticks = fetch_h7_ticks(
+            ea_bridge.send_command,
+            str(self.params.get("mt5_symbol", self.params["symbol"])),
+            int(start.timestamp() * 1000), int(end.timestamp() * 1000),
+        )
+        grouped: dict[int, list[Any]] = {}
+        for tick in ticks:
+            grouped.setdefault((tick.time_msc // 60_000) * 60_000, []).append(tick)
+        for minute_msc in sorted(grouped):
+            self._h7_features.append(
+                h7_minute_feature(pd.Timestamp(minute_msc, unit="ms", tz="UTC"), grouped[minute_msc])
+            )
+        self._h7_features = self._h7_features[-62:]
+        return self._h7_features
+
+    def _process_h7_entries(
+        self, price_row: pd.Series, info: Any, poll_time: pd.Timestamp,
+        readiness: dict[int, bool],
+    ) -> None:
+        strategies = [row for row in self._h7_strategies() if bool(row.get("enabled", True))]
+        signal_bar = parse_ts(price_row.name)
+        if not bool(self.params.get("h7_enabled", False)) or not strategies or signal_bar is None:
+            return
+        strat = strategies[0]
+        signal_bar_text = dt_text(signal_bar)
+        routing = self.state["routing"]
+        if routing.get("h7_last_evaluated_bar") == signal_bar_text:
+            return
+        try:
+            opportunity = h7_signal(self._h7_completed_features(signal_bar))
+        except (RuntimeError, ValueError, TypeError, OverflowError) as exc:
+            self._trade_row("h7_decision", strat, reason="raw_tick_input_invalid",
+                            signal_bar_time=signal_bar_text, note=f"{type(exc).__name__}:{exc}")
+            return
+        routing["h7_last_evaluated_bar"] = signal_bar_text
+        condition = opportunity is not None
+        prior_condition = bool(routing.get("h7_last_condition", False))
+        routing["h7_last_condition"] = condition
+        if not condition or prior_condition:
+            self._save_state()
+            return
+        previous = parse_ts(routing.get("h7_last_signal_minute"))
+        if previous is not None and signal_bar - previous < pd.Timedelta(minutes=30):
+            self._save_state()
+            return
+        routing["h7_last_signal_minute"] = signal_bar_text
+        self._save_state()
+        st = self._st(strat)
+        if not readiness.get(int(strat["lane_id"]), False) or st.get("basket"):
+            return
+        quote_time = self._broker_quote_time(info, poll_time)
+        if quote_time is None:
+            return
+        row = pd.Series({"Open": float(info.bid), "High": float(info.bid), "Low": float(info.bid),
+                         "Close": float(info.bid), "AskOpen": float(info.ask)}, name=signal_bar)
+        opportunity.update({"source": "late_reclaim_h7", "side": "LONG", "raw_side": "LONG",
+                            "effective_side": "LONG", "decision_time": dt_text(poll_time),
+                            "executable_at": dt_text(poll_time)})
+        for time_key in ("event_time", "release_time", "available_time"):
+            if time_key in opportunity:
+                opportunity[time_key] = dt_text(parse_ts(opportunity[time_key]))
+        self._open_entry(
+            strat, "LONG", row, info, note="late_reclaim_h7_frozen_v1",
+            execution_time=poll_time, admission_time=quote_time, opportunity=opportunity,
+            apply_portfolio_rearm=False, use_confirmed_fill_time=True,
+            submission_deadline_utc=signal_bar + pd.Timedelta(minutes=3),
+        )
+
     def _attempt_q01_forced_close(
         self,
         strat: dict[str, Any],
@@ -9563,6 +9727,7 @@ class S23HorizontalInventoryRunner:
         t0530_edge_readiness = self._process_t0530_edge_exits(info, quote_time)
         q01_readiness = self._process_q01_exits(info, quote_time)
         m15_terminal_readiness = self._process_m15_terminal_exits(info, quote_time)
+        h7_readiness = self._process_h7_exits(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -9601,6 +9766,7 @@ class S23HorizontalInventoryRunner:
         self._process_m15_terminal_entries(
             bars, price_row, info, poll_time, m15_terminal_readiness,
         )
+        self._process_h7_entries(price_row, info, poll_time, h7_readiness)
         # Match the ordered-tick replay: observe the frozen balanced-book
         # range at the first processing of each completed M1, before this
         # poll's basket exits can change the local inventory state.

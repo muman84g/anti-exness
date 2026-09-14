@@ -1,9 +1,24 @@
 # Source Backtest
 
+## 2026-09-14 late-reclaim H7 integration
+
+- Current candidate: `bot23-late-reclaim-h7-on-v001`.
+- Current bridge: `2026-09-14-s23-late-reclaim-h7-v36`.
+- Frozen H7: independent lane 24, magic 230046, comment `s23_h7_l1`, Long,
+  0.01 lot, capacity one, confirmed-fill plus 7 minutes, onset cooldown 30 minutes.
+- Completed-M1 raw Bid conditions: first-45-second Z <= -1.0, last-15-second
+  reclaim fraction >= 0.5, and 60-minute range location <= 0.15.
+- DEV, Leakcheck, and Forward phase0 Base/Stress all increased trade count and
+  PnL without result-based rescue tuning. Live uses bridge `TICKS`; invalid or
+  incomplete tick evidence fails closed for H7 entries without suppressing exits.
+- Local implementation/no-order tests only. No deploy, restart, EA compile or
+  attachment, runtime reconciliation, or live activation was performed.
+
 ## 2026-09-13 M15 terminal-safe Long integration
 
-- Current candidate: `bot23-m15-terminal-safe-on-v012`.
-- Current bridge: `2026-09-13-s23-m15-terminal-v35`.
+- Historical predecessor candidate: `bot23-m15-terminal-safe-on-v012`.
+- Historical predecessor bridge: `2026-09-13-s23-m15-terminal-v35`; the current
+  local H7 candidate requires `2026-09-14-s23-late-reclaim-h7-v36`.
 - Frozen signal: completed Bid M15 compression at 0.60 of the prior-four M15
   median, followed by a completed M5 close above the compressed High; Long only,
   capacity one, 0.01 lot, confirmed-fill plus 45 minutes.

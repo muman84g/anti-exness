@@ -1,10 +1,14 @@
 # Bot23 integrated inventory and independent session overlays
 
-## 2026-09-13 current candidate
+## 2026-09-14 current candidate
 
-Current candidate is `bot23-m15-terminal-safe-on-v012`; its required EA bridge is
-`2026-09-13-s23-m15-terminal-v35`. It preserves the B4C-only JST11:00-13:00
-route and adds the independent M15 terminal-safe Long lane described below.
+Current candidate is `bot23-late-reclaim-h7-on-v001`; its required EA bridge is
+`2026-09-14-s23-late-reclaim-h7-v36`. It preserves all existing lanes and adds
+independent lane 24 (magic `230046`, comment `s23_h7_l1`). H7 reads the prior
+completed M1's ordered raw Bid ticks through bridge `TICKS`, applies the frozen
+first-45-second downside / last-15-second reclaim rule, and holds one 0.01-lot
+Long for seven minutes. Missing, unordered, or gapped raw-tick evidence blocks
+only a new H7 entry; owned H7 exit reconciliation remains active.
 Deployment, EA compilation/attachment, service recreation and live runtime
 identity are not proved by the local checks.
 
@@ -62,7 +66,7 @@ The canonical EA artifact in this folder is the source `BotBridge_s23.mq5`.
 Compose copies it into MT5, removes any previously compiled binary, and compiles
 the selected `BotBridge_s23` during service startup. The runner constant and
 `expected_bridge_version` must both remain
-`2026-09-13-s23-m15-terminal-v35`; every older EA is rejected by
+`2026-09-14-s23-late-reclaim-h7-v36`; every older EA is rejected by
 preflight. Compilation and local tests are not deployment proof.
 
 ## Local IPC recovery correction (2026-09-04)
@@ -88,10 +92,10 @@ preflight. Compilation and local tests are not deployment proof.
 
 Bridge v32 correction (2026-09-04): POSITIONS/ORDERS may read retired magic
 200023 solely for cutover inventory checks. Current executable ownership is
-230023-230034 and 230040-230045; retired 230035-230039 and legacy 200023 are not
+230023-230034 and 230040-230046; retired 230035-230039 and legacy 200023 are not
 adopted or tradable. Nonempty or failed
 legacy queries still block startup. That historical correction required v32;
-the current runner and params require v35. Compile and attach the matching
+the current runner and params require v36. Compile and attach the matching
 current EA before restarting. Local verification is not deployment.
 
 Close-ledger durability re-audit (2026-09-04): an existing confirmed-deal row is
@@ -245,7 +249,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-13-s23-m15-terminal-v35` です。v35は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`に加えてM15 lane 23 / magic 230045 / comment `s23_m15_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよび今後のread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-14-s23-late-reclaim-h7-v36` です。v36は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`、M15 lane 23 / magic 230045 / comment `s23_m15_l1`に加えてH7 lane 24 / magic 230046 / comment `s23_h7_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよびread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
@@ -704,7 +708,7 @@ OPEN reservation is cleared only after three consecutive clean bot-scoped flat
 position/order confirmations.
 
 Before restart, MT5 must be reconciled for the retired bot23 magics 200023 and
-230035-230039, and active magics 230023-230034 and 230040-230045, with no
+230035-230039, and active magics 230023-230034 and 230040-230046, with no
 unexplained pending orders. The runner independently
 checks the retired namespace and refuses cutover if it is non-flat or cannot be
 queried. Preserve a compatible `state/s23_bot_state.json`; never reset state
@@ -762,7 +766,7 @@ Installed executor SHA-256:
 `653ff21950e114356eba80c4e9ab55e596271e3fbb783b543b7024a3006b3590`.
 Installed bridge-source SHA-256:
 `dc03aa5e0219db06168ae1db3df6610de8ee1bbf2f121ac7a107938acf7eed54`.
-No v35 bridge binary was compiled in this local pass; binary identity remains
+No v36 bridge binary was compiled in this local pass; binary identity remains
 an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
 process identity must be verified separately; these hashes do not replace the

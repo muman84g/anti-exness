@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Standalone, read-only raw tick shadow collector for bot23.
 
-This module is deliberately not imported by ``live_s23_bot.py``.  It reads
+Its strict TICKS parser is also reused by ``live_s23_bot.py`` for H7.  The standalone collector reads
 bounded pages through the bridge ``TICKS`` command and appends validated rows
 to an audit CSV.  It never sends OPEN, CLOSE, MODIFY, CANCEL, or PENDING.
 """
