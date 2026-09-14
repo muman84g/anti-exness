@@ -90,7 +90,11 @@ def signal(features: list[MinuteFeature]) -> dict[str, object] | None:
     if z <= -1.0 and reclaim >= 0.5 and location <= 0.15:
         event = pd.Timestamp(current.minute_msc, unit="ms", tz="UTC")
         return {"opportunity_id": f"late-reclaim-h7:{event.isoformat()}",
+                "source": "late_reclaim_h7_frozen_v1",
                 "event_time": event, "release_time": event + pd.Timedelta(minutes=1),
+                "available_time": event + pd.Timedelta(minutes=1),
+                "first45_move": current.first45_move,
                 "first45_z": z, "reclaim_fraction": reclaim,
+                "last15_move": current.last15_move,
                 "range_location_60m": location}
     return None

@@ -43,6 +43,10 @@ class LateReclaimH7OverlayTests(unittest.TestCase):
         result = signal(rows)
         self.assertIsNotNone(result)
         self.assertEqual(result["opportunity_id"], "late-reclaim-h7:2026-01-01T01:01:00+00:00")
+        self.assertEqual(result["source"], "late_reclaim_h7_frozen_v1")
+        self.assertEqual(result["available_time"], result["release_time"])
+        self.assertIn("first45_move", result)
+        self.assertIn("last15_move", result)
 
     def test_gap_fails_closed(self):
         start = int(pd.Timestamp("2026-01-01T00:00:00Z").timestamp() * 1000)

@@ -4884,12 +4884,16 @@ class S23HorizontalInventoryRunner:
             return "invalid_h7_policy_id"
         if str(self.params.get("h7_params_hash") or "") != H7_POLICY_PARAMS_HASH:
             return "invalid_h7_params_hash"
+        if self.params.get("h7_signal_cooldown_minutes") != 30:
+            return "invalid_h7_signal_cooldown_minutes"
         h7 = [row for row in self._h7_strategies() if bool(row.get("enabled", True))]
         h7_magics = [int(row.get("magic") or 0) for row in h7]
         if tuple(h7_magics) != EXPECTED_H7_MAGICS or tuple(self.params.get("expected_h7_magics", [])) != EXPECTED_H7_MAGICS:
             return "invalid_h7_magics"
         if [int(row.get("lane_id") or 0) for row in h7] != [24]:
             return "invalid_h7_lane_ids"
+        if any(int(row.get("cooldown", -1)) != 0 for row in h7):
+            return "invalid_h7_post_close_cooldown"
         all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics + h7_magics
         all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal + h7]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
@@ -8259,7 +8263,7 @@ class S23HorizontalInventoryRunner:
                 readiness[lane_id] = False
                 continue
             blocked = self._monitor_fixed_hold_position(
-                strat, info, poll_time, "late_reclaim_h7_fixed_hold"
+                strat, info, poll_time, "late_reclaim_h7_fixed_hold", defer_for_spread=False,
             )
             readiness[lane_id] = bool(
                 self.params.get("h7_enabled", False) and strat.get("enabled", True) and not blocked
@@ -8318,7 +8322,8 @@ class S23HorizontalInventoryRunner:
             self._save_state()
             return
         previous = parse_ts(routing.get("h7_last_signal_minute"))
-        if previous is not None and signal_bar - previous < pd.Timedelta(minutes=30):
+        signal_cooldown = int(self.params["h7_signal_cooldown_minutes"])
+        if previous is not None and signal_bar - previous < pd.Timedelta(minutes=signal_cooldown):
             self._save_state()
             return
         routing["h7_last_signal_minute"] = signal_bar_text
@@ -8331,7 +8336,7 @@ class S23HorizontalInventoryRunner:
             return
         row = pd.Series({"Open": float(info.bid), "High": float(info.bid), "Low": float(info.bid),
                          "Close": float(info.bid), "AskOpen": float(info.ask)}, name=signal_bar)
-        opportunity.update({"source": "late_reclaim_h7", "side": "LONG", "raw_side": "LONG",
+        opportunity.update({"side": "LONG", "raw_side": "LONG",
                             "effective_side": "LONG", "decision_time": dt_text(poll_time),
                             "executable_at": dt_text(poll_time)})
         for time_key in ("event_time", "release_time", "available_time"):

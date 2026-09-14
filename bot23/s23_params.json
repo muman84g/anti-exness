@@ -113,6 +113,7 @@
   "h7_enabled": true,
   "h7_policy_id": "late_reclaim_long_h7",
   "h7_params_hash": "8fbdbd508e3738648c6a10beef169f846c7d9ad206933d8b56a7474c87faa4d8",
+  "h7_signal_cooldown_minutes": 30,
   "expected_h7_magics": [230046],
   "eu_entry_admission_clock": {
     "eu_timezone": "Europe/London",
@@ -449,7 +450,7 @@
       "lot": 0.01,
       "hold_minutes": 7,
       "max_positions": 1,
-      "cooldown": 30
+      "cooldown": 0
     }
   ],
   "strategies": [
