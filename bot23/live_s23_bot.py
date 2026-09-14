@@ -662,6 +662,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "q01_max_positions", "q01_max_signal_delay_minutes", "q01_m1_bars",
         "q01_warmup_m5_bars", "q01_atr_period", "q01_feed_gap_seconds",
         "m15_terminal_hold_minutes", "m15_terminal_max_positions",
+        "h7_signal_cooldown_minutes",
     )
     for key in exact_top_level_integers:
         value = params.get(key)
@@ -1618,7 +1619,13 @@ class S23HorizontalInventoryRunner:
                     and expected_family_size
                     and 0 < len(missing_strategy_ids) < expected_family_size
                 )
-                if missing_lane_fields or invalid_lane_core or partial_legacy_family or (
+                unexpected_identityless_family = bool(
+                    identity_absent
+                    and policy_key == "h7_policy_id"
+                    and expected_family_size
+                    and not missing_strategy_ids
+                )
+                if missing_lane_fields or invalid_lane_core or partial_legacy_family or unexpected_identityless_family or (
                     not identity_absent
                     and (
                         not identity_complete
@@ -1630,6 +1637,7 @@ class S23HorizontalInventoryRunner:
                         "policy_key": policy_key,
                         "identity_complete": identity_complete,
                         "partial_legacy_family": partial_legacy_family,
+                        "unexpected_identityless_family": unexpected_identityless_family,
                         "missing_strategy_ids": missing_strategy_ids,
                         "missing_routing_keys": missing_routing_keys,
                         "missing_lane_fields": missing_lane_fields,
@@ -4880,6 +4888,8 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_m15_terminal_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
+        if not bool(self.params.get("h7_enabled", False)):
+            return "h7_disabled"
         if str(self.params.get("h7_policy_id") or "") != H7_POLICY_ID:
             return "invalid_h7_policy_id"
         if str(self.params.get("h7_params_hash") or "") != H7_POLICY_PARAMS_HASH:
@@ -4892,8 +4902,16 @@ class S23HorizontalInventoryRunner:
             return "invalid_h7_magics"
         if [int(row.get("lane_id") or 0) for row in h7] != [24]:
             return "invalid_h7_lane_ids"
-        if any(int(row.get("cooldown", -1)) != 0 for row in h7):
-            return "invalid_h7_post_close_cooldown"
+        for row in h7:
+            expected = {
+                "spec_id": H7_POLICY_ID,
+                "signal_id": "late_reclaim_h7_frozen_v1",
+                "comment_prefix": "s23_h7_l1", "lot": 0.01,
+                "hold_minutes": 7, "max_positions": 1, "cooldown": 0,
+            }
+            lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
+            if lane_drift:
+                return f"invalid_h7_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
         all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics + h7_magics
         all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal + h7]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
@@ -8256,7 +8274,14 @@ class S23HorizontalInventoryRunner:
         for strat in self._h7_strategies():
             lane_id = int(strat["lane_id"])
             st = self._st(strat)
-            if not (bool(self.params.get("h7_enabled", False)) or st.get("basket")):
+            needs_reconciliation = bool(
+                self.params.get("h7_enabled", False)
+                or st.get("basket")
+                or st.get("pending_open_opportunity_id")
+                or st.get("pending_close_reason")
+                or st.get("sync_block_new_entries")
+            )
+            if not needs_reconciliation:
                 readiness[lane_id] = False
                 continue
             if not self._sync_strategy(strat):

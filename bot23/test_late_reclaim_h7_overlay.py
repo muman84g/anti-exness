@@ -61,6 +61,7 @@ class LateReclaimH7OverlayTests(unittest.TestCase):
         legacy["routing"].pop("h7_params_hash")
         legacy["routing"].pop("h7_last_condition")
         legacy["routing"].pop("h7_last_signal_minute")
+        legacy["routing"].pop("h7_last_evaluated_bar")
         legacy["strategies"].pop(seed._h7_strategies()[0]["id"])
         preserved = seed.params["strategies"][0]["id"]
         legacy["strategies"][preserved]["cooldown_until_bar"] = 12345
@@ -75,6 +76,76 @@ class LateReclaimH7OverlayTests(unittest.TestCase):
             self.assertEqual(migrated._st(migrated._h7_strategies()[0])["basket"], [])
         finally:
             os.unlink(path)
+
+    def test_identityless_existing_h7_lane_fails_closed_as_invalid_state(self):
+        seed, _strategy, _state = make_runner(live=True)
+        state = seed._default_state()
+        state["routing"].pop("h7_policy_id")
+        state["routing"].pop("h7_params_hash")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle)
+            path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", path):
+                loaded = S23HorizontalInventoryRunner(json.loads(json.dumps(seed.params)))
+            lane = loaded._st(loaded._h7_strategies()[0])
+            self.assertEqual(lane["sync_block_reason"], "state_identity_mismatch")
+            self.assertFalse(lane["sync_block_recoverable"])
+        finally:
+            os.unlink(path)
+
+    def test_foreign_h7_policy_blocks_only_h7_lane_without_rewrite(self):
+        seed, _strategy, _state = make_runner(live=True)
+        state = seed._default_state()
+        state["routing"]["h7_policy_id"] = "foreign-h7"
+        state["routing"]["h7_params_hash"] = "f" * 64
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(state, handle)
+            path = handle.name
+        try:
+            with patch.object(live_s23_bot, "STATE_FILE", path):
+                loaded = S23HorizontalInventoryRunner(json.loads(json.dumps(seed.params)))
+            lane = loaded._st(loaded._h7_strategies()[0])
+            self.assertEqual(lane["sync_block_reason"], "h7_policy_identity_mismatch")
+            self.assertIsNone(loaded._st(loaded.params["strategies"][0])["sync_block_reason"])
+            self.assertEqual(loaded.state["routing"]["h7_policy_id"], "foreign-h7")
+        finally:
+            os.unlink(path)
+
+    def test_h7_full_lane_contract_is_preflight_frozen(self):
+        for key, bad in (("comment_prefix", "wrong"), ("lot", 0.02), ("hold_minutes", 8),
+                         ("max_positions", 2), ("cooldown", 1), ("signal_id", "wrong")):
+            runner, _strategy, _state = make_runner(live=True)
+            runner.params["h7_strategies"][0][key] = bad
+            self.assertIn("invalid_h7_lane_contract", runner._ownership_namespace_error())
+
+    def test_current_h7_candidate_cannot_silently_disable_lane(self):
+        runner, _strategy, _state = make_runner(live=True)
+        runner.params["h7_enabled"] = False
+        self.assertEqual(runner._ownership_namespace_error(), "h7_disabled")
+
+    def test_h7_fixed_hold_never_defers_for_spread(self):
+        runner, _strategy, _state = make_runner(live=True)
+        with patch.object(runner, "_sync_strategy", return_value=True), patch.object(
+            runner, "_monitor_fixed_hold_position", return_value=False
+        ) as monitor:
+            runner._process_h7_exits(object(), pd.Timestamp("2026-01-01T00:00:00Z"))
+        self.assertFalse(monitor.call_args.kwargs["defer_for_spread"])
+
+    def test_disabled_h7_still_reconciles_unresolved_lane_state(self):
+        for state_key, value in (("pending_open_opportunity_id", "h7:pending"),
+                                 ("pending_close_reason", "late_reclaim_h7_fixed_hold"),
+                                 ("sync_block_new_entries", True)):
+            runner, _strategy, _state = make_runner(live=True)
+            runner.params["h7_enabled"] = False
+            strat = runner._h7_strategies()[0]
+            runner._st(strat)[state_key] = value
+            with patch.object(runner, "_sync_strategy", return_value=True) as sync, patch.object(
+                runner, "_monitor_fixed_hold_position", return_value=False
+            ):
+                readiness = runner._process_h7_exits(object(), pd.Timestamp("2026-01-01T00:00:00Z"))
+            sync.assert_called_once_with(strat)
+            self.assertFalse(readiness[24])
 
 
 if __name__ == "__main__":
