@@ -38,7 +38,7 @@
   "inventory_range_break_side_filter": "both",
   "lane_count": 4,
   "expected_magics": [230023, 230024, 230025, 230026],
-  "morning_session_enabled": true,
+  "morning_session_enabled": false,
   "morning_session_policy_id": "jst0911_stable001_param_15_55_45_v001",
   "morning_session_params_hash": "c36023031af830bca0c08dd441ff800868909d404813e0a89c51e4fc1f3b086e",
   "morning_session_start_utc": 0,

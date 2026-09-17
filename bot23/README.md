@@ -666,6 +666,12 @@ leakcheck was already observed and the event count is sparse, this remains
 
 ## Start prerequisites
 
+As of the local 2026-09-17 pause, `morning_session_enabled=false` blocks all
+new Morning entries, including the final order submission guard. Morning lane
+identity, reconciliation, and exits remain active for any existing inventory.
+Changing the flag back to `true` restores entry evaluation after the usual
+state and ownership checks. This local change is not a deployment record.
+
 State schema remains version 3 and the four ZA ownership namespaces are unchanged.
 The first start adds empty morning lane states and policy identity while
 preserving every existing ZA basket and pending entry. Morning ownership uses

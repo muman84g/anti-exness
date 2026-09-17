@@ -497,7 +497,9 @@ independent holdout proof. The candidate remains `forward_only`.
   200024-200026 belong to bot24-bot26 and must not be reused by bot23.
 - Morning lanes use bot23-private magics 230027-230029 and comments
   `s23_am_l1`-`s23_am_l3`; their state is added empty on first start without
-  clearing or rewriting ZA inventory.
+  clearing or rewriting ZA inventory. The local 2026-09-17
+  `morning_session_enabled=false` setting blocks new entries while retaining
+  Morning ownership, reconciliation, and exits for existing inventory.
 - The midday lane uses bot23-private magic 230030 and comment `s23_md_l1`.
   It is initialized empty, owns capacity one, and cannot adopt a foreign magic
   or comment.

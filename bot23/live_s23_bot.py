@@ -4333,6 +4333,11 @@ class S23HorizontalInventoryRunner:
         self._save_state()
 
     def _entry_submission_block_reason(self, strat: dict[str, Any], at_utc: datetime | pd.Timestamp | None = None) -> str | None:
+        if (
+            int(strat.get("magic") or 0) in EXPECTED_MORNING_MAGICS
+            and not bool(self.params.get("morning_session_enabled", False))
+        ):
+            return "morning_entries_paused"
         st = self._st(strat)
         if not self._sync_block_contract_valid(st):
             return "sync_block_state_invalid"
@@ -4646,8 +4651,6 @@ class S23HorizontalInventoryRunner:
             drift = {key: {"actual": row.get(key), "expected": expected} for key, expected in FROZEN_LANE_FIELDS.items() if row.get(key) != expected}
             if drift:
                 return f"frozen_lane_contract_drift:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
-        if not bool(self.params.get("morning_session_enabled", False)):
-            return "morning_session_disabled"
         if str(self.params.get("morning_session_policy_id") or "") != EXPECTED_MORNING_POLICY_ID:
             return f"invalid_morning_policy_id={self.params.get('morning_session_policy_id')}"
         if str(self.params.get("morning_session_params_hash") or "") != EXPECTED_MORNING_POLICY_PARAMS_HASH:
@@ -8949,6 +8952,8 @@ class S23HorizontalInventoryRunner:
         poll_time: pd.Timestamp,
         readiness: dict[int, bool],
     ) -> None:
+        if not bool(self.params.get("morning_session_enabled", False)):
+            return
         signal_bar = parse_ts(price_row.name)
         if signal_bar is None:
             return "requested"

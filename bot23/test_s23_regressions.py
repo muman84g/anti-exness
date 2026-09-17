@@ -4475,6 +4475,54 @@ class Bot23ZARegressionTests(unittest.TestCase):
 
 
 class Bot23MorningSessionRegressionTests(unittest.TestCase):
+    def test_morning_pause_does_not_change_default_state_shape(self):
+        params_false = json.loads(json.dumps(load_params()))
+        params_true = json.loads(json.dumps(params_false))
+        params_true["morning_session_enabled"] = True
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            paused = S23HorizontalInventoryRunner(params_false)
+            enabled = S23HorizontalInventoryRunner(params_true)
+        self.assertEqual(paused._default_state(), enabled._default_state())
+
+    def test_morning_false_passes_namespace_and_blocks_new_entry_paths(self):
+        runner, za, _state = make_runner(live=False)
+        self.assertFalse(runner.params["morning_session_enabled"])
+        self.assertIsNone(runner._ownership_namespace_error())
+        self.assertIsNone(runner._entry_submission_block_reason(za))
+        strategies = runner.params["morning_session_strategies"]
+        for strat in strategies:
+            self.assertEqual(runner._entry_submission_block_reason(strat), "morning_entries_paused")
+        bar = pd.Timestamp("2026-09-17 00:30", tz="UTC")
+        row = pd.Series({"Open": 100.0, "Close": 100.0, "AskOpen": 100.03}, name=bar)
+        info = SimpleNamespace(bid=100.0, ask=100.03)
+        with patch.object(runner, "_morning_signal_sides", side_effect=AssertionError("signals evaluated")), patch.object(
+            runner, "_open_entry", side_effect=AssertionError("Morning entry attempted")
+        ):
+            runner._process_morning_entries(pd.DataFrame([row]), row, info, bar + pd.Timedelta(minutes=1), {5: True})
+        self.assertTrue(all(runner._st(strat)["last_evaluated_bar"] is None for strat in strategies))
+        runner.executor = CountingExecutor()
+        for strat in strategies:
+            self.assertFalse(runner._open_entry(strat, "LONG", row, info, apply_portfolio_rearm=False))
+        self.assertEqual(runner.executor.open_calls, 0)
+
+    def test_morning_false_still_reconciles_existing_inventory_and_true_can_resume(self):
+        runner, _za, _state = make_runner(live=False)
+        strat = runner.params["morning_session_strategies"][0]
+        runner._st(strat)["basket"] = [{"side": "LONG", "entry_price": 100.0}]
+        poll = pd.Timestamp("2026-09-17 03:00", tz="UTC")
+        info = SimpleNamespace(bid=100.0, ask=100.03)
+        with patch.object(runner, "_sync_strategy", return_value=True) as sync, patch.object(
+            runner, "_monitor_morning_position", return_value=True
+        ) as monitor:
+            readiness = runner._process_morning_exits(info, poll)
+        self.assertFalse(readiness[int(strat["lane_id"])])
+        sync.assert_any_call(strat)
+        monitor.assert_any_call(strat, info, poll)
+        runner.params["morning_session_enabled"] = True
+        runner._st(strat)["basket"] = []
+        self.assertIsNone(runner._ownership_namespace_error())
+        self.assertIsNone(runner._entry_submission_block_reason(strat))
+
     def test_state_shape_validation_covers_every_overlay_lane(self):
         params = json.loads(json.dumps(load_params()))
         with patch.object(live_s23_bot.os.path, "exists", return_value=False):
@@ -5467,6 +5515,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_morning_future_m1_does_not_advance_lane_receipt(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["morning_session_enabled"] = True
         strat = runner.params["morning_session_strategies"][0]
         signal_bar = pd.Timestamp("2026-08-28T00:10:00Z")
         price_row = pd.Series(
@@ -5505,6 +5554,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_live_morning_entry_uses_confirmed_broker_fill_time(self):
         runner, _za, _state = make_runner(live=True)
+        runner.params["morning_session_enabled"] = True
         strat = runner.params["morning_session_strategies"][0]
         broker_fill = pd.Timestamp("2026-08-28 00:10:37", tz="UTC")
         position = SimpleNamespace(
@@ -5548,6 +5598,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_live_open_cannot_fabricate_missing_position_identifier_from_ticket(self):
         runner, _za, _state = make_runner(live=True)
+        runner.params["morning_session_enabled"] = True
         strat = runner.params["morning_session_strategies"][0]
         decision_time = pd.Timestamp("2026-08-28 00:10:25", tz="UTC")
         position = SimpleNamespace(
@@ -5595,6 +5646,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_live_fixed_hold_never_substitutes_poll_time_for_missing_fill_time(self):
         runner, _za, _state = make_runner(live=True)
+        runner.params["morning_session_enabled"] = True
         strat = runner.params["morning_session_strategies"][0]
         position = SimpleNamespace(
             ticket=7702,
@@ -5750,6 +5802,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_three_morning_signals_fill_only_three_independent_lanes(self):
         runner, _za, _state = make_runner(live=False)
+        runner.params["morning_session_enabled"] = True
         signal_bar = pd.Timestamp("2026-08-28 00:30", tz="UTC")
         bars = self._bars(pd.date_range(signal_bar - pd.Timedelta(minutes=99), signal_bar, freq="1min", tz="UTC"))
         price_row = bars.iloc[-1]
@@ -9376,6 +9429,7 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
 
     def test_malformed_basket_sequence_blocks_before_live_open(self):
         runner, strategy, state = make_runner(live=True)
+        runner.params["morning_session_enabled"] = True
         executor = CountingExecutor()
         runner.executor = executor
         opportunity, row, poll_time, info = sample_opportunity()
