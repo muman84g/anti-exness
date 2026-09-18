@@ -1,9 +1,43 @@
 # Source Backtest
 
+## 2026-09-18 ED Long conditional hold integration
+
+- Local candidate: `bot23-ed-long-win15-60-on-v003`; required bridge identity
+  `2026-09-18-s23-close-magic-v37`. It retains the v002 ED trading rule and
+  corrects broker fill millisecond sync and CLOSE deal Magic attribution.
+- Frozen research condition: at the first eligible broker quote at/after the
+  confirmed-fill plus 15-minute deadline, extend an ED Long basket to 60
+  minutes only if its executable Bid/Ask basket PnL is strictly positive.
+  The broker POSITION_TIME_MSC is retained across sync and restart; the
+  second-resolution POSITION_TIME remains an identity consistency check.
+  Other ED positions close on the native 15-minute schedule. The hold decision
+  survives restart; baskets opened under the preceding policy stay native.
+- An incomplete or mismatched persisted ED hold policy blocks new ED entries.
+  Exactly reconciled owned baskets still reach their native 15-minute exit;
+  the entry block is not cleared by that reconciliation.
+- The `s23_trades.csv` Magic column is the position owner's lane Magic. On a
+  confirmed close, its note also records owner comment and broker close-deal
+  Magic; for multiple partial exit deals this is the latest deal's Magic.
+  Historical v36 MT5 close-deal Magic can reflect the EA's prior OPEN/PENDING
+  lane, while the entry's position Magic and comment remain the ownership
+  evidence. v37 sets the guarded position's Magic before sending CLOSE.
+- Source: `C:/Users/muuma/Documents/Codex/2026-09-16/bot/outputs/bot23_保留課題再開_20260918.md`.
+  Full-parent Leakcheck Stress poll phases 0-4 all passed paired audits:
+  PnL delta +$13.573 to +$14.772, every-tick MTM DD delta +$0.811 to
+  +$7.938, positive-week count unchanged or higher. August was negative in
+  every phase; one July ticket contributed 78% of phase-0 net improvement.
+  Forward Base had +$18.539 before the five-symbol common data end; later
+  observations have missing reference ticks. The saved 2026 data identity is
+  diagnostic/non-promotion, so these results do not establish a release gate.
+- Live polling, spread deferral, market-closed retries and confirmed broker
+  close accounting can differ from research's replayed 5-second poll phase.
+  No runtime deployment, restart, state repair or order execution was done.
+
 ## 2026-09-14 late-reclaim H7 integration
 
-- Current candidate: `bot23-late-reclaim-h7-on-v001`.
-- Current bridge: `2026-09-14-s23-late-reclaim-h7-v36`.
+- Predecessor candidate: `bot23-late-reclaim-h7-on-v001`.
+- Predecessor bridge: `2026-09-14-s23-late-reclaim-h7-v36`; current bridge is
+  `2026-09-18-s23-close-magic-v37` as recorded above.
 - Frozen H7: independent lane 24, magic 230046, comment `s23_h7_l1`, Long,
   0.01 lot, capacity one, confirmed-fill plus 7 minutes, onset cooldown 30 minutes.
 - Completed-M1 raw Bid conditions: first-45-second Z <= -1.0, last-15-second

@@ -1,8 +1,33 @@
 # Bot23 integrated inventory and independent session overlays
 
-## 2026-09-14 current candidate
+## 2026-09-18 current local ED hold candidate
 
-Current candidate is `bot23-late-reclaim-h7-on-v001`; its required EA bridge is
+Current local candidate is `bot23-ed-long-win15-60-on-v003`; the required EA
+bridge is `2026-09-18-s23-close-magic-v37`. It retains the v002 ED trading rule
+and corrects broker fill millisecond sync and close-deal Magic attribution.
+The trade CSV `magic` column is the owning lane's Magic. Confirmed close notes
+also record `owner_comment` and the broker's `close_deal_magic`; old v36 close
+deals may carry the previous OPEN/PENDING lane's Magic, and manual deals may
+carry zero. Ownership reconciliation continues to use position identity.
+For ED lanes 18-21 only,
+an owned Long basket with positive executable Bid/Ask PnL at the first broker
+quote at or after confirmed fill plus 15 minutes holds until plus 60 minutes.
+The broker's millisecond fill timestamp is retained across ownership sync and
+restart, so the 15- and 60-minute deadlines use the same exact fill instant.
+All other ED positions retain the 15-minute hold. The decision is durable in
+the lane state. A basket already open when the policy is first loaded keeps its
+native 15-minute close. H7 remains enabled with its native seven-minute hold.
+An incomplete or mismatched ED hold state blocks new ED entries. An existing
+basket keeps its native close once broker ownership is reconciled; the entry
+block remains in force.
+Research evidence is diagnostic: Leakcheck Stress phases 0-4 improved parent
+PnL by $13.57-$14.77 while MTM DD rose by $0.81-$7.94; all August phase deltas
+were negative, and Forward after the five-symbol common end lacks reference
+ticks. This is a local code change, not runtime activation or promotion proof.
+
+## 2026-09-14 predecessor H7 candidate
+
+The predecessor candidate was `bot23-late-reclaim-h7-on-v001`; its required EA bridge is
 `2026-09-14-s23-late-reclaim-h7-v36`. It preserves all existing lanes and adds
 independent lane 24 (magic `230046`, comment `s23_h7_l1`). H7 reads the prior
 completed M1's ordered raw Bid ticks through bridge `TICKS`, applies the frozen
@@ -66,7 +91,7 @@ The canonical EA artifact in this folder is the source `BotBridge_s23.mq5`.
 Compose copies it into MT5, removes any previously compiled binary, and compiles
 the selected `BotBridge_s23` during service startup. The runner constant and
 `expected_bridge_version` must both remain
-`2026-09-14-s23-late-reclaim-h7-v36`; every older EA is rejected by
+`2026-09-18-s23-close-magic-v37`; every older EA is rejected by
 preflight. Compilation and local tests are not deployment proof.
 
 ## Local IPC recovery correction (2026-09-04)
@@ -95,7 +120,7 @@ Bridge v32 correction (2026-09-04): POSITIONS/ORDERS may read retired magic
 230023-230034 and 230040-230046; retired 230035-230039 and legacy 200023 are not
 adopted or tradable. Nonempty or failed
 legacy queries still block startup. That historical correction required v32;
-the current runner and params require v36. Compile and attach the matching
+the current runner and params require v37. Compile and attach the matching
 current EA before restarting. Local verification is not deployment.
 
 Close-ledger durability re-audit (2026-09-04): an existing confirmed-deal row is
@@ -249,7 +274,7 @@ positionとordersが完全一致するときだけ残存ticketを再armします
 recoverableな`orders_unavailable`へ置換し、後続pollの完全なflat position/order照合まで新規entryを止めます。
 個別ticket不存在の証拠は現行bridgeの完全一致応答 `ERR|POSITION_NOT_FOUND` だけです。`ERR|10009`、`ERR|0`、
 legacy表記は照会異常として扱い、CLOSEDEAL照合へ進みません。
-preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-14-s23-late-reclaim-h7-v36` です。v36は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`、M15 lane 23 / magic 230045 / comment `s23_m15_l1`に加えてH7 lane 24 / magic 230046 / comment `s23_h7_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよびread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
+preflightはbridge名・version・command surfaceの完全一致を要求し、bridge versionは `2026-09-18-s23-close-magic-v37` です。v37は既存の全IPC/TICKS/ownership guard、Q01 lane 22 / magic 230044 / comment `s23_q01_l1`、M15 lane 23 / magic 230045 / comment `s23_m15_l1`に加えてH7 lane 24 / magic 230046 / comment `s23_h7_l1`の所有allowlist、request ID、deadline、execution数値、履歴・inventory queryの厳密検査を維持します。INFO/TICKSと全取引commandはXAUUSD専用のままです。HIST/HISTPAGEだけはB4Cおよびread-only特徴量用に安全な銘柄名のM1履歴を許可し、売買対象は拡張しません。OPEN実行点ではXAUUSD、0.01 lot、SL/TPなし、deviation 50、bot23 magic/comment対応表、期待保有数、同一magicの異物、symbol取引mode、market-order可否、必要証拠金の2倍以上のfree marginを固定検査します。ACCOUNT/INFO/CAPSとposition/orderレコードは固定項目数の完全一致で解析し、区切り文字を含むcommentや拡張frameを所有・口座・quote証拠として採用しません。CLOSEはticketに加えてsymbol・magic・comment・position identifierを同一command内で再照合し、不一致時はbroker呼出し前に拒否します。
 
 全laneのlive OPEN予約は opportunity・side・lot・symbol・magic・comment・fill期限・signal bar・basket ATR をstateへ先に保存します。注文成功後のprocess停止では、このreceiptとbroker positionの完全一致が1件だけ証明できる場合に限り、新規basketまたは既存basketへの1 ticket追加を復元します。欠損・複数候補・期限外・ownership不一致は自動採用しません。
 OPEN応答後はpositionとpending orderを再取得し、ticket/position identifierの重複を照合前に拒否します。atomic guard・10018・10026/10027の確定no-fill時に同時出現した同一namespaceの建玉を今回の約定として採用せず、正常OPENでも返却ticket以外のposition/orderが増えていれば、返却ticketだけをstateへ記録したうえで新規entryを非recoverable blockします。
@@ -735,9 +760,10 @@ This remains a forward-audit limitation rather than exact tick-for-tick parity.
 ## Checks
 
 ```powershell
-py -m py_compile live_s23_bot.py test_s23_regressions.py
+py -m py_compile live_s23_bot.py test_s23_regressions.py test_ed_win_hold_policy.py
 py live_s23_bot.py --self-test
 py test_s23_regressions.py
+py test_ed_win_hold_policy.py
 py test_shadow_opportunity_observer.py
 py test_shadow_state_tagger.py
 py test_eu_session_clock.py
@@ -750,12 +776,14 @@ checkout root; otherwise that one external-artifact check is reported as
 skipped while the self-contained bot23 suite continues.
 
 Local release-candidate runner SHA-256:
-`aeea7b455ad4f9bc50004ec37c6fd3b2a8326131f9dff767169a7de2683da950`.
+`d8579971ed0b35d3016ad9f23099d838b7e74e0335ca507504d281593d911f7b`.
 
 Local release-candidate params SHA-256:
-`2c1d791ed3187370251d711fad4d27d32c3876314952f79f526a7c2046bc0a1c`.
+`f5b3a384c5c20cfdca409f45242a4fb20a5b1e088ec97a7e8b850c6aa71ba912`.
 Local release-candidate regression SHA-256:
-`5d66404c40a2490a9a8b4cb1e33c56d2e88d3af9aaa135ac0b4ce07c63528647`.
+`e9c7bc36c9a393ce7c151c169c3aae4e71486df689da61b8e8ae673536fdd6a9`.
+ED hold policy regression SHA-256:
+`93e06833ec0b019ad58c374fd873f3e2a21605c755e9d49f7a2e9bd0919ac0a2`.
 Late-reclaim H7 overlay SHA-256:
 `207b616aec5c132dc9a8fa7a413248c8de12c7a30aceff2c549d7451e797c7b9`.
 Late-reclaim H7 regression SHA-256:
@@ -777,8 +805,8 @@ Installed shadow-observer regression SHA-256:
 Installed executor SHA-256:
 `a375321cd86e7842e8fd1ec445f13641fe4e5ef34e88f25596379e6dfa65304a`.
 Installed bridge-source SHA-256:
-`8ce0755dc91e06234388f233d03ffafc2fc42672da693f47e5a3c4c8d116ae9d`.
-No v36 bridge binary was compiled in this local pass; binary identity remains
+`e8216cd450118c4bf06ed43632fa7b958bf509aad537983c7bda8edd3bbb2436`.
+No v37 bridge binary was compiled in this local pass; binary identity remains
 an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
 process identity must be verified separately; these hashes do not replace the

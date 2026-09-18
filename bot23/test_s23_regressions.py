@@ -282,6 +282,22 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
             self.assertLess(close_block.index(field), close_block.index("trade.PositionClose"))
         self.assertIn("POSITION_OWNERSHIP_GUARD", close_block)
 
+    def test_close_command_sets_expected_magic_after_ownership_before_position_close(self):
+        source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
+        open_block = source.split('if(op == "OPEN"', 1)[1].split('if(op == "PENDING"', 1)[0]
+        pending_block = source.split('if(op == "PENDING"', 1)[1].split('if(op == "POSITIONS"', 1)[0]
+        close_block = source.split('if(op == "CLOSE"', 1)[1].split('return "ERR|UNKNOWN_COMMAND"', 1)[0]
+
+        set_magic = 'trade.SetExpertMagicNumber(expected_magic);'
+        ownership_guard = 'return "ERR|POSITION_OWNERSHIP_GUARD";'
+        position_close = 'trade.PositionClose(ticket)'
+        self.assertEqual(close_block.count(set_magic), 1)
+        self.assertGreater(close_block.index(set_magic), close_block.index(ownership_guard))
+        self.assertLess(close_block.index(set_magic), close_block.index(position_close))
+        self.assertNotIn('trade.SetExpertMagicNumber(magic);', close_block)
+        self.assertIn('trade.SetExpertMagicNumber(magic);', open_block)
+        self.assertIn('trade.SetExpertMagicNumber(magic);', pending_block)
+
     def test_open_command_binds_account_identity_and_permission_atomically(self):
         source = (Path(__file__).with_name("BotBridge_s23.mq5")).read_text(encoding="utf-8")
         open_block = source.split('if(op == "OPEN"', 1)[1].split('if(op == "PENDING"', 1)[0]
@@ -1020,7 +1036,7 @@ class Bot23Q01VarianceReleaseRegressionTests(unittest.TestCase):
         params = json.loads(json.dumps(load_params()))
         self.assertEqual(
             params["candidate_id"],
-            "bot23-late-reclaim-h7-on-v001",
+            "bot23-ed-long-win15-60-on-v003",
         )
         self.assertEqual(params["candidate_id"], live_s23_bot.EXPECTED_CANDIDATE_ID)
         self.assertFalse(params["q01_live_trading_enabled"])
@@ -2930,6 +2946,37 @@ class Bot23ZARegressionTests(unittest.TestCase):
         self.assertTrue(runner._sync_strategy(strategy))
         self.assertEqual(state["basket"], [])
         self.assertFalse(state["sync_block_new_entries"])
+
+    def test_legacy_mismatched_close_deal_magic_is_audited_without_new_order(self):
+        runner, strategy, state = make_runner(live=True)
+        executor = CountingExecutor()
+        runner.executor = executor
+        events = []
+        runner._trade_row = lambda event, _strat, **fields: events.append((event, fields))
+        arm_owned_basket(strategy, state, executor)
+        owner_comment = state["basket"][0]["owner_comment"]
+        executor.positions = []
+        legacy_close_magic = EXPECTED_S23_MAGIC + 9000
+        executor.close_deal = SimpleNamespace(
+            position_id=9401,
+            symbol="XAUUSD",
+            magic=legacy_close_magic,
+            net_profit=-1.25,
+            price=99.0,
+            deal=79613,
+            exit_volume=0.01,
+            deal_time=int(pd.Timestamp("2026-08-25T13:10:02Z").timestamp()),
+        )
+
+        self.assertTrue(runner._sync_strategy(strategy))
+        self.assertEqual(executor.open_calls, 0)
+        self.assertEqual(state["basket"], [])
+        close_events = [fields for event, fields in events if event == "position_close_confirmed"]
+        self.assertEqual(len(close_events), 1)
+        note = close_events[0]["note"]
+        self.assertIn(f"owner_magic={int(strategy['magic'])};", note)
+        self.assertIn(f"owner_comment={owner_comment};", note)
+        self.assertIn(f"close_deal_magic={legacy_close_magic}", note)
 
     def test_malformed_reverse_flag_cannot_arm_trend_episode_after_confirmed_stop(self):
         runner, strategy, state = make_runner(live=True)

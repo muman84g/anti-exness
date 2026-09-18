@@ -113,9 +113,9 @@ RETIRED_STRATEGY_IDS = frozenset(
 EXPECTED_S23_MAGIC = EXPECTED_S23_MAGICS[0]
 LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
-EXPECTED_CANDIDATE_ID = "bot23-late-reclaim-h7-on-v001"
+EXPECTED_CANDIDATE_ID = "bot23-ed-long-win15-60-on-v003"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-14-s23-late-reclaim-h7-v36"
+EXPECTED_BRIDGE_VERSION = "2026-09-18-s23-close-magic-v37"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -136,6 +136,9 @@ EXPECTED_Q01_WARMUP_M5_BARS = 110
 EXPECTED_Q01_ATR_PERIOD = 20
 EXPECTED_Q01_FEED_GAP_SECONDS = 300
 EXPECTED_Q01_LIVE_TRADING_ENABLED = False
+EXPECTED_ED_WIN_HOLD_POLICY_ID = "ed_long_win15_60_v001"
+EXPECTED_ED_WIN_HOLD_PARAMS_HASH = "3dd1228f33caa608bed07b9ca52de42ec9b9ae1fe203329ed92be52924e80a79"
+EXPECTED_ED_WIN_HOLD_MINUTES = 60
 EXPECTED_M15_TERMINAL_HOLD_MINUTES = 45
 EXPECTED_M15_TERMINAL_MAX_POSITIONS = 1
 EXPECTED_M15_TERMINAL_TIMEZONE = "America/New_York"
@@ -384,6 +387,7 @@ _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "pre_eu30_session_enabled",
     "trend_recovery_enabled",
     "t0530_edge_enabled",
+    "t0530_edge_long_win_hold_enabled",
     "q01_variance_release_enabled",
     "q01_live_trading_enabled",
     "m15_terminal_enabled",
@@ -444,6 +448,7 @@ _STATE_GENERATION_CONTRACTS = (
     ("t0530_edge_policy_id", "t0530_edge_params_hash", "t0530_edge_strategies", (
         "t0530_edge_last_evaluated_bar",
     )),
+    ("t0530_edge_long_win_hold_policy_id", "t0530_edge_long_win_hold_params_hash", None, ()),
     ("q01_policy_id", "q01_params_hash", "q01_variance_release_strategies", (
         "q01_last_evaluated_m5_bar",
     )),
@@ -656,6 +661,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "multi_symbol_m1_bars", "multi_symbol_m1_freshness_seconds",
         "trend_recovery_entry_window_minutes", "trend_recovery_max_total_entries",
         "t0530_edge_lookback_bars", "t0530_edge_hold_minutes",
+        "t0530_edge_long_win_hold_minutes",
         "t0530_edge_max_positions", "t0530_edge_max_signal_delay_minutes",
         "q01_variance_horizon_bars", "q01_variance_window_bars",
         "q01_breakout_lookback_bars", "q01_hold_minutes",
@@ -1042,6 +1048,7 @@ class S23HorizontalInventoryRunner:
         self._trend_recovery_state_migrated = False
         self._retired_state_pruned = False
         self._t0530_edge_state_migrated = False
+        self._ed_win_hold_state_migrated = False
         self._q01_state_migrated = False
         self._m15_terminal_state_migrated = False
         self._h7_state_migrated = False
@@ -1354,6 +1361,8 @@ class S23HorizontalInventoryRunner:
                 "trend_recovery_params_hash": str(self.params.get("trend_recovery_params_hash", EXPECTED_TREND_RECOVERY_PARAMS_HASH)),
                 "t0530_edge_policy_id": str(self.params.get("t0530_edge_policy_id", T0530_EDGE_POLICY_ID)),
                 "t0530_edge_params_hash": str(self.params.get("t0530_edge_params_hash", T0530_EDGE_POLICY_PARAMS_HASH)),
+                "t0530_edge_long_win_hold_policy_id": str(self.params.get("t0530_edge_long_win_hold_policy_id", EXPECTED_ED_WIN_HOLD_POLICY_ID)),
+                "t0530_edge_long_win_hold_params_hash": str(self.params.get("t0530_edge_long_win_hold_params_hash", EXPECTED_ED_WIN_HOLD_PARAMS_HASH)),
                 "t0530_edge_last_evaluated_bar": None,
                 "q01_policy_id": str(self.params.get("q01_policy_id", EXPECTED_Q01_POLICY_ID)),
                 "q01_params_hash": str(self.params.get("q01_params_hash", EXPECTED_Q01_POLICY_PARAMS_HASH)),
@@ -1454,6 +1463,7 @@ class S23HorizontalInventoryRunner:
                     "pending_open_reverse_used": None,
                     "pending_open_expected_positions": None,
                     "t0530_edge_retry_opportunity": None,
+                    "t0530_edge_hold_decision": None,
                     "q01_retry_opportunity": None,
                     "q01_last_quote_msc": None,
                     "open_retry_after_utc": None,
@@ -1711,6 +1721,16 @@ class S23HorizontalInventoryRunner:
         observed_trend_policy_hash = observed_routing.get("trend_recovery_params_hash")
         observed_t0530_edge_policy_id = observed_routing.get("t0530_edge_policy_id")
         observed_t0530_edge_policy_hash = observed_routing.get("t0530_edge_params_hash")
+        observed_ed_win_hold_policy_id = observed_routing.get("t0530_edge_long_win_hold_policy_id")
+        observed_ed_win_hold_policy_hash = observed_routing.get("t0530_edge_long_win_hold_params_hash")
+        observed_ed_hold_field_present = {
+            strat["id"]: (
+                isinstance(strategies, dict)
+                and isinstance(strategies.get(strat["id"]), dict)
+                and "t0530_edge_hold_decision" in strategies[strat["id"]]
+            )
+            for strat in self._t0530_edge_strategies()
+        }
         observed_q01_policy_id = observed_routing.get("q01_policy_id")
         observed_q01_policy_hash = observed_routing.get("q01_params_hash")
         observed_m15_terminal_policy_id = observed_routing.get("m15_terminal_policy_id")
@@ -1977,6 +1997,85 @@ class S23HorizontalInventoryRunner:
                     "expected_policy_id": expected_t0530_edge_policy_id,
                     "expected_policy_hash": expected_t0530_edge_policy_hash,
                 }
+        def block_ed_hold_state(reason: str, details: dict[str, Any]) -> None:
+            for ed_strat in self._t0530_edge_strategies():
+                lane_state = state["strategies"][ed_strat["id"]]
+                if lane_state.get("sync_block_reason") == "state_identity_mismatch":
+                    continue
+                if lane_state.get("sync_block_new_entries") and not lane_state.get("sync_block_recoverable"):
+                    continue
+                lane_state["sync_block_new_entries"] = True
+                lane_state["sync_block_reason"] = reason
+                lane_state["sync_block_recoverable"] = False
+                lane_state["sync_block_details"] = details
+
+        if observed_ed_win_hold_policy_id is None and observed_ed_win_hold_policy_hash is None:
+            unexpected_new_fields = sorted(
+                sid for sid, present in observed_ed_hold_field_present.items() if present
+            )
+            if unexpected_new_fields:
+                block_ed_hold_state(
+                    "t0530_edge_win_hold_state_partial",
+                    {"reason": "policy_identity_absent_but_lane_field_present", "lanes": unexpected_new_fields},
+                )
+            else:
+                routing["t0530_edge_long_win_hold_policy_id"] = EXPECTED_ED_WIN_HOLD_POLICY_ID
+                routing["t0530_edge_long_win_hold_params_hash"] = EXPECTED_ED_WIN_HOLD_PARAMS_HASH
+            for strat in self._t0530_edge_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                # An old open or in-flight basket keeps its native 15-minute close.
+                lane_state["t0530_edge_hold_decision"] = (
+                    "native" if lane_state.get("basket") or lane_state.get("pending_open_opportunity_id") else None
+                )
+            self._ed_win_hold_state_migrated = True
+        elif (
+            observed_ed_win_hold_policy_id != EXPECTED_ED_WIN_HOLD_POLICY_ID
+            or observed_ed_win_hold_policy_hash != EXPECTED_ED_WIN_HOLD_PARAMS_HASH
+        ):
+            for strat in self._t0530_edge_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                lane_state["t0530_edge_hold_decision"] = (
+                    "native" if lane_state.get("basket") or lane_state.get("pending_open_opportunity_id") else None
+                )
+            block_ed_hold_state(
+                "t0530_edge_win_hold_policy_identity_mismatch",
+                {"observed_policy_id": observed_ed_win_hold_policy_id,
+                 "observed_policy_hash": observed_ed_win_hold_policy_hash,
+                 "expected_policy_id": EXPECTED_ED_WIN_HOLD_POLICY_ID,
+                 "expected_policy_hash": EXPECTED_ED_WIN_HOLD_PARAMS_HASH},
+            )
+            self._ed_win_hold_state_migrated = True
+        else:
+            invalid_ed_hold_lanes: dict[str, str] = {}
+            for strat in self._t0530_edge_strategies():
+                lane_state = state["strategies"][strat["id"]]
+                decision = lane_state.get("t0530_edge_hold_decision")
+                basket = lane_state.get("basket") or []
+                pending_open = bool(lane_state.get("pending_open_opportunity_id"))
+                if not observed_ed_hold_field_present[strat["id"]]:
+                    invalid_ed_hold_lanes[strat["id"]] = "missing_lane_field"
+                elif decision not in (None, "pending", "extend", "native"):
+                    invalid_ed_hold_lanes[strat["id"]] = "invalid_decision"
+                elif basket and decision is None:
+                    invalid_ed_hold_lanes[strat["id"]] = "active_without_decision"
+                elif basket and decision in ("pending", "extend") and (
+                    len(basket) != 1 or basket[0].get("side") != "LONG"
+                ):
+                    invalid_ed_hold_lanes[strat["id"]] = "non_long_or_multiple_extended_basket"
+                elif pending_open and not basket and decision not in ("pending", "native"):
+                    invalid_ed_hold_lanes[strat["id"]] = "pending_open_without_valid_decision"
+                if strat["id"] in invalid_ed_hold_lanes:
+                    lane_state["t0530_edge_hold_decision"] = "native" if basket or pending_open else None
+                    self._ed_win_hold_state_migrated = True
+                    logging.warning("S23 ED hold state normalized to native for %s", strat["id"])
+                elif not basket and not pending_open and decision is not None:
+                    lane_state["t0530_edge_hold_decision"] = None
+                    self._ed_win_hold_state_migrated = True
+            if invalid_ed_hold_lanes:
+                block_ed_hold_state(
+                    "t0530_edge_win_hold_state_partial",
+                    {"invalid_lanes": invalid_ed_hold_lanes},
+                )
         expected_q01_policy_id = str(self.params.get("q01_policy_id", EXPECTED_Q01_POLICY_ID))
         expected_q01_policy_hash = str(self.params.get("q01_params_hash", EXPECTED_Q01_POLICY_PARAMS_HASH))
         if observed_q01_policy_id is None and observed_q01_policy_hash is None:
@@ -3045,6 +3144,7 @@ class S23HorizontalInventoryRunner:
         st["close_trade_permission_reject_streak"] = 0
         st["close_trade_permission_reject_notified"] = False
         st["time_close_wide_seen"] = False
+        st["t0530_edge_hold_decision"] = None
         st["q01_last_quote_msc"] = None
         st["current_basket_id"] = None
         st["cooldown_until_bar"] = -1
@@ -4552,7 +4652,7 @@ class S23HorizontalInventoryRunner:
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
                 return self._preflight_reject("broker_quote_clock_unavailable")
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated or self._h7_state_migrated:
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._ed_win_hold_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated or self._h7_state_migrated:
             try:
                 self._save_state()
             except Exception:
@@ -4567,6 +4667,7 @@ class S23HorizontalInventoryRunner:
             self._trend_recovery_state_migrated = False
             self._retired_state_pruned = False
             self._t0530_edge_state_migrated = False
+            self._ed_win_hold_state_migrated = False
             self._q01_state_migrated = False
             self._m15_terminal_state_migrated = False
             self._h7_state_migrated = False
@@ -4788,6 +4889,13 @@ class S23HorizontalInventoryRunner:
             return "invalid_t0530_edge_signal_delay"
         if int(self.params.get("t0530_edge_hold_minutes") or 0) != 15 or int(self.params.get("t0530_edge_max_positions") or 0) != 4:
             return "invalid_t0530_edge_lifecycle"
+        if (
+            self.params.get("t0530_edge_long_win_hold_enabled") is not True
+            or self.params.get("t0530_edge_long_win_hold_policy_id") != EXPECTED_ED_WIN_HOLD_POLICY_ID
+            or self.params.get("t0530_edge_long_win_hold_params_hash") != EXPECTED_ED_WIN_HOLD_PARAMS_HASH
+            or self.params.get("t0530_edge_long_win_hold_minutes") != EXPECTED_ED_WIN_HOLD_MINUTES
+        ):
+            return "invalid_t0530_edge_long_win_hold_policy"
         t0530_edge = [row for row in self._t0530_edge_strategies() if bool(row.get("enabled", True))]
         t0530_edge_magics = [int(row.get("magic") or 0) for row in t0530_edge]
         configured_t0530_edge_magics = tuple(int(value) for value in self.params.get("expected_t0530_edge_magics", []))
@@ -5704,7 +5812,26 @@ class S23HorizontalInventoryRunner:
                         )
                         return False
                     else:
-                        broker_entry_time = pd.Timestamp(broker_open_epoch, unit="s", tz="UTC")
+                        raw_broker_open_msc = getattr(
+                            live_pos, "open_time_msc", broker_open_epoch * 1000
+                        )
+                        if (
+                            type(raw_broker_open_msc) is not int
+                            or raw_broker_open_msc <= 0
+                            or raw_broker_open_msc // 1000 != broker_open_epoch
+                        ):
+                            self._set_sync_block(
+                                strat,
+                                "live_position_open_time_inconsistent",
+                                {"ticket": position_id,
+                                 "open_time": broker_open_epoch,
+                                 "open_time_msc": repr(raw_broker_open_msc)},
+                                recoverable=False,
+                            )
+                            return False
+                        broker_entry_time = pd.Timestamp(
+                            raw_broker_open_msc, unit="ms", tz="UTC"
+                        )
                         persisted_entry_time = parse_ts(state_pos.get("entry_time_utc"))
                         try:
                             persisted_open_epoch = int(
@@ -5938,7 +6065,12 @@ class S23HorizontalInventoryRunner:
                         lot=float(state_pos.get("lot") or 0.0), entry_price=float(state_pos.get("entry_price") or 0.0),
                         exit_price=float(getattr(deal, "price", 0.0) or 0.0), price=float(getattr(deal, "price", 0.0) or 0.0),
                         profit=float(deal.net_profit), reason=position_reason, signal_bar_time=signal_bar,
-                        note=f"deal_time_utc={dt_text(deal_time)}",
+                        note=(
+                            f"deal_time_utc={dt_text(deal_time)};"
+                            f"owner_magic={int(strat['magic'])};"
+                            f"owner_comment={state_pos.get('owner_comment')};"
+                            f"close_deal_magic={int(getattr(deal, 'magic', 0) or 0)}"
+                        ),
                     )
                 # Do not consume position state or advance the daily loss
                 # accumulator until every immutable broker close deal has an
@@ -6101,6 +6233,20 @@ class S23HorizontalInventoryRunner:
             if recovered_pending_open and remaining_state and len(remaining_state) == len(state_basket):
                 # A separately retained non-recoverable entry block must not
                 # prevent exit monitoring of the uniquely recovered position.
+                return True
+            if (
+                remaining_state
+                and len(remaining_state) == len(state_basket)
+                and orders_available
+                and not orders
+                and st.get("sync_block_reason") in {
+                    "t0530_edge_win_hold_state_partial",
+                    "t0530_edge_win_hold_policy_identity_mismatch",
+                }
+                and bool(st.get("sync_block_new_entries"))
+            ):
+                # Exact broker-owned inventory was reconciled above.  A hold
+                # policy state block prevents new entries, never its exit.
                 return True
             if (
                 remaining_state
@@ -7863,7 +8009,38 @@ class S23HorizontalInventoryRunner:
 
 
     def _monitor_t0530_edge_position(self, strat: dict[str, Any], info: Any, poll_time: datetime | pd.Timestamp | None = None) -> bool:
-        return self._monitor_fixed_hold_position(strat, info, poll_time, "t0530_edge_fixed_hold")
+        st = self._st(strat)
+        if st.get("pending_close_reason") or any(
+            pos.get("pending_close_reason") or pos.get("close_requested")
+            for pos in st.get("basket") or []
+        ):
+            return self._monitor_fixed_hold_position(strat, info, poll_time, "t0530_edge_fixed_hold")
+        decision = st.get("t0530_edge_hold_decision")
+        basket = st.get("basket") or []
+        if decision == "pending" and basket:
+            if len(basket) != 1 or basket[0].get("side") != "LONG":
+                decision = "native"
+            else:
+                entry_time = parse_ts(basket[0].get("entry_time_utc"))
+                raw_quote_msc = getattr(info, "quote_time_msc", None)
+                try:
+                    quote_msc = int(raw_quote_msc)
+                except (TypeError, ValueError, OverflowError):
+                    quote_msc = 0
+                if entry_time is not None and quote_msc > 0:
+                    quote_time = pd.Timestamp(quote_msc, unit="ms", tz="UTC")
+                    if quote_time >= fixed_hold_due_at([entry_time], int(strat["hold_minutes"])):
+                        executable_pnl = self._basket_pnl(strat, float(info.bid), float(info.ask))
+                        decision = "extend" if math.isfinite(executable_pnl) and executable_pnl > 0.0 else "native"
+            if decision != "pending":
+                st["t0530_edge_hold_decision"] = decision
+                self._save_state()  # restart must not recompute the first eligible quote
+                logging.info("S23 ED hold decision lane=%s basket=%s decision=%s", strat["id"], st.get("current_basket_id"), decision)
+        adjusted = (
+            dict(strat, hold_minutes=EXPECTED_ED_WIN_HOLD_MINUTES)
+            if decision == "extend" else strat
+        )
+        return self._monitor_fixed_hold_position(adjusted, info, poll_time, "t0530_edge_fixed_hold")
 
     def _process_t0530_edge_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
         readiness: dict[int, bool] = {}
@@ -7902,6 +8079,11 @@ class S23HorizontalInventoryRunner:
         note: str,
     ) -> bool:
         st = self._st(strat)
+        if not st.get("basket") and not st.get("pending_open_opportunity_id"):
+            st["t0530_edge_hold_decision"] = (
+                "pending" if str(opportunity["side"]) == "LONG" else "native"
+            )
+            self._save_state()
         opened = self._open_entry(
             strat, str(opportunity["side"]), price_row, info, note=note,
             execution_time=poll_time, admission_time=poll_time,
@@ -7918,6 +8100,8 @@ class S23HorizontalInventoryRunner:
             self._save_state()
         elif not st.get("pending_open_opportunity_id") and not st.get("open_retry_after_utc"):
             st["t0530_edge_retry_opportunity"] = None
+            if not st.get("basket"):
+                st["t0530_edge_hold_decision"] = None
             self._save_state()
         return bool(opened or confirmed)
 
@@ -8571,7 +8755,10 @@ class S23HorizontalInventoryRunner:
                 readiness[lane_id] = False
                 continue
             exit_blocked = self._monitor_q01_position(strat, info, poll_time)
-            readiness[lane_id] = bool(group_enabled and strat.get("enabled", True) and not exit_blocked)
+            readiness[lane_id] = bool(
+                group_enabled and strat.get("enabled", True)
+                and not st.get("sync_block_new_entries") and not exit_blocked
+            )
         return readiness
 
     def _process_q01_entries(

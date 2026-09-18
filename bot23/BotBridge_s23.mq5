@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-09-14-s23-late-reclaim-h7-v36"
+#define BRIDGE_VERSION "2026-09-18-s23-close-magic-v37"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -864,6 +864,7 @@ string HandleCommand(const string command)
       if(symbol != expected_symbol || magic != expected_magic ||
          comment != expected_comment || identifier != expected_identifier)
          return "ERR|POSITION_OWNERSHIP_GUARD";
+      trade.SetExpertMagicNumber(expected_magic);
       double volume = PositionGetDouble(POSITION_VOLUME);
       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
       double profit_before = PositionGetDouble(POSITION_PROFIT);
