@@ -1,5 +1,16 @@
 # Bot23 integrated inventory and independent session overlays
 
+## 2026-09-20 current local entry profile
+
+The checked-in local profile enables only the four NY05:30 edge lanes
+(`ny0530_edge_lane_1` through `ny0530_edge_lane_4`). ZA, Morning, Midday,
+Pre-EU30, TrendRecovery, Q01, M15, H7, and inventory range-fade new entries
+are disabled. Global `enabled=true`, `live_trading_enabled=true`, and
+`shadow_forward_enabled=false` are unchanged. Existing positions continue
+through their normal sync and close paths, and lane ownership state, magic,
+comments, and schema are preserved. This is a local configuration change;
+deployment, restart, bridge attachment, and runtime switching were not done.
+
 ## 2026-09-18 current local ED hold candidate
 
 Current local candidate is `bot23-ed-long-win15-60-on-v003`; the required EA

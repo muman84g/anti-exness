@@ -966,6 +966,31 @@ class RecordingObserver:
 
 def make_runner(*, live: bool = True) -> tuple[S23HorizontalInventoryRunner, dict, dict]:
     params = json.loads(json.dumps(load_params()))
+    # Keep the shared fixture capable of exercising every lane independently;
+    # the checked-in runtime profile is intentionally NY05:30-only.
+    for group in (
+        "inventory_range_fade_enabled",
+        "midday_session_enabled",
+        "pre_eu30_session_enabled",
+        "trend_recovery_enabled",
+        "q01_variance_release_enabled",
+        "m15_terminal_enabled",
+        "h7_enabled",
+    ):
+        params[group] = True
+    for collection in (
+        "strategies",
+        "morning_session_strategies",
+        "midday_session_strategies",
+        "pre_eu30_session_strategies",
+        "trend_recovery_strategies",
+        "t0530_edge_strategies",
+        "q01_variance_release_strategies",
+        "m15_terminal_strategies",
+        "h7_strategies",
+    ):
+        for strategy_row in params[collection]:
+            strategy_row["enabled"] = True
     params["live_trading_enabled"] = live
     params["shadow_forward_enabled"] = not live
     params["shadow_opportunity_observer"]["enabled"] = False
@@ -4569,6 +4594,58 @@ class Bot23MorningSessionRegressionTests(unittest.TestCase):
         runner._st(strat)["basket"] = []
         self.assertIsNone(runner._ownership_namespace_error())
         self.assertIsNone(runner._entry_submission_block_reason(strat))
+
+    def test_disabled_strategy_is_rejected_by_final_open_guard(self):
+        runner, _za, _state = make_runner(live=False)
+        strat = runner.params["t0530_edge_strategies"][0]
+        strat["enabled"] = False
+        at = pd.Timestamp("2026-08-25T13:15:00Z")
+        row = pd.Series({"Open": 100.0, "Close": 100.0, "AskOpen": 100.03}, name=at)
+        runner.executor = CountingExecutor()
+
+        self.assertFalse(
+            runner._open_entry(
+                strat, "LONG", row, SimpleNamespace(bid=100.0, ask=100.03),
+                execution_time=at, apply_portfolio_rearm=False,
+            )
+        )
+        self.assertEqual(runner.executor.open_calls, 0)
+        self.assertFalse(runner._st(strat)["basket"])
+
+    def test_ny0530_only_runtime_profile_keeps_namespace_valid(self):
+        params = json.loads(json.dumps(load_params()))
+        with patch.object(live_s23_bot.os.path, "exists", return_value=False):
+            runner = S23HorizontalInventoryRunner(params)
+        self.assertIsNone(runner._ownership_namespace_error())
+        self.assertTrue(params["enabled"])
+        self.assertTrue(params["live_trading_enabled"])
+        self.assertTrue(params["t0530_edge_enabled"])
+        for key in (
+            "inventory_range_fade_enabled",
+            "morning_session_enabled",
+            "midday_session_enabled",
+            "pre_eu30_session_enabled",
+            "trend_recovery_enabled",
+            "q01_variance_release_enabled",
+            "m15_terminal_enabled",
+            "h7_enabled",
+        ):
+            self.assertFalse(params[key], key)
+        self.assertEqual(
+            [row["id"] for row in params["t0530_edge_strategies"] if row["enabled"]],
+            ["ny0530_edge_lane_1", "ny0530_edge_lane_2", "ny0530_edge_lane_3", "ny0530_edge_lane_4"],
+        )
+        for collection in (
+            "strategies",
+            "morning_session_strategies",
+            "midday_session_strategies",
+            "pre_eu30_session_strategies",
+            "trend_recovery_strategies",
+            "q01_variance_release_strategies",
+            "m15_terminal_strategies",
+            "h7_strategies",
+        ):
+            self.assertFalse(any(row["enabled"] for row in params[collection]), collection)
 
     def test_state_shape_validation_covers_every_overlay_lane(self):
         params = json.loads(json.dumps(load_params()))

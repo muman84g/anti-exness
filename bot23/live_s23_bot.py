@@ -4696,8 +4696,6 @@ class S23HorizontalInventoryRunner:
             return "invalid_portfolio_rearm_params_hash"
         if int(self.params.get("long_target_portfolio_rearm_minutes") or 0) != EXPECTED_PORTFOLIO_REARM_MINUTES:
             return f"invalid_long_target_portfolio_rearm_minutes={self.params.get('long_target_portfolio_rearm_minutes')}"
-        if not bool(self.params.get("inventory_range_fade_enabled", False)):
-            return "inventory_range_fade_disabled"
         if str(self.params.get("inventory_range_fade_policy_id") or "") != EXPECTED_INVENTORY_RANGE_FADE_POLICY_ID:
             return f"invalid_inventory_range_fade_policy_id={self.params.get('inventory_range_fade_policy_id')}"
         if str(self.params.get("inventory_range_fade_params_hash") or "") != EXPECTED_INVENTORY_RANGE_FADE_PARAMS_HASH:
@@ -4730,7 +4728,7 @@ class S23HorizontalInventoryRunner:
             return f"invalid_late_short_action={self.params.get('late_short_action')}"
         if int(self.params.get("lane_count") or 0) != 4:
             return f"invalid_lane_count={self.params.get('lane_count')} expected=4"
-        strategies = [row for row in self.params.get("strategies", []) if bool(row.get("enabled", True))]
+        strategies = list(self.params.get("strategies", []))
         magics = [int(row.get("magic") or 0) for row in strategies]
         configured_magics = tuple(int(value) for value in self.params.get("expected_magics", []))
         prefixes = [str(row.get("comment_prefix") or "") for row in strategies]
@@ -4762,7 +4760,7 @@ class S23HorizontalInventoryRunner:
             return f"invalid_morning_session_end_utc={self.params.get('morning_session_end_utc')}"
         if int(self.params.get("morning_session_max_positions", 0)) != EXPECTED_MORNING_MAX_POSITIONS:
             return f"invalid_morning_session_max_positions={self.params.get('morning_session_max_positions')}"
-        morning = [row for row in self._morning_strategies() if bool(row.get("enabled", True))]
+        morning = self._morning_strategies()
         morning_magics = [int(row.get("magic") or 0) for row in morning]
         configured_morning_magics = tuple(int(value) for value in self.params.get("expected_morning_magics", []))
         if tuple(morning_magics) != EXPECTED_MORNING_MAGICS or configured_morning_magics != EXPECTED_MORNING_MAGICS:
@@ -4794,7 +4792,7 @@ class S23HorizontalInventoryRunner:
             return f"invalid_midday_session_end_utc={self.params.get('midday_session_end_utc')}"
         if int(self.params.get("midday_session_max_positions", 0)) != EXPECTED_MIDDAY_MAX_POSITIONS:
             return f"invalid_midday_session_max_positions={self.params.get('midday_session_max_positions')}"
-        midday = [row for row in self._midday_strategies() if bool(row.get("enabled", True))]
+        midday = self._midday_strategies()
         midday_magics = [int(row.get("magic") or 0) for row in midday]
         configured_midday_magics = tuple(int(value) for value in self.params.get("expected_midday_magics", []))
         if tuple(midday_magics) != EXPECTED_MIDDAY_MAGICS or configured_midday_magics != EXPECTED_MIDDAY_MAGICS:
@@ -4811,8 +4809,6 @@ class S23HorizontalInventoryRunner:
             drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected_midday.items() if row.get(key) != value}
             if str(row.get("spec_id") or "") != EXPECTED_MIDDAY_POLICY_ID or drift:
                 return f"invalid_midday_lane_contract:{row.get('id')}:{json.dumps(drift, sort_keys=True)}"
-        if not bool(self.params.get("pre_eu30_session_enabled", False)):
-            return "pre_eu30_session_disabled"
         if str(self.params.get("pre_eu30_session_policy_id") or "") != PRE_EU30_POLICY_ID:
             return f"invalid_pre_eu30_policy_id={self.params.get('pre_eu30_session_policy_id')}"
         if str(self.params.get("pre_eu30_session_params_hash") or "") != PRE_EU30_POLICY_PARAMS_HASH:
@@ -4823,7 +4819,7 @@ class S23HorizontalInventoryRunner:
             return f"invalid_pre_eu30_max_positions={self.params.get('pre_eu30_session_max_positions')}"
         if int(self.params.get("m1_bars", 0)) != EXPECTED_PRE_EU30_M1_BARS:
             return f"invalid_pre_eu30_m1_bars={self.params.get('m1_bars')} expected={EXPECTED_PRE_EU30_M1_BARS}"
-        pre_eu30 = [row for row in self._pre_eu30_strategies() if bool(row.get("enabled", True))]
+        pre_eu30 = self._pre_eu30_strategies()
         pre_eu30_magics = [int(row.get("magic") or 0) for row in pre_eu30]
         configured_pre_eu30_magics = tuple(int(value) for value in self.params.get("expected_pre_eu30_magics", []))
         if tuple(pre_eu30_magics) != EXPECTED_PRE_EU30_MAGICS or configured_pre_eu30_magics != EXPECTED_PRE_EU30_MAGICS:
@@ -4846,8 +4842,6 @@ class S23HorizontalInventoryRunner:
                 or int(row.get("cooldown", -1)) != 0
             ):
                 return f"invalid_pre_eu30_lane_contract:{row.get('id')}"
-        if not bool(self.params.get("trend_recovery_enabled", False)):
-            return "trend_recovery_disabled"
         if str(self.params.get("trend_recovery_policy_id") or "") != EXPECTED_TREND_RECOVERY_POLICY_ID:
             return f"invalid_trend_recovery_policy_id={self.params.get('trend_recovery_policy_id')}"
         if str(self.params.get("trend_recovery_params_hash") or "") != EXPECTED_TREND_RECOVERY_PARAMS_HASH:
@@ -4856,7 +4850,7 @@ class S23HorizontalInventoryRunner:
             return "invalid_trend_recovery_entry_window"
         if int(self.params.get("trend_recovery_max_total_entries", 0)) != EXPECTED_TREND_RECOVERY_MAX_TOTAL_ENTRIES:
             return "invalid_trend_recovery_max_total_entries"
-        trend = [row for row in self._trend_recovery_strategies() if bool(row.get("enabled", True))]
+        trend = self._trend_recovery_strategies()
         trend_magics = [int(row.get("magic") or 0) for row in trend]
         configured_trend_magics = tuple(int(value) for value in self.params.get("expected_trend_recovery_magics", []))
         if tuple(trend_magics) != EXPECTED_TREND_RECOVERY_MAGICS or configured_trend_magics != EXPECTED_TREND_RECOVERY_MAGICS:
@@ -4896,7 +4890,7 @@ class S23HorizontalInventoryRunner:
             or self.params.get("t0530_edge_long_win_hold_minutes") != EXPECTED_ED_WIN_HOLD_MINUTES
         ):
             return "invalid_t0530_edge_long_win_hold_policy"
-        t0530_edge = [row for row in self._t0530_edge_strategies() if bool(row.get("enabled", True))]
+        t0530_edge = self._t0530_edge_strategies()
         t0530_edge_magics = [int(row.get("magic") or 0) for row in t0530_edge]
         configured_t0530_edge_magics = tuple(int(value) for value in self.params.get("expected_t0530_edge_magics", []))
         if tuple(t0530_edge_magics) != EXPECTED_T0530_EDGE_MAGICS or configured_t0530_edge_magics != EXPECTED_T0530_EDGE_MAGICS:
@@ -4914,8 +4908,6 @@ class S23HorizontalInventoryRunner:
                 return f"invalid_t0530_edge_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
         if str(self.params.get("q01_policy_id") or "") != EXPECTED_Q01_POLICY_ID:
             return "invalid_q01_policy_id"
-        if not bool(self.params.get("q01_variance_release_enabled", False)):
-            return "q01_variance_release_disabled"
         if bool(self.params.get("q01_live_trading_enabled", True)) != EXPECTED_Q01_LIVE_TRADING_ENABLED:
             return "q01_live_trading_gate_must_remain_disabled"
         if str(self.params.get("q01_params_hash") or "") != EXPECTED_Q01_POLICY_PARAMS_HASH:
@@ -4947,7 +4939,7 @@ class S23HorizontalInventoryRunner:
             abs_tol=1e-12,
         ):
             return "invalid_q01_max_raw_spread_price"
-        q01 = [row for row in self._q01_strategies() if bool(row.get("enabled", True))]
+        q01 = self._q01_strategies()
         q01_magics = [int(row.get("magic") or 0) for row in q01]
         configured_q01_magics = tuple(int(value) for value in self.params.get("expected_q01_magics", []))
         if tuple(q01_magics) != EXPECTED_Q01_MAGICS or configured_q01_magics != EXPECTED_Q01_MAGICS:
@@ -4963,8 +4955,6 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_q01_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        if not bool(self.params.get("m15_terminal_enabled", False)):
-            return "m15_terminal_disabled"
         if str(self.params.get("m15_terminal_policy_id") or "") != M15_TERMINAL_POLICY_ID:
             return "invalid_m15_terminal_policy_id"
         if str(self.params.get("m15_terminal_params_hash") or "") != M15_TERMINAL_POLICY_PARAMS_HASH:
@@ -4981,7 +4971,7 @@ class S23HorizontalInventoryRunner:
             return "invalid_m15_terminal_hold"
         if int(self.params.get("m15_terminal_max_positions") or 0) != EXPECTED_M15_TERMINAL_MAX_POSITIONS:
             return "invalid_m15_terminal_max_positions"
-        m15_terminal = [row for row in self._m15_terminal_strategies() if bool(row.get("enabled", True))]
+        m15_terminal = self._m15_terminal_strategies()
         m15_terminal_magics = [int(row.get("magic") or 0) for row in m15_terminal]
         configured_m15_terminal_magics = tuple(int(value) for value in self.params.get("expected_m15_terminal_magics", []))
         if tuple(m15_terminal_magics) != EXPECTED_M15_TERMINAL_MAGICS or configured_m15_terminal_magics != EXPECTED_M15_TERMINAL_MAGICS:
@@ -4999,15 +4989,13 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_m15_terminal_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        if not bool(self.params.get("h7_enabled", False)):
-            return "h7_disabled"
         if str(self.params.get("h7_policy_id") or "") != H7_POLICY_ID:
             return "invalid_h7_policy_id"
         if str(self.params.get("h7_params_hash") or "") != H7_POLICY_PARAMS_HASH:
             return "invalid_h7_params_hash"
         if self.params.get("h7_signal_cooldown_minutes") != 30:
             return "invalid_h7_signal_cooldown_minutes"
-        h7 = [row for row in self._h7_strategies() if bool(row.get("enabled", True))]
+        h7 = self._h7_strategies()
         h7_magics = [int(row.get("magic") or 0) for row in h7]
         if tuple(h7_magics) != EXPECTED_H7_MAGICS or tuple(self.params.get("expected_h7_magics", [])) != EXPECTED_H7_MAGICS:
             return "invalid_h7_magics"
@@ -6772,6 +6760,12 @@ class S23HorizontalInventoryRunner:
             self._trade_row(
                 "entry_skip", strat, reason="bot_entries_disabled",
                 signal_bar_time=str(price_row.name), note="global_entry_guard",
+            )
+            return False
+        if not bool(strat.get("enabled", True)):
+            self._trade_row(
+                "entry_skip", strat, reason="strategy_entries_disabled",
+                signal_bar_time=str(price_row.name), note="final_strategy_entry_guard",
             )
             return False
         if not self.live_enabled and not self.shadow_enabled:
@@ -10377,6 +10371,9 @@ def self_test() -> None:
     params["pre_eu30_shadow_state_tagger"]["enabled"] = False
     params["safety"]["stale_signal_guard"] = False
     strategy = params["strategies"][0]
+    # Exercise the legacy pending-entry lifecycle in an isolated self-test
+    # while the checked-in runtime profile keeps ZA entries disabled.
+    strategy["enabled"] = True
     assert params["candidate_id"] == EXPECTED_CANDIDATE_ID
     assert params["routing_mode"] == "first_consuming_lane_preserve_primary_v1"
     assert params["entry_policy_id"] == EXPECTED_ENTRY_POLICY_ID

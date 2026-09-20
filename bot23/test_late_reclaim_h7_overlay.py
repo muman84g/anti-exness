@@ -119,10 +119,35 @@ class LateReclaimH7OverlayTests(unittest.TestCase):
             runner.params["h7_strategies"][0][key] = bad
             self.assertIn("invalid_h7_lane_contract", runner._ownership_namespace_error())
 
-    def test_current_h7_candidate_cannot_silently_disable_lane(self):
+    def test_disabled_h7_preserves_namespace_and_blocks_only_new_entries(self):
         runner, _strategy, _state = make_runner(live=True)
         runner.params["h7_enabled"] = False
-        self.assertEqual(runner._ownership_namespace_error(), "h7_disabled")
+        h7 = runner._h7_strategies()[0]
+        self.assertIsNone(runner._ownership_namespace_error())
+        self.assertIn(h7["id"], runner.state["strategies"])
+        self.assertEqual(runner._st(h7)["lane_id"], 24)
+        with patch.object(runner, "_open_entry") as open_entry:
+            runner._process_h7_entries(
+                pd.Series({"Close": 2000.0}, name=pd.Timestamp("2026-01-01T00:00:00Z")),
+                object(),
+                pd.Timestamp("2026-01-01T00:00:01Z"),
+                {24: True},
+            )
+        open_entry.assert_not_called()
+
+    def test_disabled_h7_still_monitors_owned_position_for_close(self):
+        runner, _strategy, _state = make_runner(live=True)
+        runner.params["h7_enabled"] = False
+        strat = runner._h7_strategies()[0]
+        runner._st(strat)["basket"] = [{"ticket": 1}]
+        with patch.object(runner, "_sync_strategy", return_value=True) as sync, patch.object(
+            runner, "_monitor_fixed_hold_position", return_value=False
+        ) as monitor:
+            readiness = runner._process_h7_exits(object(), pd.Timestamp("2026-01-01T00:00:00Z"))
+        sync.assert_called_once_with(strat)
+        monitor.assert_called_once()
+        self.assertFalse(monitor.call_args.kwargs["defer_for_spread"])
+        self.assertFalse(readiness[24])
 
     def test_h7_fixed_hold_never_defers_for_spread(self):
         runner, _strategy, _state = make_runner(live=True)

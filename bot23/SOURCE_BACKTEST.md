@@ -1,5 +1,15 @@
 # Source Backtest
 
+## 2026-09-20 current local entry profile
+
+- The checked-in local profile enables only the four `t0530_edge_break_fade`
+  lanes, `ny0530_edge_lane_1` through `ny0530_edge_lane_4`.
+- ZA, Morning, Midday, Pre-EU30, TrendRecovery, Q01, M15, H7, and inventory
+  range-fade new entries are disabled. Global enable/live flags are unchanged.
+- Existing position sync, close, state schema, magic, and comment ownership
+  remain active. Deployment, restart, bridge attachment, and runtime switching
+  were not performed.
+
 ## 2026-09-18 ED Long conditional hold integration
 
 - Local candidate: `bot23-ed-long-win15-60-on-v003`; required bridge identity
