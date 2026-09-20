@@ -45,6 +45,14 @@ from live_manual_alerts import notify_manual_action_required
 from live_config import MT5_LOGIN, MT5_SERVER
 from eu_entry_admission_clock import classify_entry_admission, is_eu_summer_time, is_us_summer_time
 from position_lifecycle_clock import fixed_hold_due_at
+from research_entries import (
+    CALENDAR_PATH as RESEARCH_CALENDAR_PATH,
+    evaluate as evaluate_research_entry,
+    entry_session_guard,
+    abnormal_gap_exit_reason,
+    load_session_calendar,
+    validate_calendar_coverage,
+)
 from multi_symbol_m1 import (
     fetch_completed_m1_snapshot,
     jst1113_usd_accel_pre_session_short,
@@ -107,6 +115,9 @@ EXPECTED_T0530_EDGE_MAGICS = (230040, 230041, 230042, 230043)
 EXPECTED_Q01_MAGICS = (230044,)
 EXPECTED_M15_TERMINAL_MAGICS = (230045,)
 EXPECTED_H7_MAGICS = (230046,)
+EXPECTED_RESEARCH_ENTRY_MAGICS = (230047, 230048, 230049, 230050, 230051, 230052)
+EXPECTED_RESEARCH_ENTRY_POLICY_ID = "research_entries_v142"
+EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH = "ede38daf6a0fa2e88bee7196b5eb9a9a79ed3977ac11e04c89d0b6796446b11a"
 RETIRED_STRATEGY_IDS = frozenset(
     f"ny0530_session_vwap_lane_{index}" for index in range(1, 6)
 )
@@ -115,7 +126,7 @@ LEGACY_S23_MAGICS = (200023,)
 EXPECTED_STRATEGY_ID = "bot23_za_horizontal_inventory_v001"
 EXPECTED_CANDIDATE_ID = "bot23-ed-long-win15-60-on-v003"
 EXPECTED_BRIDGE_NAME = "BotBridge_s23"
-EXPECTED_BRIDGE_VERSION = "2026-09-18-s23-close-magic-v37"
+EXPECTED_BRIDGE_VERSION = "2026-09-21-s23-research-v38"
 EXPECTED_TREND_RECOVERY_POLICY_ID = "reverse_long_stop_m1_bull_multishort_n2_tp1_sl0p5_v001"
 EXPECTED_TREND_RECOVERY_PARAMS_HASH = "a29187af7e67075ef2e4eb0c39cb3cd09bbfb2a6ee7b23e4cd51bbe370c000e9"
 EXPECTED_TREND_RECOVERY_ENTRY_WINDOW_MINUTES = 30
@@ -280,6 +291,8 @@ STATE_DIR = os.path.join(SCRIPT_DIR, "state")
 LOG_FILE = os.path.join(LOG_DIR, "s23_bot.log")
 TRADE_LOG_FILE = os.path.join(LOG_DIR, "s23_trades.csv")
 SIGNAL_EVALUATION_LOG_FILE = os.path.join(LOG_DIR, "s23_signal_evaluation.csv")
+RESEARCH_CLOCK_LOG_FILE = os.path.join(LOG_DIR, "s23_research_clock_lineage.csv")
+RESEARCH_ENTRY_MODULE_PATH = os.path.join(SCRIPT_DIR, "research_entries.py")
 STATE_FILE = os.path.join(STATE_DIR, "s23_bot_state.json")
 RUNNER_LOCK_FILE = os.path.join(STATE_DIR, "s23_runner.lock")
 
@@ -346,6 +359,11 @@ SIGNAL_EVALUATION_FIELDS = [
     "reason", "signal_bar_time", "event_time", "release_time",
     "available_time", "decision_time", "executable_at", "live",
 ]
+RESEARCH_CLOCK_FIELDS = [
+    "timestamp_utc", "opportunity_id", "strategy_id", "lane_id", "magic",
+    "event_time", "release_time", "ingested_time", "available_time",
+    "cutoff_time", "decision_time", "executable_at",
+]
 _CSV_SCHEMAS_VALIDATED: set[str] = set()
 
 
@@ -374,6 +392,41 @@ def parse_ts(value: Any) -> pd.Timestamp | None:
     return ts.tz_convert("UTC")
 
 
+def research_opportunity_clock_fields(
+    event_time: Any,
+    ingested_time: Any,
+    cutoff_time: Any,
+) -> dict[str, str]:
+    """Build the research opportunity five-clock lineage from observed times.
+
+    ``release_time`` is the completed-M1 release boundary. ``ingested_time``
+    and ``available_time`` are the process receipt time for the completed-bar
+    input, while ``cutoff_time`` is the decision's explicit as-of boundary.
+    The broker quote clock is recorded separately as ``executable_at``.  The
+    causal gate is ``available <= cutoff``.
+    """
+    event = parse_ts(event_time)
+    ingested = parse_ts(ingested_time)
+    cutoff = parse_ts(cutoff_time)
+    if event is None or ingested is None or cutoff is None:
+        raise ValueError("research opportunity clock is missing or invalid")
+    release = event + pd.Timedelta(minutes=1)
+    available = ingested
+    if not event <= release <= ingested <= available <= cutoff:
+        raise ValueError(
+            "research opportunity clock order invalid: "
+            f"event={event} release={release} ingested={ingested} "
+            f"available={available} cutoff={cutoff}"
+        )
+    return {
+        "event_time": dt_text(event),
+        "release_time": dt_text(release),
+        "ingested_time": dt_text(ingested),
+        "available_time": dt_text(available),
+        "cutoff_time": dt_text(cutoff),
+    }
+
+
 _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "enabled",
     "live_trading_enabled",
@@ -392,6 +445,7 @@ _TOP_LEVEL_BOOLEAN_CONFIG_KEYS = (
     "q01_live_trading_enabled",
     "m15_terminal_enabled",
     "h7_enabled",
+    "research_entries_enabled",
     "drop_latest_m1_bar",
 )
 
@@ -405,6 +459,7 @@ _STRATEGY_CONFIG_COLLECTIONS = (
     "q01_variance_release_strategies",
     "m15_terminal_strategies",
     "h7_strategies",
+    "research_entry_strategies",
 )
 
 _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
@@ -417,6 +472,11 @@ _EXPECTED_STRATEGY_IDS_BY_COLLECTION = {
     "q01_variance_release_strategies": ("q01_variance_release_lane_1",),
     "m15_terminal_strategies": ("ny1400_m15_long_lane_1",),
     "h7_strategies": ("xauusd_late_reclaim_h7_lane_1",),
+    "research_entry_strategies": (
+        "research_nwave_restart_lane_25", "research_alt_dbreak_lane_26",
+        "research_path_curvature_lane_27", "research_path_speed_lane_28",
+        "research_nwave_centroid_lane_29", "research_ir_union_lane_30",
+    ),
 }
 UNPUBLISHED_OPEN_ERRORS = {
     "ERR|COMMAND_BUSY", "ERR|CLAIM_BUSY", "ERR|LOCK_TIMEOUT",
@@ -456,11 +516,13 @@ _STATE_GENERATION_CONTRACTS = (
     ("h7_policy_id", "h7_params_hash", "h7_strategies", (
         "h7_last_condition", "h7_last_signal_minute", "h7_last_evaluated_bar",
     )),
+    ("research_entry_policy_id", "research_entry_params_hash", "research_entry_strategies", ()),
 )
 
 _CORE_LANE_STATE_KEYS = ("lane_id", "basket", "basket_sequence", "current_basket_id")
 _REQUIRED_LANE_STATE_KEYS_BY_COLLECTION = {
     "q01_variance_release_strategies": ("q01_retry_opportunity", "q01_last_quote_msc"),
+    "research_entry_strategies": ("research_last_condition", "research_last_quote_msc"),
 }
 
 _STRATEGY_KEYS_BY_COLLECTION = {
@@ -509,11 +571,15 @@ _STRATEGY_KEYS_BY_COLLECTION = {
         "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
         "lot", "hold_minutes", "max_positions", "cooldown",
     }),
+    "research_entry_strategies": frozenset({
+        "enabled", "id", "lane_id", "spec_id", "signal_id", "magic", "comment_prefix",
+        "lot", "hold_minutes", "max_positions", "cooldown",
+    }),
 }
 
 
 def validate_strategy_topology_config(params: dict[str, Any]) -> None:
-    """Freeze all 18 active lane state namespaces and executable row schemas."""
+    """Freeze all 25 active lane state namespaces and executable row schemas."""
     observed_ids: list[str] = []
     for collection in _STRATEGY_CONFIG_COLLECTIONS:
         rows = params.get(collection)
@@ -703,6 +769,7 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
         "expected_q01_magics",
         "expected_m15_terminal_magics",
         "expected_h7_magics",
+        "expected_research_entry_magics",
     )
     for key in expected_magic_keys:
         values = params.get(key)
@@ -716,7 +783,6 @@ def validate_execution_numeric_config(params: dict[str, Any]) -> None:
     hl_error = utc1330_hl_config_error(params.get("utc1330_hl"))
     if hl_error is not None:
         raise ValueError(f"invalid UTC13:30 HL config: {hl_error}")
-
     strategy_integer_fields = {
         "lane_id", "magic", "max_positions", "cooldown", "hold_minutes",
         "morning_lane_id", "midday_lane_id", "pre_eu30_lane_id",
@@ -1033,6 +1099,22 @@ class S23HorizontalInventoryRunner:
         validate_strategy_topology_config(params)
         validate_execution_numeric_config(params)
         self.params = params
+        self.research_session_calendar = None
+        self.research_entry_disable_reason: str | None = None
+        expected_calendar = {"file":"research_session_calendar.json","version":1,
+            "sessions_sha256":"9f6deeb278442cc97641f8e5d26cac6f485321e0402321727936505cbc862bee",
+            "gap_threshold_minutes":5,"max_fill_wait_minutes":1}
+        try:
+            if params.get("research_entry_session_calendar") != expected_calendar:
+                raise ValueError("calendar config identity mismatch")
+            calendar = load_session_calendar(RESEARCH_CALENDAR_PATH)
+            if calendar["sessions_sha256"] != expected_calendar["sessions_sha256"]:
+                raise ValueError("calendar file/config hash mismatch")
+            validate_calendar_coverage(calendar, pd.Timestamp(utc_now()))
+            self.research_session_calendar = calendar
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            self.research_entry_disable_reason = f"research_session_calendar_invalid:{type(exc).__name__}:{exc}"
+            logging.critical("S23 research new entries disabled; other lanes and all exits remain active: %s", self.research_entry_disable_reason)
         self.live_enabled = params.get("live_trading_enabled", False)
         self.shadow_enabled = params.get("shadow_forward_enabled", True)
         self.safety = LiveSafetyOptions(**params.get("safety", {}))
@@ -1052,8 +1134,10 @@ class S23HorizontalInventoryRunner:
         self._q01_state_migrated = False
         self._m15_terminal_state_migrated = False
         self._h7_state_migrated = False
+        self._research_entry_state_migrated = False
         self._h7_features: list[Any] = []
         self.state = self._load_state()
+        self.state["routing"]["research_entry_disable_reason"] = self.research_entry_disable_reason
         self._last_status_log = 0.0
         self._diagnostic_repeats: dict[int, dict[str, Any]] = {}
         self._last_retained_block_warning: dict[int, tuple[str, str]] = {}
@@ -1175,6 +1259,9 @@ class S23HorizontalInventoryRunner:
     def _h7_strategies(self) -> list[dict[str, Any]]:
         return list(self.params.get("h7_strategies", []))
 
+    def _research_entry_strategies(self) -> list[dict[str, Any]]:
+        return list(self.params.get("research_entry_strategies", []))
+
     def _legacy_signal_strategies(self) -> list[dict[str, Any]]:
         return (
             list(self.params.get("strategies", [])) + self._morning_strategies()
@@ -1193,6 +1280,7 @@ class S23HorizontalInventoryRunner:
             + self._q01_strategies()
             + self._m15_terminal_strategies()
             + self._h7_strategies()
+            + self._research_entry_strategies()
         )
 
     def _entry_admission_block(self, at_utc: datetime):
@@ -1374,6 +1462,9 @@ class S23HorizontalInventoryRunner:
                 "h7_last_condition": False,
                 "h7_last_signal_minute": None,
                 "h7_last_evaluated_bar": None,
+                "research_entry_policy_id": str(self.params.get("research_entry_policy_id", EXPECTED_RESEARCH_ENTRY_POLICY_ID)),
+                "research_entry_params_hash": str(self.params.get("research_entry_params_hash", EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH)),
+                "research_entry_disable_reason": getattr(self, "research_entry_disable_reason", None),
                 "trend_recovery": {
                     "active": False,
                     "episode_id": None,
@@ -1464,8 +1555,10 @@ class S23HorizontalInventoryRunner:
                     "pending_open_expected_positions": None,
                     "t0530_edge_retry_opportunity": None,
                     "t0530_edge_hold_decision": None,
-                    "q01_retry_opportunity": None,
-                    "q01_last_quote_msc": None,
+                     "q01_retry_opportunity": None,
+                     "q01_last_quote_msc": None,
+                     "research_last_condition": False,
+                     "research_last_quote_msc": None,
                     "open_retry_after_utc": None,
                     "autotrading_reject_streak": 0,
                     "autotrading_reject_notified": False,
@@ -1737,6 +1830,15 @@ class S23HorizontalInventoryRunner:
         observed_m15_terminal_policy_hash = observed_routing.get("m15_terminal_params_hash")
         observed_h7_policy_id = observed_routing.get("h7_policy_id")
         observed_h7_policy_hash = observed_routing.get("h7_params_hash")
+        observed_research_policy_id = observed_routing.get("research_entry_policy_id")
+        observed_research_policy_hash = observed_routing.get("research_entry_params_hash")
+        observed_missing_research_ids: tuple[str, ...] = ()
+        if identity_matches and shape_matches and isinstance(strategies, dict):
+            research_ids = _EXPECTED_STRATEGY_IDS_BY_COLLECTION["research_entry_strategies"]
+            observed_missing_research_ids = tuple(
+                strategy_id for strategy_id in research_ids
+                if strategy_id not in strategies
+            )
         state.setdefault("routing", default["routing"])
         for key, value in default["routing"].items():
             state["routing"].setdefault(key, value)
@@ -2152,6 +2254,54 @@ class S23HorizontalInventoryRunner:
                     "expected_policy_id": expected_h7_policy_id,
                     "expected_policy_hash": expected_h7_policy_hash,
                 }
+        expected_research_policy_id = str(
+            self.params.get("research_entry_policy_id", EXPECTED_RESEARCH_ENTRY_POLICY_ID)
+        )
+        expected_research_policy_hash = str(
+            self.params.get("research_entry_params_hash", EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH)
+        )
+        research_ids = _EXPECTED_STRATEGY_IDS_BY_COLLECTION["research_entry_strategies"]
+        if identity_matches and shape_matches:
+            # Use the pre-defaulting observation.  At this point setdefault has
+            # intentionally materialized missing lanes, so recomputing from
+            # state would misclassify a valid all-missing legacy family as a
+            # current markerless family.
+            missing_research_ids = list(observed_missing_research_ids)
+            if observed_research_policy_id is None and observed_research_policy_hash is None:
+                if len(missing_research_ids) == len(research_ids):
+                    routing["research_entry_policy_id"] = expected_research_policy_id
+                    routing["research_entry_params_hash"] = expected_research_policy_hash
+                    self._research_entry_state_migrated = True
+                    logging.warning(
+                        "S23 research entry state initialized to %s; all existing strategy state was preserved",
+                        expected_research_policy_id,
+                    )
+                else:
+                    for strat in self._research_entry_strategies():
+                        lane_state = state["strategies"][strat["id"]]
+                        lane_state["sync_block_new_entries"] = True
+                        lane_state["sync_block_reason"] = "research_entry_policy_identity_absent_with_partial_family"
+                        lane_state["sync_block_recoverable"] = False
+                        lane_state["sync_block_details"] = {
+                            "missing_strategy_ids": missing_research_ids,
+                            "expected_policy_id": expected_research_policy_id,
+                            "expected_policy_hash": expected_research_policy_hash,
+                        }
+            elif (
+                observed_research_policy_id != expected_research_policy_id
+                or observed_research_policy_hash != expected_research_policy_hash
+            ):
+                for strat in self._research_entry_strategies():
+                    lane_state = state["strategies"][strat["id"]]
+                    lane_state["sync_block_new_entries"] = True
+                    lane_state["sync_block_reason"] = "research_entry_policy_identity_mismatch"
+                    lane_state["sync_block_recoverable"] = False
+                    lane_state["sync_block_details"] = {
+                        "observed_policy_id": observed_research_policy_id,
+                        "observed_policy_hash": observed_research_policy_hash,
+                        "expected_policy_id": expected_research_policy_id,
+                        "expected_policy_hash": expected_research_policy_hash,
+                    }
         return state
 
     def _save_state(self) -> None:
@@ -2498,6 +2648,8 @@ class S23HorizontalInventoryRunner:
             return "m15_terminal_long"
         if lane_id == 24:
             return "late_reclaim_h7"
+        if 25 <= lane_id <= 30:
+            return "research_entries"
         return "unknown"
 
     def _signal_attribution(
@@ -2654,7 +2806,9 @@ class S23HorizontalInventoryRunner:
             "signal_bar_time": trade_row.get("signal_bar_time"),
             "event_time": trade_row.get("event_time"),
             "release_time": trade_row.get("release_time"),
+            "ingested_time": trade_row.get("ingested_time"),
             "available_time": trade_row.get("available_time"),
+            "cutoff_time": trade_row.get("cutoff_time"),
             "decision_time": trade_row.get("decision_time"),
             "executable_at": trade_row.get("executable_at"),
             "live": trade_row.get("live"),
@@ -4652,7 +4806,7 @@ class S23HorizontalInventoryRunner:
             if symbol_info is None or getattr(symbol_info, "quote_time_msc", None) is None:
                 logging.critical("S23 bridge INFO response lacks broker quote timestamp; compile and attach the updated BotBridge_s23 before live use.")
                 return self._preflight_reject("broker_quote_clock_unavailable")
-        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._ed_win_hold_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated or self._h7_state_migrated:
+        if self._entry_policy_state_migrated or self._portfolio_rearm_state_migrated or self._inventory_range_fade_state_migrated or self._morning_session_state_migrated or self._midday_session_state_migrated or self._pre_eu30_session_state_migrated or self._trend_recovery_state_migrated or self._retired_state_pruned or self._t0530_edge_state_migrated or self._ed_win_hold_state_migrated or self._q01_state_migrated or self._m15_terminal_state_migrated or self._h7_state_migrated or self._research_entry_state_migrated:
             try:
                 self._save_state()
             except Exception:
@@ -4671,6 +4825,7 @@ class S23HorizontalInventoryRunner:
             self._q01_state_migrated = False
             self._m15_terminal_state_migrated = False
             self._h7_state_migrated = False
+            self._research_entry_state_migrated = False
         return True
 
     def _ownership_namespace_error(self) -> str | None:
@@ -5011,8 +5166,36 @@ class S23HorizontalInventoryRunner:
             lane_drift = {key: {"actual": row.get(key), "expected": value} for key, value in expected.items() if row.get(key) != value}
             if lane_drift:
                 return f"invalid_h7_lane_contract:{row.get('id')}:{json.dumps(lane_drift, sort_keys=True)}"
-        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics + h7_magics
-        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal + h7]
+        if str(self.params.get("research_entry_policy_id") or "") != EXPECTED_RESEARCH_ENTRY_POLICY_ID:
+            return f"invalid_research_entry_policy_id={self.params.get('research_entry_policy_id')}"
+        if str(self.params.get("research_entry_params_hash") or "") != EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH:
+            return "invalid_research_entry_params_hash"
+        try:
+            with open(RESEARCH_ENTRY_MODULE_PATH, "rb") as research_module:
+                observed_research_hash = hashlib.sha256(research_module.read()).hexdigest()
+        except OSError:
+            return "research_entry_module_unreadable"
+        if observed_research_hash != EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH:
+            return "research_entry_module_hash_mismatch"
+        research = self._research_entry_strategies()
+        research_magics = [int(row.get("magic") or 0) for row in research]
+        if tuple(research_magics) != EXPECTED_RESEARCH_ENTRY_MAGICS or tuple(self.params.get("expected_research_entry_magics", [])) != EXPECTED_RESEARCH_ENTRY_MAGICS:
+            return "invalid_research_entry_magics"
+        if [int(row.get("lane_id") or 0) for row in research] != list(range(25, 31)):
+            return "invalid_research_entry_lane_ids"
+        expected_research = (
+            ("nwv_checkpoint_restart", "s23_rs_l25", 45),
+            ("alternation_double_break", "s23_rs_l26", 45),
+            ("curvature_fade_short", "s23_rs_l27", 45),
+            ("speed_reversal_long", "s23_rs_l28", 30),
+            ("nwv_base_centroid_migration", "s23_rs_l29", 30),
+            ("ir_original_priority_union", "s23_rs_l30", 45),
+        )
+        for row, (signal_id, prefix, hold) in zip(research, expected_research):
+            if row.get("signal_id") != signal_id or row.get("comment_prefix") != prefix or row.get("hold_minutes") != hold or row.get("max_positions") != 1:
+                return f"invalid_research_entry_lane_contract:{row.get('id')}"
+        all_magics = magics + morning_magics + midday_magics + pre_eu30_magics + trend_magics + t0530_edge_magics + q01_magics + m15_terminal_magics + h7_magics + research_magics
+        all_prefixes = prefixes + [str(row.get("comment_prefix") or "") for row in morning + midday + pre_eu30 + trend + t0530_edge + q01 + m15_terminal + h7 + research]
         if len(all_magics) != len(set(all_magics)) or len(all_prefixes) != len(set(all_prefixes)):
             return "duplicate_combined_ownership_namespace"
         admission_clock = self.params.get("eu_entry_admission_clock")
@@ -8476,6 +8659,150 @@ class S23HorizontalInventoryRunner:
             )
         return readiness
 
+    def _process_research_entry_exits(self, info: Any, poll_time: pd.Timestamp) -> dict[int, bool]:
+        readiness: dict[int, bool] = {}
+        enabled = bool(self.params.get("research_entries_enabled", False) and self.research_session_calendar is not None)
+        for strat in self._research_entry_strategies():
+            lane_id = int(strat["lane_id"]); st = self._st(strat)
+            needs_sync = enabled or bool(st.get("basket") or st.get("pending_open_opportunity_id") or st.get("pending_close_reason") or st.get("sync_block_new_entries"))
+            if not needs_sync or not self._sync_strategy(strat):
+                readiness[lane_id] = False
+                continue
+            quote_msc = getattr(info, "quote_time_msc", None)
+            try:
+                quote_msc = int(quote_msc)
+            except (TypeError, ValueError, OverflowError):
+                quote_msc = -1
+            previous_msc = st.get("research_last_quote_msc")
+            gap_forced = False
+            if st.get("basket") and quote_msc > 0 and isinstance(previous_msc, int) and previous_msc > 0:
+                quote_time = pd.Timestamp(quote_msc, unit="ms", tz="UTC")
+                entries = [parse_ts(pos.get("entry_time_utc")) for pos in st["basket"]]
+                valid_entries = [value for value in entries if value is not None]
+                due = fixed_hold_due_at(valid_entries, int(strat["hold_minutes"])) if valid_entries else None
+                reason = abnormal_gap_exit_reason(previous_msc, quote_msc, due)
+                if reason is not None:
+                    bid=float(info.bid); ask=float(info.ask); pnl=self._basket_pnl(strat,bid,ask)
+                    row=pd.Series({"Open":bid,"Close":bid,"AskOpen":ask},name=quote_time)
+                    self._trade_row("research_abnormal_exit",strat,reason=reason,signal_bar_time=dt_text(quote_time),note="excluded_from_research_normal_performance")
+                    self._close_basket(strat,reason,row,pnl)
+                    gap_forced=True
+            if quote_msc > 0:
+                st["research_last_quote_msc"] = quote_msc
+                self._save_state()
+            if gap_forced:
+                readiness[lane_id] = False
+                continue
+            blocked = self._monitor_fixed_hold_position(strat, info, poll_time, "research_entry_fixed_hold", defer_for_spread=False)
+            readiness[lane_id] = bool(enabled and strat.get("enabled", True) and not blocked)
+        return readiness
+
+    def _write_research_clock_lineage(
+        self,
+        strat: dict[str, Any],
+        opportunity_id: str,
+        clocks: dict[str, str],
+        poll_time: pd.Timestamp,
+        quote_time: pd.Timestamp,
+        signal_bar_text: str,
+        side: str,
+    ) -> bool:
+        try:
+            append_csv(
+                RESEARCH_CLOCK_LOG_FILE,
+                {
+                    "timestamp_utc": dt_text(utc_now()),
+                    "opportunity_id": opportunity_id,
+                    "strategy_id": strat["id"],
+                    "lane_id": strat["lane_id"],
+                    "magic": strat["magic"],
+                    **clocks,
+                    "decision_time": dt_text(poll_time),
+                    "executable_at": dt_text(quote_time),
+                },
+                RESEARCH_CLOCK_FIELDS,
+            )
+            return True
+        except (OSError, UnicodeError, csv.Error, RuntimeError) as exc:
+            self._trade_row(
+                "research_entry_decision", strat,
+                opportunity_id=opportunity_id, side=side,
+                reason="research_clock_ledger_unavailable",
+                signal_bar_time=signal_bar_text, note=str(exc),
+            )
+            return False
+
+    def _process_research_entry_entries(self, bars: pd.DataFrame, price_row: pd.Series, info: Any,
+                                        poll_time: pd.Timestamp, readiness: dict[int, bool]) -> None:
+        if not bool(self.params.get("research_entries_enabled", False)) or self.research_session_calendar is None:
+            return
+        signal_bar = parse_ts(price_row.name)
+        quote_time = self._broker_quote_time(info, poll_time)
+        if signal_bar is None or quote_time is None:
+            return
+        release_time = signal_bar + pd.Timedelta(minutes=1)
+        deadline = release_time + pd.Timedelta(minutes=1)
+        if quote_time < release_time or quote_time > deadline:
+            return
+        signal_bar_text = dt_text(signal_bar)
+        for strat in self._research_entry_strategies():
+            if not bool(strat.get("enabled", True)) or not self._reserve_lane_evaluation_bar(strat, signal_bar_text, "research_entry_decision"):
+                continue
+            st = self._st(strat)
+            try:
+                signal = evaluate_research_entry(str(strat["signal_id"]), bars)
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+                self._trade_row("research_entry_decision", strat, reason="signal_input_invalid", signal_bar_time=signal_bar_text, note=f"{type(exc).__name__}:{exc}")
+                continue
+            if signal is not None and not entry_session_guard(
+                str(strat["signal_id"]), bars, quote_time, int(strat["hold_minutes"]),
+                self.research_session_calendar,
+            ):
+                self._trade_row("research_entry_decision", strat, reason="declared_session_or_planned_exit_guard", signal_bar_time=signal_bar_text)
+                signal = None
+            condition = signal is not None
+            prior = bool(st.get("research_last_condition", False))
+            st["research_last_condition"] = condition
+            self._save_state()
+            if not condition or prior:
+                continue
+            opportunity_id = f"{self.params.get('mt5_symbol', self.params['symbol'])}|{signal_bar_text}|{strat['signal_id']}|{signal.variant}|{signal.side}"
+            if not readiness.get(int(strat["lane_id"]), False) or st.get("basket"):
+                self._trade_row("research_entry_decision", strat, opportunity_id=opportunity_id, side=signal.side, reason="exit_or_sync_or_lane_capacity_block", signal_bar_time=signal_bar_text, note=signal.variant)
+                continue
+            point = float(self.params.get("point_size", 0.001))
+            spread = max(0.0, float(info.ask)-float(info.bid))/point if point > 0 else math.inf
+            if spread > float(self.params.get("max_entry_spread_points", 300.0)):
+                self._trade_row("research_entry_decision", strat, opportunity_id=opportunity_id, side=signal.side, reason="spread_guard", signal_bar_time=signal_bar_text, note=signal.variant)
+                continue
+            try:
+                # The broker quote timestamp is the executable market clock, not
+                # the time at which this process ingested the completed bars.
+                # Record the host receipt/decision instant as ingestion and
+                # cutoff; quote_time remains separately recorded as executable_at.
+                clocks = research_opportunity_clock_fields(signal_bar, poll_time, poll_time)
+            except ValueError as exc:
+                self._trade_row(
+                    "research_entry_decision", strat, opportunity_id=opportunity_id,
+                    side=signal.side, reason="research_clock_invalid",
+                    signal_bar_time=signal_bar_text, note=str(exc),
+                )
+                continue
+            opportunity = {"opportunity_id": opportunity_id, "source": "research_entries_v142", "side": signal.side,
+                           "raw_side": signal.side, "effective_side": signal.side, **clocks,
+                           "decision_time": dt_text(poll_time), "executable_at": dt_text(quote_time)}
+            # Five-clock lineage is mandatory evidence for these lanes.  A
+            # ledger failure rejects only this new exposure; exit processing
+            # has already run earlier in the poll and remains unaffected.
+            if not self._write_research_clock_lineage(
+                strat, opportunity_id, clocks, poll_time, quote_time,
+                signal_bar_text, signal.side,
+            ):
+                continue
+            self._open_entry(strat, signal.side, price_row, info, note=signal.variant, execution_time=poll_time,
+                             admission_time=quote_time, opportunity=opportunity, apply_portfolio_rearm=False,
+                             use_confirmed_fill_time=True, submission_deadline_utc=deadline)
+
     def _h7_completed_features(self, signal_bar: pd.Timestamp) -> list[Any]:
         end = signal_bar + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
         cached_last = self._h7_features[-1].minute_msc if self._h7_features else None
@@ -9643,7 +9970,9 @@ class S23HorizontalInventoryRunner:
             "signal_bar_time": opportunity["event_time"],
             "event_time": opportunity["event_time"],
             "release_time": opportunity["release_time"],
+            "ingested_time": opportunity.get("ingested_time"),
             "available_time": opportunity["available_time"],
+            "cutoff_time": opportunity.get("cutoff_time"),
             "decision_time": opportunity["decision_time"],
             "executable_at": opportunity["executable_at"],
         }
@@ -9944,6 +10273,7 @@ class S23HorizontalInventoryRunner:
         q01_readiness = self._process_q01_exits(info, quote_time)
         m15_terminal_readiness = self._process_m15_terminal_exits(info, quote_time)
         h7_readiness = self._process_h7_exits(info, quote_time)
+        research_entry_readiness = self._process_research_entry_exits(info, quote_time)
         bars = self._get_m1()
         if bars is None or bars.empty:
             for strat in self.params["strategies"]:
@@ -9983,6 +10313,7 @@ class S23HorizontalInventoryRunner:
             bars, price_row, info, poll_time, m15_terminal_readiness,
         )
         self._process_h7_entries(price_row, info, poll_time, h7_readiness)
+        self._process_research_entry_entries(bars, price_row, info, poll_time, research_entry_readiness)
         # Match the ordered-tick replay: observe the frozen balanced-book
         # range at the first processing of each completed M1, before this
         # poll's basket exits can change the local inventory state.
@@ -10415,6 +10746,24 @@ def self_test() -> None:
     assert int(params["q01_atr_period"]) == EXPECTED_Q01_ATR_PERIOD
     assert int(params["q01_feed_gap_seconds"]) == EXPECTED_Q01_FEED_GAP_SECONDS
     assert math.isclose(float(params["q01_max_raw_spread_price"]), EXPECTED_Q01_MAX_RAW_SPREAD_PRICE)
+    assert params["research_entry_policy_id"] == EXPECTED_RESEARCH_ENTRY_POLICY_ID
+    assert params["research_entry_params_hash"] == EXPECTED_RESEARCH_ENTRY_POLICY_PARAMS_HASH
+    research = params["research_entry_strategies"]
+    assert tuple(int(row["magic"]) for row in research) == EXPECTED_RESEARCH_ENTRY_MAGICS
+    assert [int(row["lane_id"]) for row in research] == list(range(25, 31))
+    assert [row["signal_id"] for row in research] == [
+        "nwv_checkpoint_restart", "alternation_double_break", "curvature_fade_short",
+        "speed_reversal_long", "nwv_base_centroid_migration", "ir_original_priority_union",
+    ]
+    assert [row["hold_minutes"] for row in research] == [45, 45, 45, 30, 30, 45]
+    assert params["research_entry_session_calendar"]["sessions_sha256"] == "9f6deeb278442cc97641f8e5d26cac6f485321e0402321727936505cbc862bee"
+    calendar = load_session_calendar(RESEARCH_CALENDAR_PATH)
+    validate_calendar_coverage(calendar, pd.Timestamp("2026-09-21T00:00:00Z"))
+    clock = research_opportunity_clock_fields(
+        "2026-09-21T13:00:00Z", "2026-09-21T13:01:02Z", "2026-09-21T13:01:05Z",
+    )
+    assert clock["release_time"] != clock["available_time"]
+    assert parse_ts(clock["available_time"]) <= parse_ts(clock["cutoff_time"])
     assert int(params["m1_bars"]) == EXPECTED_PRE_EU30_M1_BARS
     assert int(strategy["max_positions"]) == 2 and float(strategy["add_atr"]) == 0.65
     assert (float(strategy["entry_wait_z"]), float(strategy["entry_wait_sigma"]), int(strategy["entry_wait_minutes"])) == (2.0, 1.0, 10)

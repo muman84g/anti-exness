@@ -222,7 +222,7 @@ class BridgeHealthLoggingRegressionTests(unittest.TestCase):
         owned = source.split("bool IsOwnedMagic(", 1)[1].split("}", 1)[0]
         query = source.split("bool IsInventoryQueryMagic(", 1)[1].split("}", 1)[0]
         self.assertIn("magic >= 230023 && magic <= 230034", owned)
-        self.assertIn("magic >= 230040 && magic <= 230046", owned)
+        self.assertIn("magic >= 230040 && magic <= 230052", owned)
         self.assertNotIn("230035", owned)
         self.assertNotIn("200023", owned)
         self.assertIn("return IsOwnedMagic(magic) || magic == 200023;", query)
@@ -10261,7 +10261,7 @@ class Bot23TrendRecoveryRegressionTests(unittest.TestCase):
 class SignalEvaluationAttributionTests(unittest.TestCase):
     def test_every_lane_has_explicit_signal_identity(self):
         runner, _strategy, _state = make_runner(live=False)
-        self.assertEqual(len(runner._all_strategies()), 19)
+        self.assertEqual(len(runner._all_strategies()), 25)
         for strategy in runner._all_strategies():
             with self.subTest(strategy=strategy["id"]):
                 self.assertTrue(str(strategy.get("spec_id") or ""))
@@ -10782,7 +10782,7 @@ class Bot23M15TerminalSafetyRegressionTests(unittest.TestCase):
         source = Path(__file__).with_name("BotBridge_s23.mq5").read_text(encoding="utf-8")
         self.assertIn('if(magic == 230045)', source)
         self.assertIn('return "s23_m15_l1";', source)
-        self.assertIn("magic >= 230040 && magic <= 230046", source)
+        self.assertIn("magic >= 230040 && magic <= 230052", source)
         self.assertEqual(live_executor.S23_OPEN_POLICY[230045], "s23_m15_l1")
 
 

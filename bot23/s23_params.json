@@ -119,6 +119,25 @@
   "h7_params_hash": "8fbdbd508e3738648c6a10beef169f846c7d9ad206933d8b56a7474c87faa4d8",
   "h7_signal_cooldown_minutes": 30,
   "expected_h7_magics": [230046],
+  "research_entries_enabled": true,
+  "research_entry_policy_id": "research_entries_v142",
+  "research_entry_params_hash": "ede38daf6a0fa2e88bee7196b5eb9a9a79ed3977ac11e04c89d0b6796446b11a",
+  "expected_research_entry_magics": [230047, 230048, 230049, 230050, 230051, 230052],
+  "research_entry_session_calendar": {
+    "file": "research_session_calendar.json",
+    "version": 1,
+    "sessions_sha256": "9f6deeb278442cc97641f8e5d26cac6f485321e0402321727936505cbc862bee",
+    "gap_threshold_minutes": 5,
+    "max_fill_wait_minutes": 1
+  },
+  "research_entry_strategies": [
+    {"enabled": true, "id": "research_nwave_restart_lane_25", "lane_id": 25, "spec_id": "DEV-NWAVE-RESTART", "signal_id": "nwv_checkpoint_restart", "magic": 230047, "comment_prefix": "s23_rs_l25", "lot": 0.01, "hold_minutes": 45, "max_positions": 1, "cooldown": 0},
+    {"enabled": true, "id": "research_alt_dbreak_lane_26", "lane_id": 26, "spec_id": "DEV-ALT-DBREAK", "signal_id": "alternation_double_break", "magic": 230048, "comment_prefix": "s23_rs_l26", "lot": 0.01, "hold_minutes": 45, "max_positions": 1, "cooldown": 0},
+    {"enabled": true, "id": "research_path_curvature_lane_27", "lane_id": 27, "spec_id": "DEV-PATH-CURVATURE", "signal_id": "curvature_fade_short", "magic": 230049, "comment_prefix": "s23_rs_l27", "lot": 0.01, "hold_minutes": 45, "max_positions": 1, "cooldown": 0},
+    {"enabled": true, "id": "research_path_speed_lane_28", "lane_id": 28, "spec_id": "DEV-PATH-SPEED", "signal_id": "speed_reversal_long", "magic": 230050, "comment_prefix": "s23_rs_l28", "lot": 0.01, "hold_minutes": 30, "max_positions": 1, "cooldown": 0},
+    {"enabled": true, "id": "research_nwave_centroid_lane_29", "lane_id": 29, "spec_id": "DEV-NWAVE-CENTROID", "signal_id": "nwv_base_centroid_migration", "magic": 230051, "comment_prefix": "s23_rs_l29", "lot": 0.01, "hold_minutes": 30, "max_positions": 1, "cooldown": 0},
+    {"enabled": true, "id": "research_ir_union_lane_30", "lane_id": 30, "spec_id": "DEV-IR-ORIGINAL-PLUS-PAUSE", "signal_id": "ir_original_priority_union", "magic": 230052, "comment_prefix": "s23_rs_l30", "lot": 0.01, "hold_minutes": 45, "max_positions": 1, "cooldown": 0}
+  ],
   "eu_entry_admission_clock": {
     "eu_timezone": "Europe/London",
     "us_timezone": "America/New_York",
@@ -145,7 +164,7 @@
     ]
   },
   "expected_bridge_name": "BotBridge_s23",
-  "expected_bridge_version": "2026-09-18-s23-close-magic-v37",
+  "expected_bridge_version": "2026-09-21-s23-research-v38",
   "symbol": "XAUUSD",
   "mt5_symbol": "XAUUSD",
   "default_lot": 0.01,

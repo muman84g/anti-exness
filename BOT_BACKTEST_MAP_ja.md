@@ -29,6 +29,17 @@ Runtime status is intentionally not authoritative in this file. Verify current c
 | bot28 / S28 | `exness-bot-28` | `bot28` | `bot関連backtest/0_bot28実装PV2C560_OOS_001` | `SOURCE_BACKTEST.md`: 注文対象USTEC、XAUUSD非対象。`PV2C560_DEVQ80_H75_FORWARD_R1`、decision基準75分hold。USTEC最小/configured lot `0.05`。 | User-authorized live (`live=true`, `shadow=false`)。DEV固定選択、既観測診断は昇格根拠外。Deploy/restart/real order未検証。 |
 | bot29 / S29 | `exness-bot-29` | `bot29` | `bot関連backtest/0_bot29実装PV2C531_OOS_001` | `SOURCE_BACKTEST.md`: 注文対象USTEC、XAUUSD非対象。`PV2C531_CORRECTED_DIAGNOSTIC_R1`、decision基準60分hold。USTEC最小/configured lot `0.05`。 | User-authorized live (`live=true`, `shadow=false`)。Deploy/restart/real order未検証。 |
 
+2026-09-21 bot23 supplement: local source adds research lanes 25–30 / magics
+230047–230052 under policy `research_entries_v142` (NWAVE-RESTART,
+ALT-DBREAK, PATH-CURVATURE LONG, PATH-SPEED SHORT, NWAVE-CENTROID, and IR
+causal union). Required bridge source identity is
+`2026-09-21-s23-research-v38`. The bot23 table row's older v37 bridge text is
+superseded by this supplement. Local source/config and no-order regressions are
+verified; UNC deployment, Docker runtime, Bridge binary, saved-state
+migration/restart, EA compile/attach, service recreation, quote freshness, and
+live orders remain unverified. The explicit research calendar expires at
+2026-09-25T20:59:00Z and fails closed for new research entries after expiry.
+
 ## Rules
 
 2026-09-14 bot23 supplement: predecessor local candidate was

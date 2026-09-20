@@ -157,7 +157,11 @@ class T0530EdgeBotIntegrationTests(unittest.TestCase):
         lanes = runner._t0530_edge_strategies()
         self.assertEqual([row["lane_id"] for row in lanes], [18, 19, 20, 21])
         self.assertEqual([row["magic"] for row in lanes], [230040, 230041, 230042, 230043])
-        self.assertEqual(len(runner._all_strategies()), 19)
+        self.assertEqual(len(runner._all_strategies()), 25)
+        self.assertEqual(
+            [row["lane_id"] for row in runner._research_entry_strategies()],
+            [25, 26, 27, 28, 29, 30],
+        )
         live_s23_bot.validate_boolean_config(runner.params)
         live_s23_bot.validate_strategy_topology_config(runner.params)
         live_s23_bot.validate_execution_numeric_config(runner.params)

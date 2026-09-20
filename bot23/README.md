@@ -822,3 +822,51 @@ an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
 process identity must be verified separately; these hashes do not replace the
 canonical research identities in `SOURCE_BACKTEST.md`.
+# 2026-09-21 研究entry採用（lanes 25–30）
+
+`NWAVE-RESTART`、`ALT-DBREAK`、`PATH-CURVATURE`、`PATH-SPEED`、
+`NWAVE-CENTROID`、および `IR原案 + IR_pause_reapproach` を有効化した。
+
+IR lane 30はproduction evaluator全bar再生でも有効を維持する。既観測leakcheckは32件、
+PF 2.0400 / costPF 1.9853、forwardは46件、PF 1.1116 / costPF 1.0818、合算は78件、
+PF 1.4341 / costPF 1.3962。旧集計との差は0件である。DEVの旧600件との差3件は、旧処理が
+pause単体capacityをoriginalとの結合前に消費した順序差であり、本番の時刻順union 603件を正本とする。
+証跡は `evidence/production_oos_v147/` に保存した。既観測期間のため新規holdoutとは扱わない。
+magicは230047–230052、commentは`s23_rs_l25`–`s23_rs_l30`。IRはlane 30の
+単一capacityで、時系列の最初の実在fillを先着採用する。同一バーで両方が発火した場合だけ
+原案を優先し、既保有中に後から到来した原案/pauseはどちらも棄却する。未来の原案区間を
+先に予約する研究用unionはライブ実装に使用しない。
+PATHは研究ledgerに合わせ、CURVATURE=LONG、SPEED=SHORTが正本である。
+
+判定は完了済みM1だけを使い、T+1以降の実在quoteを最大1分待つ。各laneはcapacity-one、
+固定保有30/45分、Bid/Ask約定、5分超gapを跨ぐ履歴は判定しない。version/hash固定の
+`research_session_calendar.json`に列挙したsessionだけを使う。現在版は
+2026-09-20T00:00Zから2026-09-25T20:59Zまで有効。`planned_exit + 最大fill待ち1分
+<= session_end`を満たさないentry、coverage外、未列挙日、holiday/early-close未確認日、
+履歴session跨ぎは拒否する。期限前に公式scheduleを確認し、sessions追記、canonical JSONの
+SHA-256、params、runner内の固定calendar identityを同時更新して境界testを行う。
+JSONだけの差替えでは有効化されない。候補間の共通priorityは
+研究で確定していないため、6 laneを独立保有・独立集計する。稼働ログではmagic/commentと
+IRの`note`（`interrupted_reapproach` / `IR_pause_reapproach`）を分けて監視する。
+calendarの期限切れ、coverage不足、schema/hash不一致はrunner全体を停止せず、研究laneの
+新規entryだけを無効化する。既存全laneのentry/監視/exitと、研究lane既存positionの
+gap監視・fixed-hold exitは継続し、routing stateの`research_entry_disable_reason`と
+critical logへ理由を残す。
+
+導入根拠は `SOURCE_BACKTEST.md` の「研究entry lanes 25–30」を参照。特にPATH/CENTROIDは
+標本が小さく、pause追加は既観測leak/forwardで選択済みなので、導入後データを完全未観測の
+確認期間として扱う。
+
+配備時はPython一式（新規`research_entries.py`を含む）と`s23_params.json`を同時交換し、親
+`docker-compose.yml`に現在記載済みの2つのread-only mountを保持する。
+その後`BotBridge_s23.mq5`をMetaEditorで
+再コンパイルしてEAを再起動する。起動ログのbridge version
+`2026-09-21-s23-research-v38`、magics 230047–230052、設定検証成功を確認する。
+ローカルで確認済みなのはCompose YAML上のmount整合までで、実コンテナの
+`docker compose config`、mount、Bridge binary、runtime stateは別途実環境で確認する。
+研究stateは`research_entries_v142`と`research_entries.py` SHA-256を世代markerとし、
+旧stateからの自動追加はlanes 25–30が全欠損の場合だけ許可する。部分欠損やmarker不一致は
+研究laneの新規entryをfail-closedにする。
+保有中にquote gapが5分を超えた場合は復帰後最初のfresh quoteで安全決済する。通常期限前は
+`session_gap_forced_close`、期限+1分超過は`overdue_exit_after_gap`として
+`research_abnormal_exit`へ記録し、通常研究成績から分離する。

@@ -7,7 +7,7 @@
 CTrade trade;
 
 #define BRIDGE_NAME "BotBridge_s23"
-#define BRIDGE_VERSION "2026-09-18-s23-close-magic-v37"
+#define BRIDGE_VERSION "2026-09-21-s23-research-v38"
 #define BRIDGE_COMMANDS "ECHO,CAPS,ACCOUNT,INFO,HIST,HISTPAGE,TICKS,OPEN,POSITIONS,POSITION,ORDERS,CLOSEDEAL,CLOSE"
 
 input string InpCommandFile = "cmd_s23.txt";
@@ -188,6 +188,8 @@ string CanonicalCommentForMagic(const long magic)
       return "s23_m15_l1";
    if(magic == 230046)
       return "s23_h7_l1";
+   if(magic >= 230047 && magic <= 230052)
+      return StringFormat("s23_rs_l%d", (int)(magic - 230022));
    return "";
 }
 
@@ -319,7 +321,7 @@ bool ValidHistoryNumericFields(string &parts[], const int count)
 bool IsOwnedMagic(const long magic)
 {
    return (magic >= 230023 && magic <= 230034) ||
-      (magic >= 230040 && magic <= 230046);
+      (magic >= 230040 && magic <= 230052);
 }
 
 bool IsInventoryQueryMagic(const long magic)

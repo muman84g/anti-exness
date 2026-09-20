@@ -627,3 +627,67 @@ zero mismatches.
 - The reverse_d60 source switch was explicitly requested on 2026-08-26. Deployment,
   restart, state reset, log reset, EA attachment, and actual order submission
   remain separate runtime actions.
+# 研究entry lanes 25–30 採用記録（2026-09-21）
+
+採用した正本は `bot23_candidate_spec_v142/report.md` の固定式。DEVで条件を固定した後、
+leakcheckとforwardをシグナル別に評価した。leak+forward結果は次の通り（損益は0.01 lot相当、
+costPFは既定コスト控除後）。
+
+| signal | trades | net | PF | costPF |
+|---|---:|---:|---:|---:|
+| NWAVE-RESTART | 227 | +141.573 | 1.1764 | 1.1461 |
+| ALT-DBREAK | 56 | +82.075 | 1.5784 | 1.5288 |
+| PATH-CURVATURE (LONG) | 20 | +39.805 | 1.8585 | 1.8004 |
+| PATH-SPEED (SHORT) | 22 | +7.884 | 1.1484 | 1.1048 |
+| NWAVE-CENTROID | 14 | +24.166 | 2.2143 | 2.1105 |
+| IR原案+pause・原案優先union | 78 | +107.012 | 1.434 | 1.396 |
+
+旧集計は全原案区間を未来から先に予約してpauseを追加しておりライブ非再現だったため廃止した。
+最終production evaluator全bar replayによる時系列先着capacity-one（同時刻のみ原案優先）の
+IR unionは、DEV 603件・+322.394・PF 1.4272・costPF 1.3343（原案435、pause168）。
+先行集計v144のDEV 600件は、pause単体を先にcapacity-one化した後でoriginalと結合したため、
+original保有中に最終的には棄却されるpauseが後続3件を先に塞いだ旧ledger結合であり、正本から除外する。
+production scalar evaluatorでleakcheck / forwardの全completed M1を再生したv147でも、leakcheckは32件・
++89.055・costPF 1.9853、forwardは46件・+17.957・costPF 1.0818、合算は78件・
++107.012・PF 1.4341・costPF 1.3962（原案68、pause10）。DEV/OOSともPF 1.10、
+costPF 1.05の基準を満たすためpause追加は有効のまま採用した。
+
+pause条件は既観測OOSを見た後に最終選択しているため、これらを
+「完全未知データでの証明」とは扱わない。2026-09単月の純追加5件はcostPF 0.998であり、
+今後の未観測期間で原案とpauseを必ず分離集計する。
+
+実装は `research_entries.py`。入力は完了M1のBid OHLCと既存`add_features()`のATR30。
+連続Trueは先頭だけを発注対象とし、状態の`research_last_condition`と
+`last_evaluated_bar`を永続化する。T+1 release、1分deadline、確定fill時刻起点の固定保有、
+lane capacity-oneを既存執行系で強制する。IRは先着で空きlaneを取得し、同時発火だけ原案を
+優先する。version/hash付き`research_session_calendar.json`で明示列挙されたsessionだけを
+使用し、履歴5分超gap、session境界、予定exit+fill待ち1分がsession endを越えるentryを
+事前拒否する。coverage外・未列挙・holiday/early-close未確認日はfail-closed。現在版期限は
+2026-09-25T20:59:00Z。期限前に公式schedule確認、session追記、hash/params同時更新、境界testが
+必要。calendar更新はJSON、params、runner内の固定identityを同時に更新する。
+保有中の5分超quote gapは復帰後最初のfresh quoteで強制決済し、
+`session_gap_forced_close`または`overdue_exit_after_gap`を`research_abnormal_exit`として
+通常performanceから分離する。PATHの古いsemantic名に方向を推測させず、
+CURVATUREはLONG、SPEEDはSHORTに固定した。
+calendar invalid/expired時は研究新規entry subsystemだけをfail-closedにし、runner全体の
+preflightはrejectしない。他laneの通常処理と全既存positionのexitを継続する。
+
+再現性の正本hash、各固定パラメータ、時刻・session規則はv142仕様に記録済み。
+production式を全DEV固定ledger eventで照合し、NWAVE-RESTART 1762/1762、
+NWAVE-CENTROID 118/118、ALT-DBREAK 290/290、PATH-CURVATURE 170/170、
+PATH-SPEED 154/154、IR原案439/439で条件一致した。さらにcapacity-one正規化後の双方向replayで
+余剰・欠落0、side/hold/実在Bid/Ask fill一致（PATHはraw 170→116、154→127）、IR因果union
+603件も確認した。全16月・全completed M1を実際のproduction scalar evaluatorへ通した証跡は
+`evidence/production_allbar_v146/`。従来のvector replayは補助照合に限定する。証跡は
+`evidence/frozen_event_parity_v144/summary.csv`。IR先着再計算は
+`evidence/ir_live_capacity_v144/summary.csv`。
+研究state generationはpolicy ID `research_entries_v142`と`research_entries.py` SHA-256で固定する。
+既知の旧stateからのmigrationは研究6 laneが全欠損の場合だけ許可し、部分family、lane core不正、
+policy/hash不一致は研究新規entryをfail-closedにする。opportunity台帳はevent/release/
+ingested/available/cutoffを分離し、実受領時刻をavailable/cutoffとして`available <= cutoff`を強制する。
+
+配備はBridge再コンパイルとEA再起動が必要。稼働前に`python -m unittest discover -s . -p 'test_*.py' -q`を実行し、
+bridge versionとownership allowlistを確認する。親composeは個別bind mount方式なので、
+現在の親`docker-compose.yml`にある新module/calendar mountの維持が必須。
+ローカルで確認済みなのはYAML/mount文字列までで、実コンテナの`docker compose config`、
+Bridge binary、runtime state、quote freshnessは未確認。実注文を伴う起動試験はこの導入作業では行わない。
