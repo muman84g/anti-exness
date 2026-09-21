@@ -1,4 +1,39 @@
 services:
+  # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v1) ----
+  bot0-dashboard:
+    build:
+      context: .
+      dockerfile: bot0/Dockerfile
+    image: exness-bot0-dashboard:latest
+    container_name: exness-bot0-dashboard
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:8230:8230"
+    volumes:
+      - ./bot0:/app/bot0:ro
+      - ./bot23/s23_params.json:/data/bot23/s23_params.json:ro
+      - ./bot23/logs:/data/bot23/logs:ro
+      - ./bot23/state:/data/bot23/state:ro
+    environment:
+      BOT23_PARAMS: /data/bot23/s23_params.json
+      BOT23_TRADES: /data/bot23/logs/s23_trades.csv
+      BOT23_LOG: /data/bot23/logs/s23_bot.log
+      BOT0_HOST: 0.0.0.0
+      BOT0_PORT: "8230"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8230/api/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # ── Bot 8 (S8用設定) ──────────────────────────────────────
   exness-bot-8:
     build:
