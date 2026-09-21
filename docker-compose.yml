@@ -1,5 +1,5 @@
 services:
-  # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v1) ----
+  # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v3) ----
   bot0-dashboard:
     build:
       context: .
@@ -18,14 +18,20 @@ services:
     ports:
       - "127.0.0.1:8230:8230"
     volumes:
-      - ./bot0:/app/bot0:ro
-      - ./bot23/s23_params.json:/data/bot23/s23_params.json:ro
-      - ./bot23/logs:/data/bot23/logs:ro
-      - ./bot23/state:/data/bot23/state:ro
+      - type: bind
+        source: ./bot23/s23_params.json
+        target: /data/bot23/s23_params.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./bot23/logs
+        target: /data/bot23/logs
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
-      BOT23_PARAMS: /data/bot23/s23_params.json
-      BOT23_TRADES: /data/bot23/logs/s23_trades.csv
-      BOT23_LOG: /data/bot23/logs/s23_bot.log
+      BOT23_ROOT: /data/bot23
       BOT0_HOST: 0.0.0.0
       BOT0_PORT: "8230"
     healthcheck:
