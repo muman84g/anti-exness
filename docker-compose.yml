@@ -1,5 +1,5 @@
 services:
-  # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v3) ----
+  # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v4) ----
   bot0-dashboard:
     build:
       context: .

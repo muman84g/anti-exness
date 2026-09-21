@@ -1,8 +1,10 @@
-"""Read-only bot0 dashboard with an isolated bot23 source adapter."""
+"""Read-only bot0 dashboard with a strict bot23 ledger adapter."""
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -25,11 +27,13 @@ BOT23_TRADES = BOT23_ROOT / "logs" / "s23_trades.csv"
 BOT23_LOG = BOT23_ROOT / "logs" / "s23_bot.log"
 COLLECTOR_TTL_SECONDS = max(0.1, float(os.environ.get("BOT0_COLLECTOR_TTL_SECONDS", "30")))
 MAX_BODY_BYTES = 1_000_000
-DEAL_TIME_RE = re.compile(r"(?:^|\s)deal_time_utc=([^\s,]+)")
+DEAL_TIME_RE = re.compile(r"(?:^|;)deal_time_utc=([^;\s]+)")
+KEY_VALUE_RE = re.compile(r"(?:^|;)([A-Za-z][A-Za-z0-9_]*)=([^;]*)")
+EXECUTION_CLASSES = ("live", "shadow", "unknown")
 
 
 class DashboardError(Exception):
-    """A source or request error safe to expose to the dashboard client."""
+    """A source or request error safe to expose to a dashboard client."""
 
 
 def _finite_float(value: Any) -> float | None:
@@ -65,33 +69,45 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat().replace("+00:00", "Z") if value else None
 
 
-def _file_mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def _sha256(path: Path) -> str | None:
     try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+        return _sha256_bytes(path.read_bytes())
     except OSError:
         return None
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _stat_identity(stat_result: os.stat_result) -> dict[str, int]:
+    return {"device": int(stat_result.st_dev), "inode": int(stat_result.st_ino), "size": int(stat_result.st_size), "mtime_ns": int(stat_result.st_mtime_ns)}
+
+
+def _read_stable_bytes(path: Path, attempts: int = 2) -> tuple[bytes, dict[str, Any]]:
+    """Read a complete source while proving identity did not rotate mid-read."""
+    for _ in range(attempts):
+        try:
+            with path.open("rb") as handle:
+                before = _stat_identity(os.fstat(handle.fileno()))
+                payload = handle.read()
+                after = _stat_identity(os.fstat(handle.fileno()))
+        except OSError as exc:
+            raise DashboardError(f"source_unavailable:{path.name}") from exc
+        if before == after:
+            return payload, {**after, "sha256": _sha256_bytes(payload), "stable": True}
+    raise DashboardError(f"source_changed_during_read:{path.name}")
+
+
+def _read_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload, identity = _read_stable_bytes(path)
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DashboardError(f"source_unavailable:{path.name}") from exc
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DashboardError(f"invalid_json:{path.name}") from exc
     if not isinstance(value, dict):
         raise DashboardError(f"invalid_object:{path.name}")
-    return value
+    return value, identity
 
 
 def _config_generation(config: dict[str, Any]) -> dict[str, Any]:
@@ -103,16 +119,11 @@ def _config_generation(config: dict[str, Any]) -> dict[str, Any]:
 
 
 GROUPS: tuple[tuple[str, str, str], ...] = (
-    ("core", "strategies", "enabled"),
-    ("morning", "morning_session_strategies", "morning_session_enabled"),
-    ("midday", "midday_session_strategies", "midday_session_enabled"),
-    ("pre_eu30", "pre_eu30_session_strategies", "pre_eu30_session_enabled"),
-    ("trend_recovery", "trend_recovery_strategies", "trend_recovery_enabled"),
-    ("ny0530", "t0530_edge_strategies", "t0530_edge_enabled"),
-    ("q01", "q01_variance_release_strategies", "q01_variance_release_enabled"),
-    ("m15", "m15_terminal_strategies", "m15_terminal_enabled"),
-    ("h7", "h7_strategies", "h7_enabled"),
-    ("research", "research_entry_strategies", "research_entries_enabled"),
+    ("core", "strategies", "enabled"), ("morning", "morning_session_strategies", "morning_session_enabled"),
+    ("midday", "midday_session_strategies", "midday_session_enabled"), ("pre_eu30", "pre_eu30_session_strategies", "pre_eu30_session_enabled"),
+    ("trend_recovery", "trend_recovery_strategies", "trend_recovery_enabled"), ("ny0530", "t0530_edge_strategies", "t0530_edge_enabled"),
+    ("q01", "q01_variance_release_strategies", "q01_variance_release_enabled"), ("m15", "m15_terminal_strategies", "m15_terminal_enabled"),
+    ("h7", "h7_strategies", "h7_enabled"), ("research", "research_entry_strategies", "research_entries_enabled"),
 )
 
 
@@ -122,26 +133,20 @@ def _gate(value: Any) -> dict[str, Any]:
 
 
 def _tradable_gate(config: dict[str, Any]) -> dict[str, Any]:
-    values = {
-        "enabled": config.get("enabled"),
-        "live_trading_enabled": config.get("live_trading_enabled"),
-        "trading_enabled": config.get("trading_enabled", config.get("trade_enabled")),
-        "allow_entries": config.get("allow_entries", config.get("entry_enabled")),
-    }
-    present = {key: _gate(value) for key, value in values.items() if value is not None}
-    required = {"enabled", "live_trading_enabled"}
-    status = "blocked" if any(item["status"] == "blocked" for item in present.values()) else "unknown" if any(key not in present for key in required) or any(item["status"] == "unknown" for item in present.values()) else "enabled"
-    return {"status": status, "tradable_now": status == "enabled", "gates": present}
+    configured = config.get("configured_live_enabled", config.get("live_trading_enabled"))
+    values = {"enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": _parse_bool(configured)}
+    status = "enabled" if all(value is True for value in values.values()) else "blocked" if any(value is False for value in values.values()) else "unknown"
+    return {"status": status, "tradable_now": status == "enabled", "gates": {key: _gate(value) for key, value in values.items()}}
 
 
 def _iter_strategies(config: dict[str, Any]) -> Iterable[tuple[str, bool, dict[str, Any]]]:
-    root = _tradable_gate(config)
+    gate = _tradable_gate(config)
     seen: set[str] = set()
     for group, field, gate_name in GROUPS:
         items = config.get(field, [])
         if not isinstance(items, list):
             continue
-        group_gate = _parse_bool(config.get(gate_name)) if gate_name != "enabled" else _parse_bool(config.get("enabled"))
+        group_gate = _parse_bool(config.get(gate_name))
         for raw in items:
             if not isinstance(raw, dict):
                 continue
@@ -150,9 +155,8 @@ def _iter_strategies(config: dict[str, Any]) -> Iterable[tuple[str, bool, dict[s
                 continue
             seen.add(ident)
             item_enabled = _parse_bool(raw.get("enabled"))
-            effective = root["tradable_now"] and group_gate is True and item_enabled is True
-            enriched = {**raw, "group": group, "group_enabled": group_gate, "effective_enabled": effective, "tradable_now": effective, "tradable_gate": root}
-            yield group, effective, enriched
+            effective = gate["tradable_now"] and group_gate is True and item_enabled is True
+            yield group, effective, {**raw, "group": group, "group_enabled": group_gate, "effective_enabled": effective, "tradable_now": effective, "tradable_gate": gate}
 
 
 def _safe_strategy(raw: dict[str, Any]) -> dict[str, Any]:
@@ -160,16 +164,54 @@ def _safe_strategy(raw: dict[str, Any]) -> dict[str, Any]:
     return {key: raw.get(key) for key in allowed if key in raw}
 
 
+def _note_values(note: str) -> dict[str, str]:
+    return {key: value.strip() for key, value in KEY_VALUE_RE.findall(note or "")}
+
+
+def _signal_fields(row: dict[str, str]) -> tuple[str, str]:
+    """Parse signal identity from columns, semicolon key-values, or JSON note."""
+    note = row.get("note", "") or ""
+    values = _note_values(note)
+    signal = next((str(row.get(key, "")).strip() for key in ("signal_id", "configured_signal_id", "signal") if str(row.get(key, "")).strip()), "")
+    if not signal:
+        signal = next((values.get(key, "") for key in ("signal_id", "configured_signal_id", "signal") if values.get(key, "")), "")
+    variant = next((str(row.get(key, "")).strip() for key in ("signal_variant_id", "variant", "spec_id") if str(row.get(key, "")).strip()), "")
+    if not variant:
+        variant = next((values.get(key, "") for key in ("signal_variant_id", "variant", "spec_id") if values.get(key, "")), "")
+    if not signal and note.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(note)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            signal = str(parsed.get("signal_id") or parsed.get("signal") or "").strip()
+            variant = variant or str(parsed.get("signal_variant_id") or parsed.get("variant") or "").strip()
+    return signal, variant
+
+
+def _close_time(row: dict[str, str]) -> tuple[datetime | None, datetime | None]:
+    recorded = _parse_utc(row.get("timestamp_utc"))
+    direct = _parse_utc(row.get("deal_time_utc"))
+    broker_time = direct or _parse_utc(_note_values(row.get("note", "")).get("deal_time_utc"))
+    return broker_time, recorded
+
+
 @dataclass(frozen=True)
 class CloseRow:
     deal_id: str
     strategy_id: str
     signal_id: str
+    signal_variant_id: str
     lane_id: str
     magic: str
     basket_id: str
     ticket: str
-    profit: float
+    position_identifier: str
+    opportunity_id: str
+    opportunity_attribution: str
+    ledger_profit: float | None
+    profit: float | None
+    profit_unit: str | None
     currency: str | None
     execution_class: str
     close_time: datetime
@@ -185,6 +227,9 @@ class TradeAudit:
     conflicting_deals: int
     quarantined_rows: int
     quarantine_reasons: tuple[str, ...]
+    direct_opportunity_closes: int
+    unique_entry_join_closes: int
+    ambiguous_opportunity_joins: int
     last_event: datetime | None
     last_close: datetime | None
 
@@ -193,93 +238,112 @@ class TradeAudit:
 class SourceSnapshot:
     config: dict[str, Any]
     audit: TradeAudit
+    source_metadata: dict[str, Any]
     collected_at: float
     attempted_at: float
     collect_count: int
+    rotation_count: int
     status: str
     last_error: str | None
 
 
-def _close_time(row: dict[str, str]) -> tuple[datetime | None, datetime | None]:
-    recorded = _parse_utc(row.get("timestamp_utc"))
-    direct = _parse_utc(row.get("deal_time_utc"))
-    match = DEAL_TIME_RE.search(row.get("note", ""))
-    broker_time = direct or (_parse_utc(match.group(1)) if match else None)
-    return broker_time, recorded
-
-
-def _read_trades(path: Path) -> TradeAudit:
-    if not path.is_file():
-        raise DashboardError(f"source_unavailable:{path.name}")
-    accepted: dict[str, CloseRow] = {}
-    conflict_ids: set[str] = set()
-    entries: list[dict[str, str]] = []
-    reasons: list[str] = []
-    duplicate = conflicts = quarantined = total = 0
-    last_event: datetime | None = None
-    last_close: datetime | None = None
+def _csv_audit(payload: bytes) -> TradeAudit:
     try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            if not reader.fieldnames or None in reader.fieldnames or "event" not in reader.fieldnames:
-                raise DashboardError("invalid_trade_header")
-            for row in reader:
-                total += 1
-                if None in row or any(value is None for value in row.values()):
-                    quarantined += 1
-                    reasons.append("malformed_row")
-                    continue
-                recorded = _parse_utc(row.get("timestamp_utc"))
-                if recorded and (last_event is None or recorded > last_event):
-                    last_event = recorded
-                event = (row.get("event") or "").strip()
-                if event == "entry" and (row.get("ticket") or "").strip():
-                    entries.append(row)
-                if event != "position_close_confirmed":
-                    continue
-                deal_id = (row.get("deal_id") or "").strip()
-                profit = _finite_float(row.get("profit"))
-                broker_time, recorded_time = _close_time(row)
-                currency = (row.get("currency") or row.get("account_currency") or "").strip().upper() or None
-                execution = (row.get("execution_class") or "").strip().lower()
-                live = _parse_bool(row.get("live"))
-                execution_class = execution if execution in {"live", "shadow"} else "live" if live is True else "shadow" if live is False else "unknown"
-                if not deal_id:
-                    quarantined += 1; reasons.append("missing_deal_id"); continue
-                if profit is None:
-                    quarantined += 1; reasons.append("invalid_profit"); continue
-                if broker_time is None:
-                    quarantined += 1; reasons.append("missing_broker_deal_time"); continue
-                close = CloseRow(deal_id, (row.get("strategy_id") or "").strip(), (row.get("signal_id") or "").strip(), (row.get("lane_id") or "").strip(), (row.get("magic") or "").strip(), (row.get("basket_id") or "").strip(), (row.get("ticket") or "").strip(), profit, currency, execution_class, broker_time, recorded_time)
-                if deal_id in conflict_ids:
-                    quarantined += 1; reasons.append("conflicting_duplicate_deal"); continue
-                prior = accepted.get(deal_id)
-                if prior is not None:
-                    duplicate += 1
-                    if prior != close:
-                        conflicts += 1
-                        conflict_ids.add(deal_id)
-                        accepted.pop(deal_id, None)
-                        quarantined += 2
-                        reasons.append("conflicting_duplicate_deal")
-                    continue
-                accepted[deal_id] = close
-                if last_close is None or broker_time > last_close:
-                    last_close = broker_time
+        if payload and not payload.endswith(b"\n"):
+            raise DashboardError("invalid_trade_tail")
+        text = payload.decode("utf-8")
+        reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
+        if not reader.fieldnames or None in reader.fieldnames or "event" not in reader.fieldnames:
+            raise DashboardError("invalid_trade_header")
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                raise DashboardError("invalid_trade_row_width")
+            rows.append({key: value or "" for key, value in row.items()})
     except UnicodeDecodeError as exc:
         raise DashboardError("invalid_trade_encoding") from exc
-    return TradeAudit(tuple(accepted.values()), tuple(entries), total, duplicate, conflicts, quarantined, tuple(reasons), last_event, last_close)
+    except csv.Error as exc:
+        raise DashboardError("invalid_trade_csv") from exc
+
+    entries = [row for row in rows if row.get("event") in {"entry", "position_open_confirmed", "position_open"} and row.get("opportunity_id")]
+    # A basket can contain multiple entries.  It is evidence for display only,
+    # never a unique join key.  Position identifier/ticket are the only join
+    # keys that can prove one close belongs to one entry.
+    indexes: dict[str, dict[str, list[dict[str, str]]]] = {key: {} for key in ("position_identifier", "ticket")}
+    for entry in entries:
+        for key in indexes:
+            value = entry.get(key, "").strip()
+            if value:
+                indexes[key].setdefault(value, []).append(entry)
+
+    accepted: dict[str, CloseRow] = {}
+    semantic_keys: dict[str, tuple[Any, ...]] = {}
+    conflict_ids: set[str] = set()
+    reasons: list[str] = []
+    duplicate = conflicts = quarantined = 0
+    direct = joined = ambiguous = 0
+    last_event = last_close = None
+    for row in rows:
+        recorded = _parse_utc(row.get("timestamp_utc"))
+        if recorded and (last_event is None or recorded > last_event):
+            last_event = recorded
+        if row.get("event") != "position_close_confirmed":
+            continue
+        deal_id = row.get("deal_id", "").strip()
+        if not deal_id:
+            quarantined += 1; reasons.append("missing_deal_id"); continue
+        broker_time, recorded_time = _close_time(row)
+        if broker_time is None:
+            quarantined += 1; reasons.append("missing_broker_deal_time"); continue
+        opportunity = row.get("opportunity_id", "").strip()
+        attribution = "direct" if opportunity else "unresolved"
+        if not opportunity:
+            candidates: dict[str, dict[str, str]] = {}
+            for key in ("position_identifier", "ticket"):
+                value = row.get(key, "").strip()
+                if value:
+                    for entry in indexes[key].get(value, []):
+                        candidates[entry.get("opportunity_id", "")] = entry
+            if len(candidates) == 1:
+                opportunity = next(iter(candidates)); attribution = "unique_entry_join"; joined += 1
+            elif len(candidates) > 1:
+                ambiguous += 1; reasons.append("ambiguous_opportunity_join")
+            else:
+                reasons.append("missing_opportunity_id")
+        else:
+            direct += 1
+        signal, variant = _signal_fields(row)
+        ledger_profit = _finite_float(row.get("ledger_profit"))
+        profit = _finite_float(row.get("profit"))
+        if ledger_profit is None and profit is not None:
+            ledger_profit = profit
+        unit = (row.get("profit_unit") or row.get("ledger_profit_unit") or "").strip().upper() or None
+        currency = (row.get("currency") or row.get("account_currency") or "").strip().upper() or None
+        execution = (row.get("execution_class") or "").strip().lower()
+        live = _parse_bool(row.get("live"))
+        execution = execution if execution in EXECUTION_CLASSES[:2] else "live" if live is True else "shadow" if live is False else "unknown"
+        close = CloseRow(deal_id, row.get("strategy_id", "").strip(), signal, variant, row.get("lane_id", "").strip(), row.get("magic", "").strip(), row.get("basket_id", "").strip(), row.get("ticket", "").strip(), row.get("position_identifier", "").strip(), opportunity, attribution, ledger_profit, profit, unit, currency, execution, broker_time, recorded_time)
+        semantic = (close.deal_id, close.strategy_id, close.signal_id, close.signal_variant_id, close.lane_id, close.magic, close.basket_id, close.ticket, close.position_identifier, close.opportunity_id, close.opportunity_attribution, close.ledger_profit, close.profit, close.profit_unit, close.currency, close.execution_class, close.close_time)
+        if deal_id in conflict_ids:
+            quarantined += 1; reasons.append("conflicting_duplicate_deal"); continue
+        prior = semantic_keys.get(deal_id)
+        if prior is not None:
+            if prior == semantic:
+                duplicate += 1
+            else:
+                conflicts += 1; conflict_ids.add(deal_id); accepted.pop(deal_id, None); quarantined += 2; reasons.append("conflicting_duplicate_deal")
+            continue
+        semantic_keys[deal_id] = semantic; accepted[deal_id] = close
+        if last_close is None or broker_time > last_close:
+            last_close = broker_time
+    return TradeAudit(tuple(accepted.values()), tuple(entries), len(rows), duplicate, conflicts, quarantined, tuple(reasons), direct, joined, ambiguous, last_event, last_close)
 
 
 class SnapshotCollector:
-    """One collector with an immutable last-good snapshot on refresh failure."""
-
+    """Strict source collector with immutable last-good snapshot and rotation count."""
     def __init__(self, params: Path, trades: Path, log: Path, ttl_seconds: float = COLLECTOR_TTL_SECONDS):
-        self.params, self.trades, self.log = params, trades, log
-        self.ttl_seconds = ttl_seconds
-        self._lock = threading.RLock()
-        self._snapshot: SourceSnapshot | None = None
-        self._collect_count = 0
+        self.params, self.trades, self.log, self.ttl_seconds = params, trades, log, ttl_seconds
+        self._lock = threading.RLock(); self._snapshot: SourceSnapshot | None = None; self._collect_count = 0; self._rotation_count = 0
 
     def get(self) -> SourceSnapshot:
         with self._lock:
@@ -288,14 +352,22 @@ class SnapshotCollector:
                 return self._snapshot
             attempted = time.monotonic()
             try:
-                config = _read_json(self.params)
-                audit = _read_trades(self.trades)
+                config, params_meta = _read_json(self.params)
+                trades_payload, trades_meta = _read_stable_bytes(self.trades)
+                audit = _csv_audit(trades_payload)
             except DashboardError as exc:
                 if self._snapshot is None:
                     raise
-                return SourceSnapshot(self._snapshot.config, self._snapshot.audit, self._snapshot.collected_at, attempted, self._snapshot.collect_count, "stale_last_good", str(exc))
+                return SourceSnapshot(self._snapshot.config, self._snapshot.audit, self._snapshot.source_metadata, self._snapshot.collected_at, attempted, self._snapshot.collect_count, self._snapshot.rotation_count, "stale_last_good", str(exc))
             self._collect_count += 1
-            snapshot = SourceSnapshot(config, audit, attempted, attempted, self._collect_count, "fresh", None)
+            current_identity = (params_meta.get("sha256"), trades_meta.get("sha256"))
+            prior_identity = self._snapshot.source_metadata.get("source_identity") if self._snapshot else None
+            if prior_identity is not None and tuple(prior_identity) != current_identity:
+                self._rotation_count += 1
+            params_meta = {"path_label": self.params.name, **params_meta}
+            trades_meta = {"path_label": self.trades.name, **trades_meta}
+            metadata = {"params": params_meta, "trades": trades_meta, "source_identity": current_identity, "read_contract": "strict_csv_read_before_after_identity", "rotation_coverage": {"source_identity_changes": self._rotation_count, "last_good_cache": True}}
+            snapshot = SourceSnapshot(config, audit, metadata, attempted, attempted, self._collect_count, self._rotation_count, "fresh", None)
             self._snapshot = snapshot
             return snapshot
 
@@ -324,28 +396,21 @@ def _currency(config: dict[str, Any]) -> str | None:
     return str(value).strip().upper() if isinstance(value, str) and value.strip() else None
 
 
-def _source_info(path: Path, last_event: datetime | None) -> dict[str, Any]:
-    mtime = _file_mtime(path)
-    now = time.time()
-    return {"path_label": path.name, "file_mtime_utc": _iso(datetime.fromtimestamp(mtime, timezone.utc)) if mtime else None, "file_age_seconds": max(0.0, now - mtime) if mtime else None, "last_event_utc": _iso(last_event), "event_age_seconds": max(0.0, now - last_event.timestamp()) if last_event else None, "runtime_liveness": "unknown", "freshness": "unknown", "freshness_reason": "file age does not prove bot liveness"}
-
-
 def _metric(rows: list[CloseRow], scope: str, execution_class: str, currency: str | None) -> dict[str, Any]:
-    wins = sum(row.profit > 0 for row in rows)
-    currency_match = currency is not None and all(row.currency == currency for row in rows)
-    gross_profit = sum(row.profit for row in rows if row.profit > 0) if currency_match else None
-    gross_loss = -sum(row.profit for row in rows if row.profit < 0) if currency_match else None
-    usable = currency_match and execution_class in {"live", "shadow"}
-    return {"scope": scope, "execution_class": execution_class, "deal_count": len(rows), "win_count": wins, "loss_count": len(rows) - wins, "win_rate": wins / len(rows) if rows else None, "profit_factor": gross_profit / gross_loss if usable and gross_loss else None, "realized_pnl": sum(row.profit for row in rows) if usable else None, "currency": currency if usable else None, "aggregation_status": "usable" if usable else "blocked_currency_or_execution_class"}
+    wins = sum((row.profit or 0) > 0 for row in rows)
+    confirmed = currency is not None and all(row.currency == currency and row.profit_unit in {currency, "ACCOUNT_CURRENCY"} for row in rows)
+    gross_profit = sum((row.profit or 0) for row in rows if (row.profit or 0) > 0) if confirmed else None
+    gross_loss = -sum((row.profit or 0) for row in rows if (row.profit or 0) < 0) if confirmed else None
+    usable = confirmed and execution_class in {"live", "shadow"}
+    return {"scope": scope, "execution_class": execution_class, "deal_count": len(rows), "win_count": wins, "loss_count": len(rows) - wins, "win_rate": wins / len(rows) if rows else None, "profit_factor": gross_profit / gross_loss if usable and gross_loss else None, "realized_pnl": sum((row.profit or 0) for row in rows) if usable else None, "currency": currency if usable else None, "aggregation_status": "usable" if usable else "blocked_currency_or_profit_unit"}
 
 
 def _equity(rows: list[CloseRow], scope: str, execution_class: str, currency: str | None) -> list[dict[str, Any]]:
-    usable = currency is not None and execution_class in {"live", "shadow"} and all(row.currency == currency for row in rows)
-    running = 0.0
-    curve: list[dict[str, Any]] = []
+    confirmed = currency is not None and all(row.currency == currency and row.profit_unit in {currency, "ACCOUNT_CURRENCY"} for row in rows)
+    running = 0.0; curve: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: (item.close_time, item.deal_id)):
-        running += row.profit
-        curve.append({"scope": scope, "execution_class": execution_class, "deal_id": row.deal_id, "close_time_utc": _iso(row.close_time), "cumulative_pnl": running if usable else None, "currency": currency if usable else None, "aggregation_status": "usable" if usable else "blocked_currency_or_execution_class"})
+        running += row.profit or 0
+        curve.append({"scope": scope, "execution_class": execution_class, "deal_id": row.deal_id, "close_time_utc": _iso(row.close_time), "cumulative_pnl": running if confirmed else None, "currency": currency if confirmed else None, "aggregation_status": "usable" if confirmed else "blocked_currency_or_profit_unit"})
     return curve
 
 
@@ -364,85 +429,66 @@ def _grouped_curve(rows: list[CloseRow], field: str, currency: str | None) -> li
 
 
 def build_summary(start: datetime | None = None, end: datetime | None = None, collector: SnapshotCollector = DEFAULT_COLLECTOR) -> dict[str, Any]:
-    snapshot = collector.get()
-    config, audit = snapshot.config, snapshot.audit
+    snapshot = collector.get(); config, audit = snapshot.config, snapshot.audit
     rows = [row for row in audit.closes if _within(row.close_time, start, end)]
     currency = _currency(config)
-    by_execution = {execution: [row for row in rows if row.execution_class == execution] for execution in ("live", "shadow", "unknown")}
-    gate = _tradable_gate(config)
-    errors = []
-    if _config_generation(config)["status"] == "unknown":
-        errors.append("config_generation_unknown")
-    if currency is None:
-        errors.append("currency_unknown_total_not_aggregated")
-    if snapshot.status != "fresh":
-        errors.append("source_refresh_failed_using_last_good_snapshot")
+    by_execution = {execution: [row for row in rows if row.execution_class == execution] for execution in EXECUTION_CLASSES}
+    gate = _tradable_gate(config); errors: list[str] = []
+    if _config_generation(config)["status"] == "unknown": errors.append("config_generation_unknown")
+    if currency is None: errors.append("currency_unknown_total_not_aggregated")
+    if snapshot.status != "fresh": errors.append("source_refresh_failed_using_last_good_snapshot")
     errors.append("inventory_unknown")
-    accounting = {"realized_pnl": None, "closed_deal_count": len(rows), "currency": currency, "aggregation_status": "separate_by_execution_class", "duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons)), "close_time_basis": "broker deal_time_utc only; recorded timestamp is never a period fallback", "execution_classes": {key: _metric(value, key, key, currency) for key, value in by_execution.items()}}
-    return {"service": "bot0", "adapter": "bot23.v3", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": _sha256(collector.params), "root_enabled": _parse_bool(config.get("enabled")), "live_trading_enabled": _parse_bool(config.get("live_trading_enabled")), "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "strategies": [_safe_strategy(raw) for _, _, raw in _iter_strategies(config)], "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": {"path_label": collector.params.name, "sha256": _sha256(collector.params), "generation": _config_generation(config)}, "trades": _source_info(collector.trades, audit.last_event), "bot_log": {"path_label": collector.log.name, "file_mtime_utc": _iso(datetime.fromtimestamp(_file_mtime(collector.log), timezone.utc)) if _file_mtime(collector.log) else None, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count}}, "errors": errors}
+    accounting = {"realized_pnl": None, "ledger_profit": sum((row.ledger_profit or 0) for row in rows) if rows else 0.0, "ledger_profit_unit_status": "unconfirmed", "closed_deal_count": len(rows), "currency": currency, "aggregation_status": "separate_by_execution_class", "duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons)), "close_time_basis": "broker deal_time_utc only; recorded timestamp is never a period fallback", "opportunity_attribution": {"direct": audit.direct_opportunity_closes, "unique_entry_join": audit.unique_entry_join_closes, "ambiguous": audit.ambiguous_opportunity_joins}, "execution_classes": {key: _metric(value, key, key, currency) for key, value in by_execution.items()}}
+    source_meta = snapshot.source_metadata
+    return {"service": "bot0", "adapter": "bot23.v4", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": source_meta.get("params", {}).get("sha256"), "root_enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": gate["gates"]["configured_live_enabled"]["value"], "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "historical_attribution_basis": "ledger_row_fields_only; current_params_never_backfill_history", "strategies": [_safe_strategy(raw) for _, _, raw in _iter_strategies(config)], "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": source_meta.get("params"), "trades": source_meta.get("trades"), "bot_log": {"path_label": collector.log.name, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count, "rotation_count": snapshot.rotation_count, "read_contract": source_meta.get("read_contract"), "rotation_coverage": source_meta.get("rotation_coverage")}}, "errors": errors}
 
 
-INDEX_HTML = """<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>bot0 dashboard</title><style>body{font:14px system-ui,sans-serif;max-width:1400px;margin:2rem auto;padding:0 1rem;background:#f7f7f7;color:#222}section{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #eee}.muted{color:#666}.warn{color:#a50}.bad{color:#b00}</style><h1>bot0 dashboard</h1><p class=\"muted\">read-only / bot23 adapter v3</p><section id=\"summary\">読み込み中...</section><section><h2>live / shadow</h2><table><thead><tr><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"classes\"></tbody></table></section><section><h2>strategy / signal</h2><table><thead><tr><th>kind</th><th>scope</th><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"scopes\"></tbody></table></section><script>const esc=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));const cell=v=>v==null?'unknown':esc(v);async function refresh(){try{const r=await fetch('/api/summary',{cache:'no-store'});if(!r.ok)throw new Error('source unavailable');const d=await r.json(),a=d.accounting||{},i=d.inventory||{},c=d.config||{};document.querySelector('#summary').innerHTML='<p>総計: <b>class別表示</b> / '+cell(a.closed_deal_count)+' deals / <span class=\"warn\">'+cell(a.aggregation_status)+'</span></p><p>inventory: '+cell(i.open_position_count)+' / MTM: '+cell(i.mtm_pnl)+'</p><p>tradable_now: '+cell((c.tradable_now||{}).status)+' / currency: '+cell(c.account_currency)+'</p><p class=\"muted\">updated '+cell(d.generated_at_utc)+' / errors '+cell((d.errors||[]).join(', '))+'</p>';document.querySelector('#classes').innerHTML=(d.metrics?.by_execution_class||[]).map(m=>'<tr><td>'+cell(m.scope)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');const rows=[...(d.metrics?.by_strategy||[]).map(m=>({...m,kind:'strategy'})),...(d.metrics?.by_signal||[]).map(m=>({...m,kind:'signal'}))];document.querySelector('#scopes').innerHTML=rows.map(m=>'<tr><td>'+cell(m.kind)+'</td><td>'+cell(m.scope)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('')}catch(e){document.querySelector('#summary').innerHTML='<p class=\"bad\">source unavailable; last good snapshot may be unavailable</p>'}}refresh();setInterval(refresh,30000)</script>"""
+INDEX_HTML = """<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>bot0 dashboard</title><style>body{font:14px system-ui,sans-serif;max-width:1400px;margin:2rem auto;padding:0 1rem;background:#f7f7f7;color:#222}section{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #eee}.muted{color:#666}.warn{color:#a50}.bad{color:#b00}</style><h1>bot0 dashboard</h1><p class=\"muted\">read-only / bot23 adapter v4</p><section id=\"summary\">読み込み中...</section><section><h2>live / shadow</h2><table><thead><tr><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"classes\"></tbody></table></section><section><h2>strategy / signal</h2><table><thead><tr><th>kind</th><th>scope</th><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"scopes\"></tbody></table></section><script>const esc=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));const cell=v=>v==null?'unknown':esc(v);async function refresh(){try{const r=await fetch('/api/summary',{cache:'no-store'});if(!r.ok)throw new Error('source unavailable');const d=await r.json(),a=d.accounting||{},i=d.inventory||{},c=d.config||{};document.querySelector('#summary').innerHTML='<p>総計: <b>'+cell(a.closed_deal_count)+' deals</b> / ledger_profit '+cell(a.ledger_profit)+' ('+cell(a.ledger_profit_unit_status)+')</p><p>inventory: '+cell(i.open_position_count)+' / MTM: '+cell(i.mtm_pnl)+'</p><p>configured_live_enabled: '+cell((c.tradable_now||{}).gates?.configured_live_enabled?.status)+' / currency: '+cell(c.account_currency)+'</p><p class=\"muted\">updated '+cell(d.generated_at_utc)+' / errors '+cell((d.errors||[]).join(', '))+'</p>';document.querySelector('#classes').innerHTML=(d.metrics?.by_execution_class||[]).map(m=>'<tr><td>'+cell(m.scope)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');const rows=[...(d.metrics?.by_strategy||[]).map(m=>({...m,kind:'strategy'})),...(d.metrics?.by_signal||[]).map(m=>({...m,kind:'signal'}))];document.querySelector('#scopes').innerHTML=rows.map(m=>'<tr><td>'+cell(m.kind)+'</td><td>'+cell(m.scope)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('')}catch(e){document.querySelector('#summary').innerHTML='<p class=\"bad\">source unavailable; last good snapshot may be unavailable</p>'}}refresh();setInterval(refresh,30000)</script>"""
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "bot0/3"
-
+    server_version = "bot0/4"
     def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
-        self.end_headers()
-        self.wfile.write(body)
-
+        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"); self.end_headers(); self.wfile.write(body)
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
-        if parsed.path == "/":
-            self._send(HTTPStatus.OK, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
-            return
-        if parsed.path == "/api/health":
-            self._send(HTTPStatus.OK, b'{"status":"ok","read_only":true}', "application/json; charset=utf-8")
-            return
-        if parsed.path != "/api/summary":
-            self._send(HTTPStatus.NOT_FOUND, b'{"error":"not_found"}', "application/json; charset=utf-8")
-            return
+        if parsed.path == "/": self._send(HTTPStatus.OK, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8"); return
+        if parsed.path == "/api/health": self._send(HTTPStatus.OK, b'{"status":"ok","read_only":true}', "application/json; charset=utf-8"); return
+        if parsed.path != "/api/summary": self._send(HTTPStatus.NOT_FOUND, b'{"error":"not_found"}', "application/json; charset=utf-8"); return
         try:
-            start, end = _period_bounds(parse_qs(parsed.query, keep_blank_values=False))
-            body = json.dumps(build_summary(start, end), ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-            self._send(HTTPStatus.OK, body, "application/json; charset=utf-8")
+            start, end = _period_bounds(parse_qs(parsed.query, keep_blank_values=False)); body = json.dumps(build_summary(start, end), ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"); self._send(HTTPStatus.OK, body, "application/json; charset=utf-8")
         except DashboardError as exc:
             self._send(HTTPStatus.SERVICE_UNAVAILABLE if str(exc).startswith("source_") else HTTPStatus.BAD_REQUEST, json.dumps({"error": str(exc)}).encode(), "application/json; charset=utf-8")
         except Exception:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b'{"error":"internal_error"}', "application/json; charset=utf-8")
-
     def do_POST(self) -> None:  # noqa: N802
         try:
             length = min(int(self.headers.get("Content-Length", "0")), MAX_BODY_BYTES)
-            if length > 0:
-                self.rfile.read(length)
-        except (TypeError, ValueError):
-            pass
+            if length > 0: self.rfile.read(length)
+        except (TypeError, ValueError): pass
         self._send(HTTPStatus.METHOD_NOT_ALLOWED, b'{"error":"get_only"}', "application/json; charset=utf-8")
+    do_PUT = do_POST; do_DELETE = do_POST
+    def log_message(self, fmt: str, *args: Any) -> None: return
 
-    do_PUT = do_POST
-    do_DELETE = do_POST
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        return
+def production_gate_contract() -> dict[str, Any]:
+    return {"service": "bot0-dashboard", "configured_live_enabled_field": "configured_live_enabled", "allowed_methods": ["GET"], "source_mounts": "read_only", "broker_client_imports": False, "order_write_capability": False, "historical_attribution": "ledger_row_fields_only"}
+
+
+def assert_read_only_ast() -> None:
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    forbidden = {"order_send", "buy", "sell", "close_position", "modify_position", "create_order", "MetaTrader5", "mt5"}
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    if names & forbidden:
+        raise RuntimeError(f"read_only_ast_violation:{sorted(names & forbidden)}")
 
 
 def main() -> None:
+    assert_read_only_ast()
     server = ThreadingHTTPServer((DEFAULT_HOST, DEFAULT_PORT), DashboardHandler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    try: server.serve_forever()
+    except KeyboardInterrupt: pass
+    finally: server.server_close()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
