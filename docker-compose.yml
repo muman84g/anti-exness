@@ -1,11 +1,11 @@
 services:
   # ---- bot0 (read-only multi-bot dashboard; bot23 adapter v4) ----
-  bot0-dashboard:
+  exness-bot-0:
     build:
       context: .
       dockerfile: bot0/Dockerfile
     image: exness-bot0-dashboard:latest
-    container_name: exness-bot0-dashboard
+    container_name: exness-bot-0
     restart: unless-stopped
     read_only: true
     user: "65532:65532"

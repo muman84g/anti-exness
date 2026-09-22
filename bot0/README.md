@@ -51,8 +51,8 @@ currency and explicit profit units produce cumulative monetary values;
 Build and run from the repository root with the compose service:
 
 ```bash
-docker compose build bot0-dashboard
-docker compose up -d bot0-dashboard
+docker compose build exness-bot-0
+docker compose up -d exness-bot-0
 ```
 
 The default bind is `127.0.0.1:8230`. Put a separately authenticated reverse
