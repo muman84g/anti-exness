@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import dashboard
@@ -86,6 +87,24 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(audit.duplicate_deals, 1)
             self.assertEqual(audit.conflicting_deals, 0)
 
+    def test_05b_conflicting_final_set_recomputes_attribution_and_last_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = close("d", opp="direct", timestamp="2026-01-01T00:00:02Z", note="deal_time_utc=2026-01-01T00:00:01Z")
+            conflicting = close("d", opp="other", timestamp="2026-01-01T00:00:03Z", note="deal_time_utc=2026-01-01T00:00:09Z")
+            audit = write_sources(root, {}, [first, conflicting]).get().audit
+            self.assertEqual(len(audit.closes), 0)
+            self.assertEqual((audit.direct_opportunity_closes, audit.unique_entry_join_closes, audit.ambiguous_opportunity_joins), (0, 0, 0))
+            self.assertIsNone(audit.last_close)
+
+    def test_05c_missing_and_nonfinite_profit_are_quarantined(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [close("missing", profit=""), close("nan", profit="nan"), close("inf", profit="inf"), close("ok", profit="1")]
+            audit = write_sources(Path(tmp), {}, rows).get().audit
+            self.assertEqual([row.deal_id for row in audit.closes], ["ok"])
+            self.assertEqual(audit.quarantined_rows, 3)
+            self.assertEqual(audit.quarantine_reasons.count("missing_or_nonfinite_profit"), 3)
+
     # Fixture 6: ledger values are visible but not currency-confirmed realized PnL.
     def test_06_ledger_profit_unit_separate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,6 +120,20 @@ class DashboardTests(unittest.TestCase):
             collector = write_sources(Path(tmp), {"account_currency": "USD"}, [close("d", profit="3", unit="USD", currency="USD")])
             metric = dashboard.build_summary(collector=collector)["accounting"]["execution_classes"]["live"]
             self.assertEqual(metric["realized_pnl"], 3.0)
+
+    def test_07b_unknown_execution_blocks_equity_curve_like_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = write_sources(Path(tmp), {"account_currency": "USD"}, [
+                close("d", profit="3", unit="USD", currency="USD", execution_class="", live=""),
+            ])
+            summary = dashboard.build_summary(collector=collector)
+            metric = summary["accounting"]["execution_classes"]["unknown"]
+            curve = summary["equity_curve"]["by_execution_class"]
+            self.assertIsNone(metric["realized_pnl"])
+            self.assertEqual(metric["aggregation_status"], "blocked_currency_or_profit_unit")
+            self.assertEqual(len(curve), 1)
+            self.assertIsNone(curve[0]["cumulative_pnl"])
+            self.assertEqual(curve[0]["aggregation_status"], "blocked_currency_or_profit_unit")
 
     # Fixture 8: the configured gate has an explicit stable name.
     def test_08_configured_live_enabled_gate(self):
@@ -121,6 +154,72 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(stale.audit.closes, first.audit.closes)
             self.assertIn("invalid_trade_row_width", stale.last_error)
 
+    def test_09b_stale_failure_is_cached_for_ttl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = write_sources(root, {}, [close("d")])
+            collector.get()
+            collector.trades.write_text("event,deal_id\nposition_close_confirmed,d,extra\n", encoding="utf-8")
+            collector.ttl_seconds = 0
+            with mock.patch.object(dashboard, "_read_source_batch", wraps=dashboard._read_source_batch) as reader:
+                first = collector.get()
+                collector.ttl_seconds = 60
+                second = collector.get()
+            self.assertIs(first, second)
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(second.status, "stale_last_good")
+
+    def test_09c_duplicate_and_empty_headers_reject(self):
+        duplicate = b"event,event\nposition_close_confirmed,d\n"
+        empty = b"event,\nposition_close_confirmed,d,\n"
+        with self.assertRaisesRegex(dashboard.DashboardError, "invalid_trade_header_duplicate"):
+            dashboard._csv_audit(duplicate)
+        with self.assertRaisesRegex(dashboard.DashboardError, "invalid_trade_header_empty"):
+            dashboard._csv_audit(empty)
+
+    def test_09d_atomic_replace_and_cross_file_race_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.csv"
+            replacement = root / "replacement.csv"
+            source.write_bytes(b"old")
+            replacement.write_bytes(b"new")
+            real_identity = dashboard._path_identity
+            replaced = False
+
+            def replace_after_identity(path):
+                nonlocal replaced
+                identity = real_identity(path)
+                if path == source and not replaced:
+                    replaced = True
+                    dashboard.os.replace(replacement, source)
+                return identity
+
+            with mock.patch.object(dashboard, "_path_identity", replace_after_identity):
+                payload, _ = dashboard._read_stable_bytes(source)
+            self.assertEqual(payload, b"new")
+
+            params = root / "params.json"
+            trades = root / "trades.csv"
+            params.write_text("{}", encoding="utf-8")
+            trades.write_text("event,deal_id\n", encoding="utf-8")
+            real_reader = dashboard._read_stable_bytes
+            raced = False
+
+            def race_reader(path, *args, **kwargs):
+                nonlocal raced
+                result = real_reader(path, *args, **kwargs)
+                if path == params and not raced:
+                    raced = True
+                    replacement_trade = root / "trades.new"
+                    replacement_trade.write_bytes(trades.read_bytes() + b"position_close_confirmed,d\n")
+                    dashboard.os.replace(replacement_trade, trades)
+                return result
+
+            with mock.patch.object(dashboard, "_read_stable_bytes", race_reader):
+                with self.assertRaisesRegex(dashboard.DashboardError, "source_changed_during_read:cross_file"):
+                    dashboard._read_source_batch({"params": params, "trades": trades})
+
     # Fixture 10: a replacement source is accepted and counted as rotation.
     def test_10_rotation_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +231,35 @@ class DashboardTests(unittest.TestCase):
             snap = collector.get()
             self.assertEqual(snap.status, "fresh")
             self.assertEqual(snap.rotation_count, 1)
+
+    def test_10b_optional_evaluation_and_metadata_are_in_same_identity_barrier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = write_sources(root, {}, [close("d")])
+            evaluation = root / "evaluation.csv"
+            metadata = root / "metadata.json"
+            evaluation.write_bytes(b"header\n")
+            metadata.write_bytes(b"{}\n")
+            collector = dashboard.SnapshotCollector(collector.params, collector.trades, collector.log, ttl_seconds=0, evaluation=evaluation, metadata=metadata)
+            snapshot = collector.get()
+            self.assertEqual(set(snapshot.source_metadata["full_source_identity"]), {"params", "trades", "evaluation", "metadata"})
+            self.assertEqual(snapshot.source_metadata["read_contract"], "strict_batch_pre_read_post_path_identity")
+
+    def test_10c_optional_sources_are_visible_and_not_accounting_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = write_sources(root, {}, [close("d")])
+            evaluation = root / "evaluation.csv"
+            metadata = root / "metadata.json"
+            evaluation.write_bytes(b"header\n")
+            metadata.write_bytes(b"{}\n")
+            collector = dashboard.SnapshotCollector(collector.params, collector.trades, collector.log, ttl_seconds=0, evaluation=evaluation, metadata=metadata)
+            sources = dashboard.build_summary(collector=collector)["sources"]["optional"]
+            self.assertEqual(sources["evaluation"]["path_alias"], "evaluation")
+            self.assertEqual(sources["evaluation"]["path_label"], "evaluation.csv")
+            self.assertEqual(sources["evaluation"]["file_identity"]["sha256"], dashboard._sha256(evaluation))
+            self.assertTrue(sources["metadata"]["present"])
+            self.assertEqual(sources["metadata"]["content_role"], "identity_only; not_accounting_input")
 
     # Fixture 11: production AST/read-only boundary and HTTP methods.
     def test_11_production_gate_and_get_only(self):

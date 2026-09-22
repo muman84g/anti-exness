@@ -33,10 +33,20 @@ config-generation field is reported as `unknown`; a candidate id is not treated
 as a generation.
 
 The collector reads params and trades as one snapshot using strict CSV parsing
-and read-before/read-after file identity. A failed refresh retains the immutable
-last-good snapshot and marks the response stale with the source error. Source
-hashes, file identity, and rotation coverage are included in the response. It
-never replaces a good snapshot with an empty-success value.
+and a batch read-before/read-after identity barrier. Optional evaluation and
+metadata paths can be supplied with `BOT23_EVALUATION_PATH` and
+`BOT23_METADATA_PATH`; all supplied paths participate in the same barrier, so
+an atomic replacement or cross-file race fails closed. A failed refresh retains
+the immutable last-good snapshot and marks the response stale with the source
+error; the failed attempt is throttled by the collector TTL. Source hashes,
+file identity, and rotation coverage are included in the response. The API
+also exposes each optional source under `sources.optional` using a safe label,
+basename, file identity, and hash. These optional files are identity-only
+inputs; they are not parsed or included in accounting. It never replaces a
+good snapshot with an empty-success value. Monetary metrics and equity curves
+share one usability contract: only `live`/`shadow` rows with matching account
+currency and explicit profit units produce cumulative monetary values;
+`unknown` execution rows remain null and blocked.
 
 Build and run from the repository root with the compose service:
 
@@ -48,5 +58,5 @@ docker compose up -d bot0-dashboard
 The default bind is `127.0.0.1:8230`. Put a separately authenticated reverse
 proxy or a private VPN boundary in front of it if remote access is needed.
 
-`python -m unittest discover -s bot0 -v` runs fixtures for the eleven frozen
+`python -m unittest discover -s bot0 -v` runs fixtures for the frozen
 contracts, including the real exported ledger count when it is available.
