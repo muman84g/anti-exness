@@ -16,8 +16,14 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     ports:
-      - "127.0.0.1:8230:8230"
+      - "0.0.0.0:8230:8230"
     volumes:
+      - type: bind
+        source: ${BOT0_AUTH_FILE_HOST:?Set BOT0_AUTH_FILE_HOST to an external bot0 auth JSON file}
+        target: /run/secrets/bot0-auth.json
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ./bot23/s23_params.json
         target: /data/bot23/s23_params.json
@@ -34,8 +40,10 @@ services:
       BOT23_ROOT: /data/bot23
       BOT0_HOST: 0.0.0.0
       BOT0_PORT: "8230"
+      BOT0_AUTH_FILE: /run/secrets/bot0-auth.json
+      BOT0_AUTH_USER: ${BOT0_AUTH_USER:-bot0}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8230/api/health', timeout=2)"]
+      test: ["CMD", "python", "/app/bot0/healthcheck.py"]
       interval: 30s
       timeout: 5s
       retries: 3

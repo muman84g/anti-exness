@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import ast
+import base64
+import binascii
 import csv
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -21,6 +24,11 @@ from urllib.parse import parse_qs, urlsplit
 
 DEFAULT_HOST = os.environ.get("BOT0_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("BOT0_PORT", "8230"))
+DEFAULT_AUTH_USER = "bot0"
+AUTH_REALM = "bot0"
+MAX_AUTH_HEADER_BYTES = 8192
+MAX_AUTH_B64_BYTES = 4096
+MAX_AUTH_DECODED_BYTES = 3072
 BOT23_ROOT = Path(os.environ.get("BOT23_ROOT", "/data/bot23"))
 BOT23_PARAMS = BOT23_ROOT / "s23_params.json"
 BOT23_TRADES = BOT23_ROOT / "logs" / "s23_trades.csv"
@@ -34,8 +42,47 @@ KEY_VALUE_RE = re.compile(r"(?:^|;)([A-Za-z][A-Za-z0-9_]*)=([^;]*)")
 EXECUTION_CLASSES = ("live", "shadow", "unknown")
 
 
+@dataclass(frozen=True)
+class AuthConfig:
+    username: str
+    credential_digest: bytes
+
+
+AUTH_CONFIG: AuthConfig | None = None
+
+
 class DashboardError(Exception):
     """A source or request error safe to expose to a dashboard client."""
+
+
+def load_auth_config() -> AuthConfig:
+    """Load the required Basic auth identity from a Git-external JSON file."""
+    auth_file_value = os.environ.get("BOT0_AUTH_FILE", "").strip()
+    if not auth_file_value:
+        raise RuntimeError("BOT0_AUTH_FILE is required")
+    auth_path = Path(auth_file_value)
+    try:
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid BOT0_AUTH_FILE") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("invalid BOT0_AUTH_FILE")
+    username = payload.get("username")
+    password = payload.get("password")
+    expected_username = os.environ.get("BOT0_AUTH_USER", DEFAULT_AUTH_USER).strip()
+    if not isinstance(username, str) or not username.strip() or username != expected_username:
+        raise RuntimeError("invalid BOT0_AUTH_FILE username")
+    if not isinstance(password, str) or not password.strip():
+        raise RuntimeError("BOT0_AUTH_FILE password is required")
+    credential_digest = hashlib.sha256(f"{username}:{password}".encode("utf-8")).digest()
+    return AuthConfig(username=username, credential_digest=credential_digest)
+
+
+def configure_auth() -> AuthConfig:
+    """Load auth before the HTTP server is bound; failures remain fail-closed."""
+    global AUTH_CONFIG
+    AUTH_CONFIG = load_auth_config()
+    return AUTH_CONFIG
 
 
 def _finite_float(value: Any) -> float | None:
@@ -527,9 +574,50 @@ INDEX_HTML = """<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta n
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "bot0/4"
-    def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
-        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"); self.end_headers(); self.wfile.write(body)
+    def _send(self, status: HTTPStatus, body: bytes, content_type: str, *, extra_headers: dict[str, str] | None = None) -> None:
+        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
+        for key, value in (extra_headers or {}).items(): self.send_header(key, value)
+        self.end_headers(); self.wfile.write(body)
+
+    def _send_unauthorized(self) -> None:
+        self._send(HTTPStatus.UNAUTHORIZED, b'{"error":"unauthorized"}', "application/json; charset=utf-8", extra_headers={"WWW-Authenticate": f'Basic realm="{AUTH_REALM}"'})
+
+    def _is_authorized(self) -> bool:
+        config = AUTH_CONFIG
+        if config is None:
+            return False
+        headers = self.headers.get_all("Authorization", [])
+        if len(headers) != 1:
+            return False
+        header = headers[0]
+        try:
+            if len(header.encode("ascii")) > MAX_AUTH_HEADER_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if header.count(" ") != 1 or "\t" in header:
+            return False
+        scheme, encoded = header.split(" ", 1)
+        if scheme.lower() != "basic" or not encoded or len(encoded) > MAX_AUTH_B64_BYTES or len(encoded) % 4:
+            return False
+        try:
+            encoded_bytes = encoded.encode("ascii")
+            raw = base64.b64decode(encoded_bytes, validate=True)
+        except (binascii.Error, ValueError, UnicodeError):
+            return False
+        if len(raw) > MAX_AUTH_DECODED_BYTES or base64.b64encode(raw) != encoded_bytes:
+            return False
+        presented_digest = hashlib.sha256(raw).digest()
+        return hmac.compare_digest(presented_digest, config.credential_digest)
+
+    def _require_auth(self) -> bool:
+        if self._is_authorized():
+            return True
+        self._send_unauthorized()
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._require_auth(): return
         parsed = urlsplit(self.path)
         if parsed.path == "/": self._send(HTTPStatus.OK, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8"); return
         if parsed.path == "/api/health": self._send(HTTPStatus.OK, b'{"status":"ok","read_only":true}', "application/json; charset=utf-8"); return
@@ -541,17 +629,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b'{"error":"internal_error"}', "application/json; charset=utf-8")
     def do_POST(self) -> None:  # noqa: N802
+        if not self._require_auth(): return
         try:
             length = min(int(self.headers.get("Content-Length", "0")), MAX_BODY_BYTES)
             if length > 0: self.rfile.read(length)
         except (TypeError, ValueError): pass
         self._send(HTTPStatus.METHOD_NOT_ALLOWED, b'{"error":"get_only"}', "application/json; charset=utf-8")
-    do_PUT = do_POST; do_DELETE = do_POST
+    def do_HEAD(self) -> None:  # noqa: N802
+        if not self._require_auth(): return
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+        self.send_header("Allow", "GET")
+        self.end_headers()
+    do_PUT = do_POST; do_DELETE = do_POST; do_OPTIONS = do_HEAD; do_PATCH = do_POST; do_TRACE = do_POST; do_CONNECT = do_POST
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        if code == HTTPStatus.NOT_IMPLEMENTED and not self._is_authorized():
+            self._send_unauthorized()
+            return
+        super().send_error(code, message, explain)
     def log_message(self, fmt: str, *args: Any) -> None: return
 
 
 def production_gate_contract() -> dict[str, Any]:
-    return {"service": "bot0-dashboard", "configured_live_enabled_field": "configured_live_enabled", "allowed_methods": ["GET"], "source_mounts": "read_only", "broker_client_imports": False, "order_write_capability": False, "historical_attribution": "ledger_row_fields_only"}
+    return {"service": "bot0-dashboard", "configured_live_enabled_field": "configured_live_enabled", "allowed_methods": ["GET"], "source_mounts": "read_only", "broker_client_imports": False, "order_write_capability": False, "historical_attribution": "ledger_row_fields_only", "http_authentication": "basic_required"}
 
 
 def assert_read_only_ast() -> None:
@@ -564,6 +663,7 @@ def assert_read_only_ast() -> None:
 
 def main() -> None:
     assert_read_only_ast()
+    configure_auth()
     server = ThreadingHTTPServer((DEFAULT_HOST, DEFAULT_PORT), DashboardHandler)
     try: server.serve_forever()
     except KeyboardInterrupt: pass

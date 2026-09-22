@@ -1,7 +1,11 @@
 import ast
+import base64
 import csv
 import http.client
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -261,25 +265,124 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(sources["metadata"]["present"])
             self.assertEqual(sources["metadata"]["content_role"], "identity_only; not_accounting_input")
 
-    # Fixture 11: production AST/read-only boundary and HTTP methods.
-    def test_11_production_gate_and_get_only(self):
-        dashboard.assert_read_only_ast()
-        self.assertEqual(dashboard.production_gate_contract()["allowed_methods"], ["GET"])
+    def _start_authenticated_server(self, root: Path, password: str = "unit-test-secret"):
+        auth_file = root / "auth.json"
+        auth_file.write_text(json.dumps({"username": "bot0", "password": password}), encoding="utf-8")
+        env = {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}
+        patcher = mock.patch.dict(os.environ, env, clear=False)
+        patcher.start()
+        previous = dashboard.AUTH_CONFIG
+        dashboard.AUTH_CONFIG = dashboard.load_auth_config()
         server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        try:
-            host, port = server.server_address
-            connection = http.client.HTTPConnection(host, port, timeout=2)
-            connection.request("GET", "/api/health")
-            self.assertEqual(connection.getresponse().status, 200)
-            connection.request("POST", "/api/health", body=b"x")
-            self.assertEqual(connection.getresponse().status, 405)
-            connection.request("GET", "/etc/passwd")
-            self.assertEqual(connection.getresponse().status, 404)
-            connection.close()
-        finally:
-            server.shutdown(); server.server_close(); thread.join(timeout=2)
+        return server, thread, patcher, previous, password
+
+    # Fixture 11: production AST/read-only boundary and authenticated routes.
+    def test_11_production_gate_and_basic_auth_protects_all_routes(self):
+        dashboard.assert_read_only_ast()
+        contract = dashboard.production_gate_contract()
+        self.assertEqual(contract["allowed_methods"], ["GET"])
+        self.assertEqual(contract["http_authentication"], "basic_required")
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread, patcher, previous, password = self._start_authenticated_server(Path(tmp))
+            try:
+                host, port = server.server_address
+
+                def request(path: str, *, credentials: tuple[str, str] | None = None, method: str = "GET", authorization_headers: list[str] | None = None):
+                    connection = http.client.HTTPConnection(host, port, timeout=2)
+                    headers = {}
+                    if credentials is not None:
+                        token = base64.b64encode(f"{credentials[0]}:{credentials[1]}".encode()).decode()
+                        headers["Authorization"] = f"Basic {token}"
+                    if authorization_headers is None:
+                        connection.request(method, path, headers=headers)
+                    else:
+                        connection.putrequest(method, path)
+                        for value in authorization_headers:
+                            connection.putheader("Authorization", value)
+                        connection.endheaders()
+                    response = connection.getresponse()
+                    body = response.read()
+                    result = (response.status, dict(response.getheaders()), body)
+                    connection.close()
+                    return result
+
+                for path in ("/", "/api/health", "/api/summary", "/unknown"):
+                    status, headers, body = request(path)
+                    self.assertEqual(status, 401, path)
+                    self.assertEqual(headers.get("WWW-Authenticate"), 'Basic realm="bot0"')
+                    self.assertNotIn(password.encode(), body)
+                self.assertEqual(request("/unknown", method="HEAD")[0], 401)
+
+                status, headers, body = request("/api/health", credentials=("bot0", "wrong"))
+                self.assertEqual(status, 401)
+                self.assertEqual(headers.get("WWW-Authenticate"), 'Basic realm="bot0"')
+                self.assertNotIn(password.encode(), body)
+
+                valid_token = base64.b64encode(f"bot0:{password}".encode()).decode()
+                self.assertEqual(request("/api/health", authorization_headers=[f"Basic {valid_token}", f"Basic {valid_token}"])[0], 401)
+                self.assertEqual(request("/api/health", authorization_headers=["Basic not-base64"])[0], 401)
+                self.assertEqual(request("/api/health", authorization_headers=[f"Basic {valid_token}="])[0], 401)
+                self.assertEqual(request("/api/health", authorization_headers=["Basic " + "A" * (dashboard.MAX_AUTH_B64_BYTES + 4)])[0], 401)
+                self.assertEqual(request("/api/health", method="PROPFIND")[0], 401)
+
+                status, _, body = request("/api/health", credentials=("bot0", password))
+                self.assertEqual(status, 200)
+                self.assertIn(b'"status":"ok"', body)
+                self.assertEqual(request("/", credentials=("bot0", password))[0], 200)
+                self.assertEqual(request("/unknown", credentials=("bot0", password))[0], 404)
+                self.assertEqual(request("/api/health", credentials=("bot0", password), method="POST")[0], 405)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+                dashboard.AUTH_CONFIG = previous
+                patcher.stop()
+
+    def test_12_auth_startup_fails_closed_without_valid_password_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_file = Path(tmp) / "auth.json"
+            auth_file.write_text(json.dumps({"username": "bot0", "password": ""}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "password"):
+                    dashboard.load_auth_config()
+                with mock.patch.object(dashboard, "ThreadingHTTPServer") as server_ctor:
+                    with self.assertRaisesRegex(RuntimeError, "password"):
+                        dashboard.main()
+                    server_ctor.assert_not_called()
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("BOT0_AUTH_FILE", None)
+                with self.assertRaisesRegex(RuntimeError, "BOT0_AUTH_FILE"):
+                    dashboard.load_auth_config()
+
+    def test_13_auth_file_username_must_match_configured_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_file = Path(tmp) / "auth.json"
+            auth_file.write_text(json.dumps({"username": "other", "password": "unit-test-secret"}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "username"):
+                    dashboard.load_auth_config()
+
+    def test_14_healthcheck_reads_auth_file_without_secret_in_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, thread, patcher, previous, password = self._start_authenticated_server(Path(tmp))
+            try:
+                env = os.environ.copy()
+                env["BOT0_PORT"] = str(server.server_address[1])
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("healthcheck.py"))],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertNotIn(password, result.args)
+                self.assertNotIn(password, result.stdout)
+                self.assertNotIn(password, result.stderr)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+                dashboard.AUTH_CONFIG = previous
+                patcher.stop()
 
     def test_real_data_counts_if_available(self):
         path = Path(r"C:\Users\muuma\Downloads\logs\s23_trades.csv")

@@ -48,15 +48,44 @@ share one usability contract: only `live`/`shadow` rows with matching account
 currency and explicit profit units produce cumulative monetary values;
 `unknown` execution rows remain null and blocked.
 
-Build and run from the repository root with the compose service:
+For direct Windows browser access, the Compose service publishes
+`0.0.0.0:8230:8230`; open `http://<CentOS-IP>:8230/` and use the Basic auth
+identity in the external JSON file. The password file must stay outside Git.
+Create it on CentOS, for example:
+
+```bash
+sudo install -d -o 65532 -g 65532 -m 700 /etc/exness-bot
+sudo tee /etc/exness-bot/bot0-auth.json >/dev/null <<'EOF'
+{"username":"bot0","password":"<set-on-CentOS>"}
+EOF
+sudo chown 65532:65532 /etc/exness-bot/bot0-auth.json
+sudo chmod 400 /etc/exness-bot/bot0-auth.json
+printf 'BOT0_AUTH_FILE_HOST=/etc/exness-bot/bot0-auth.json\n' >> .env
+```
+
+The file is mounted read-only and the container process runs as UID/GID
+`65532:65532`, so the ownership and mode above let the process read the file
+while keeping it private on CentOS. Keep `.env` untracked. Create the auth file
+before building or starting the service, then run from the repository root:
 
 ```bash
 docker compose build exness-bot-0
 docker compose up -d exness-bot-0
 ```
 
-The default bind is `127.0.0.1:8230`. Put a separately authenticated reverse
-proxy or a private VPN boundary in front of it if remote access is needed.
+The endpoint uses HTTP Basic auth over plain HTTP. Credentials and dashboard
+data are therefore visible to anyone who can observe the network path; restrict
+port 8230 with the CentOS firewall or place HTTPS/reverse-proxy protection in
+front of it for untrusted networks. For the requested direct access, the
+firewall rule is:
+
+```bash
+sudo firewall-cmd --permanent --add-port=8230/tcp
+sudo firewall-cmd --reload
+```
+
+`.env` is protected by the repository `.gitignore`; never add the auth JSON or
+its password to tracked files.
 
 `python -m unittest discover -s bot0 -v` runs fixtures for the frozen
 contracts, including the real exported ledger count when it is available.
