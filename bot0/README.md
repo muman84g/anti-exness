@@ -16,15 +16,41 @@ ledger audits 525 closes: 494 direct and 31 unique entry joins. Ambiguous joins
 remain visible and are never silently assigned.
 
 Signal identity accepts row columns, semicolon key-value notes, and JSON notes.
-Historical attribution uses only ledger row fields and entry joins. Current
-params and current magic lists never backfill past rows. Metrics and curves are
-split by `live` and `shadow`, then by strategy and signal. The dashboard never
-presents a combined live/shadow PnL. Raw `ledger_profit` is shown separately
-with `unconfirmed` units. Realized PnL and PF require explicit account currency
-and an explicit matching profit unit on every row; otherwise they are null with
-an explicit blocked status. Deal counts and win rates remain visible as audit
-counts. Open position count and MTM are null because no read-only current
-position plus Bid/Ask snapshot is part of this service.
+Historical attribution uses only exact ledger identity fields and unique entry
+joins. Current params and current magic lists never backfill past rows. The main
+view contains only strategies and signals whose current `effective_enabled` is
+true. The identity check uses the exact current
+`(strategy_id, signal_id, signal_variant_id)` pair. A configured missing
+variant matches only a ledger row with a missing variant; it never absorbs an
+unexpected historical variant. Inactive and
+unmapped accepted rows remain visible in the audit section with counts; they
+are never remapped to a current strategy or signal.
+
+Metrics and curves are split by `live`, `shadow`, and `unknown`, then by
+strategy and signal. The dashboard never presents a combined live/shadow PnL.
+Verified realized PnL and PF require explicit account currency and a matching
+profit unit on every row; otherwise they remain null with an explicit blocked
+status. `raw_ledger_metrics` keeps exact `ledger_profit` and `profit` fields
+separate and groups each by exact strategy, signal, variant, execution class,
+unit, and currency. Raw PF is defined as positive raw values divided by the absolute sum
+of negative raw values and is null when there is no negative value. Its
+provenance and value coverage are returned with every group.
+
+Each current signal gets self-contained SVG chart series for the request's
+`as_of_utc` window. The window starts one calendar month before `as_of_utc`,
+clamping the day to the earlier month's last day, and ends at `as_of_utc` with
+the half-open interval `[start,end)`. It starts at zero and uses the same
+accepted rows and exact raw metric series as `raw_ledger_metrics`, including
+strategy, signal, variant, execution class, value field, unit, and currency.
+Different series
+are never combined. Missing values stay in the coverage denominator, and empty
+and stale-empty states are explicit. No CDN or chart library is required.
+Open position count and MTM are null because no read-only current position plus
+Bid/Ask snapshot is part of this service.
+
+For a reproducible chart end, call `GET /api/summary?as_of_utc=2026-02-28T12:00:00Z`.
+The optional `from` and `to` parameters still limit the summary source rows;
+the chart reports the intersection with its request-relative window.
 
 The service cannot prove bot liveness from a file mtime. Runtime liveness is
 `unknown`. The configured live gate is exposed as `configured_live_enabled` and
@@ -44,8 +70,9 @@ also exposes each optional source under `sources.optional` using a safe label,
 basename, file identity, and hash. These optional files are identity-only
 inputs; they are not parsed or included in accounting. It never replaces a
 good snapshot with an empty-success value. Monetary metrics and equity curves
-share one usability contract: only `live`/`shadow` rows with matching account
-currency and explicit profit units produce cumulative monetary values;
+share one usability contract: only non-empty `live`/`shadow` rows with matching
+account currency and explicit profit units produce cumulative monetary values;
+empty buckets keep realized PnL, PF, and currency null with `blocked_no_values`;
 `unknown` execution rows remain null and blocked.
 
 For direct Windows browser access, the Compose service publishes

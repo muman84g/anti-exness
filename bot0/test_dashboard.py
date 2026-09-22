@@ -17,7 +17,7 @@ import dashboard
 
 FIELDS = [
     "timestamp_utc", "event", "strategy_id", "signal_id", "lane_id", "magic",
-    "symbol", "opportunity_id", "basket_id", "ticket", "position_identifier",
+    "symbol", "opportunity_id", "basket_id", "ticket", "position_identifier", "signal_variant_id",
     "deal_id", "profit", "profit_unit", "ledger_profit", "currency",
     "execution_class", "live", "deal_time_utc", "note",
 ]
@@ -27,6 +27,11 @@ def write_sources(root: Path, config: dict, rows: list[dict]) -> dashboard.Snaps
     params = root / "params.json"
     trades = root / "trades.csv"
     log = root / "bot.log"
+    config = dict(config)
+    if not any(key in config for key in ("strategies", "morning_session_strategies", "midday_session_strategies", "signals", "signal_definitions")):
+        config.setdefault("enabled", True)
+        config.setdefault("live_trading_enabled", True)
+        config["strategies"] = [{"id": "s", "enabled": True, "signal_id": "sig"}]
     params.write_text(json.dumps(config), encoding="utf-8")
     with trades.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
@@ -73,7 +78,8 @@ class DashboardTests(unittest.TestCase):
             collector = write_sources(Path(tmp), {"account_currency": "USD", "strategies": [{"id": "current", "signal_id": "new"}]}, [close("d", signal="")])
             summary = dashboard.build_summary(collector=collector)
             self.assertEqual(summary["historical_attribution_basis"], "ledger_row_fields_only; current_params_never_backfill_history")
-            self.assertEqual(summary["metrics"]["by_signal"][0]["scope"], "unknown")
+            self.assertEqual(summary["metrics"]["by_signal"], [])
+            self.assertEqual(summary["audit"]["visibility"]["hidden_unmapped_strategy"], 1)
 
     # Fixture 4: signal formats remain parser-compatible.
     def test_04_signal_formats(self):
@@ -114,8 +120,9 @@ class DashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             collector = write_sources(Path(tmp), {"account_currency": "USD"}, [close("d", profit="3")])
             summary = dashboard.build_summary(collector=collector)
-            self.assertEqual(summary["accounting"]["ledger_profit"], 3.0)
-            self.assertEqual(summary["accounting"]["ledger_profit_unit_status"], "unconfirmed")
+            self.assertIsNone(summary["accounting"]["ledger_profit"])
+            self.assertEqual(summary["accounting"]["ledger_profit_unit_status"], "raw_unverified_no_series")
+            self.assertIn("profit", {item["value_field"] for item in summary["raw_ledger_metrics"]})
             self.assertIsNone(summary["accounting"]["execution_classes"]["live"]["realized_pnl"])
 
     # Fixture 7: currency plus explicit unit unlocks realized PnL.
@@ -383,6 +390,196 @@ class DashboardTests(unittest.TestCase):
                 server.shutdown(); server.server_close(); thread.join(timeout=2)
                 dashboard.AUTH_CONFIG = previous
                 patcher.stop()
+
+    def test_15_main_view_filters_inactive_and_unmapped_identities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [
+                {"id": "active", "enabled": True, "signal_id": "sig_active"},
+                {"id": "off", "enabled": False, "signal_id": "sig_off"},
+            ]}
+            rows = [
+                close("active", signal="sig_active", strategy_id="active", ledger_profit="2", unit="USD", currency="USD"),
+                close("off", signal="sig_off", strategy_id="off", ledger_profit="3", unit="USD", currency="USD"),
+                close("unknown", signal="sig_unknown", strategy_id="old", ledger_profit="4", unit="USD", currency="USD"),
+            ]
+            collector = write_sources(Path(tmp), config, rows)
+            summary = dashboard.build_summary(collector=collector)
+            self.assertEqual([item["scope"] for item in summary["metrics"]["by_strategy"]], ["active"])
+            self.assertEqual([item["scope"] for item in summary["metrics"]["by_signal"]], ["sig_active"])
+            self.assertEqual(summary["audit"]["visibility"]["hidden_rows"], 2)
+            self.assertEqual(summary["audit"]["visibility"]["hidden_inactive_strategy"], 1)
+            self.assertEqual(summary["audit"]["visibility"]["hidden_unmapped_strategy"], 1)
+            self.assertNotIn("sig_off", {item["scope"] for item in summary["metrics"]["by_signal"]})
+
+    def test_16_verified_metrics_stay_null_and_raw_fields_do_not_mix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [close("d", profit="1", ledger_profit="2", unit="", currency="")]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), {"account_currency": "USD"}, rows))
+            self.assertIsNone(summary["metrics"]["by_signal"][0]["realized_pnl"])
+            raw = summary["raw_ledger_metrics"]
+            self.assertEqual({item["value_field"] for item in raw}, {"ledger_profit", "profit"})
+            self.assertEqual({item["raw_value_total"] for item in raw}, {1.0, 2.0})
+            self.assertEqual({item["aggregation_status"] for item in raw}, {"raw_unverified"})
+
+    def test_17_raw_pf_edge_cases_are_defined_without_zero_division(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [close("win", profit="2", ledger_profit="2"), close("loss", profit="-1", ledger_profit="-1")]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), {}, rows))
+            by_field = {item["value_field"]: item for item in summary["raw_ledger_metrics"]}
+            self.assertEqual(by_field["ledger_profit"]["raw_pf"], 2.0)
+            self.assertEqual(by_field["ledger_profit"]["raw_pf_status"], "defined")
+            win_root = Path(tmp) / "win"
+            win_root.mkdir()
+            only_win = dashboard.build_summary(collector=write_sources(win_root, {}, [close("win", profit="2", ledger_profit="2")]))
+            self.assertIsNone(only_win["raw_ledger_metrics"][0]["raw_pf"])
+            self.assertEqual(only_win["raw_ledger_metrics"][0]["raw_pf_status"], "no_negative_values")
+
+    def test_18_signal_chart_uses_utc_half_open_month_and_zero_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [{"id": "s", "enabled": True, "signal_id": "sig"}]}
+            rows = [
+                close("at_start", signal="sig", ledger_profit="2", note="deal_time_utc=2026-01-28T12:00:00Z"),
+                close("middle", signal="sig", ledger_profit="-1", note="deal_time_utc=2026-01-31T00:00:00Z"),
+                close("at_end", signal="sig", ledger_profit="9", note="deal_time_utc=2026-02-28T12:00:00Z"),
+            ]
+            collector = write_sources(Path(tmp), config, rows)
+            audit = collector.get().audit
+            charts = dashboard._signal_charts(list(audit.closes), {"sig"}, snapshot_status="fresh", now=dashboard._parse_utc("2026-02-28T12:00:00Z"), active_pairs={("s", "sig", None)})
+            chart = next(item for item in charts if item["value_field"] == "ledger_profit")
+            self.assertEqual(chart["period"], {"from_utc": "2026-01-28T12:00:00Z", "to_utc_exclusive": "2026-02-28T12:00:00Z"})
+            self.assertEqual([point["deal_id"] for point in chart["points"]], [None, "at_start", "middle"])
+            self.assertEqual([point["cumulative_value"] for point in chart["points"]], [0.0, 2.0, 1.0])
+            self.assertIn("<svg", chart["svg"])
+
+    def test_19_identity_join_does_not_infer_from_magic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [
+                {"event": "entry", "deal_id": "e", "magic": "42", "opportunity_id": "joined"},
+                close("d", opp="", ticket="", pos="", magic="42"),
+            ]
+            audit = write_sources(Path(tmp), {}, rows).get().audit
+            self.assertEqual(audit.closes[0].opportunity_id, "")
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+            self.assertEqual(audit.unique_entry_join_closes, 0)
+
+    def test_20_mixed_units_and_currencies_are_separate_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [
+                close("usd", profit="1", ledger_profit="2", unit="USD", currency="USD"),
+                close("jpy", profit="3", ledger_profit="4", unit="JPY", currency="JPY"),
+                close("unknown", profit="5", ledger_profit="6", unit="", currency=""),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), {}, rows))
+            ledger_groups = [item for item in summary["raw_ledger_metrics"] if item["value_field"] == "ledger_profit"]
+            self.assertEqual({(item["value_unit"], item["currency"]) for item in ledger_groups}, {("USD", "USD"), ("JPY", "JPY"), (None, None)})
+
+    def test_21_enabled_identity_requires_exact_strategy_signal_pair_and_variant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [
+                {"id": "s1", "enabled": True, "signal_id": "shared", "signal_variant_id": "v1"},
+                {"id": "s2", "enabled": True, "signal_id": "shared", "signal_variant_id": "v2"},
+            ]}
+            rows = [
+                close("ok", strategy_id="s1", signal="shared", signal_variant_id="v1", ledger_profit="1"),
+                close("wrong_signal", strategy_id="s1", signal="other", ledger_profit="2"),
+                close("wrong_variant", strategy_id="s1", signal="shared", signal_variant_id="v2", ledger_profit="3"),
+                close("ok2", strategy_id="s2", signal="shared", signal_variant_id="v2", ledger_profit="4"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows))
+            self.assertEqual(summary["audit"]["visible_rows_in_period"], 2)
+            self.assertEqual(summary["audit"]["visibility"]["pair_mismatch_rows"], 1)
+            self.assertEqual(summary["audit"]["visibility"]["unmapped_signal_rows"], 1)
+            self.assertEqual(summary["accounting"]["closed_deal_count"], 2)
+
+    def test_22_hidden_rows_do_not_enter_accounting_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [
+                {"id": "active", "enabled": True, "signal_id": "active_signal"},
+                {"id": "off", "enabled": False, "signal_id": "off_signal"},
+            ]}
+            rows = [
+                close("active", strategy_id="active", signal="active_signal", opp="visible"),
+                close("off", strategy_id="off", signal="off_signal", opp="hidden"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows))
+            self.assertEqual(summary["accounting"]["opportunity_attribution"]["direct"], 1)
+            self.assertEqual(summary["accounting"]["closed_deal_count"], 1)
+
+    def test_23_chart_series_matches_raw_metric_and_empty_stale_is_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [{"id": "s", "enabled": True, "signal_id": "sig"}]}
+            row = close("missing_ledger", signal="sig", profit="1", ledger_profit="", note="deal_time_utc=2026-01-15T00:00:00Z")
+            collector = write_sources(Path(tmp), config, [row])
+            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-02-01T00:00:00Z"))
+            ledger_raw = [item for item in summary["raw_ledger_metrics"] if item["value_field"] == "ledger_profit"]
+            ledger_chart = [item for item in summary["signal_charts"] if item["value_field"] == "ledger_profit"]
+            self.assertEqual(len(ledger_raw), len(ledger_chart))
+            self.assertEqual(ledger_raw[0]["coverage"]["denominator_close_rows"], 1)
+            self.assertEqual(ledger_raw[0]["coverage"]["missing_value_rows"], 1)
+            self.assertEqual(ledger_chart[0]["coverage"]["missing_value_rows"], 1)
+            empty = dashboard._signal_charts([], {"sig"}, snapshot_status="stale", now=dashboard._parse_utc("2026-02-01T00:00:00Z"), active_pairs={("s", "sig", None)})
+            self.assertEqual(empty[0]["status"], "stale_empty")
+            self.assertEqual(empty[0]["points"][0]["cumulative_value"], 0.0)
+
+    def test_24_top_raw_total_is_null_for_multiple_exact_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [
+                {"id": "s1", "enabled": True, "signal_id": "sig1"},
+                {"id": "s2", "enabled": True, "signal_id": "sig2"},
+            ]}
+            rows = [close("a", strategy_id="s1", signal="sig1", ledger_profit="2", unit="USD", currency="USD"), close("b", strategy_id="s2", signal="sig2", ledger_profit="3", unit="USD", currency="USD")]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows))
+            self.assertIsNone(summary["accounting"]["ledger_profit"])
+            self.assertEqual(summary["accounting"]["ledger_profit_unit_status"], "raw_unverified_multiple_series")
+            self.assertIn("multiple_series", summary["accounting"]["ledger_profit_reason"])
+
+    def test_25_empty_execution_bucket_cannot_claim_currency_or_verified_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"account_currency": "USD", "enabled": True, "live_trading_enabled": True,
+                      "strategies": [{"id": "s", "enabled": True, "signal_id": "sig"}]}
+            row = close("shadow", execution_class="shadow", live="False", profit="2", unit="USD", currency="USD")
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, [row]))
+            for execution in ("live", "shadow"):
+                metric = summary["accounting"]["execution_classes"][execution]
+                self.assertEqual(metric["deal_count"], 0 if execution == "live" else 1)
+                if execution == "live":
+                    self.assertIsNone(metric["realized_pnl"])
+                    self.assertIsNone(metric["profit_factor"])
+                    self.assertIsNone(metric["currency"])
+                    self.assertEqual(metric["aggregation_status"], "blocked_no_values")
+
+    def test_26_none_variant_is_exact_and_variant_is_in_raw_and_chart_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True,
+                      "strategies": [{"id": "s", "enabled": True, "signal_id": "sig"}]}
+            rows = [
+                close("none", signal="sig", ledger_profit="1", unit="USD", currency="USD"),
+                close("unexpected", signal="sig", signal_variant_id="v1", ledger_profit="2", unit="USD", currency="USD"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows))
+            self.assertEqual(summary["audit"]["visible_rows_in_period"], 1)
+            self.assertEqual(summary["audit"]["visibility"]["pair_mismatch_rows"], 1)
+            self.assertEqual({item["signal_variant_id"] for item in summary["raw_ledger_metrics"]}, {None})
+            self.assertEqual({item["signal_variant_id"] for item in summary["signal_charts"]}, {None})
+
+    def test_27_same_strategy_signal_variants_are_separate_raw_and_chart_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True,
+                      "strategies": [{"id": "s", "enabled": True}],
+                      "signals": [
+                          {"strategy_id": "s", "signal_id": "sig", "signal_variant_id": "v1", "enabled": True},
+                          {"strategy_id": "s", "signal_id": "sig", "signal_variant_id": "v2", "enabled": True},
+                      ]}
+            rows = [
+                close("v1", signal="sig", signal_variant_id="v1", ledger_profit="1", unit="USD", currency="USD"),
+                close("v2", signal="sig", signal_variant_id="v2", ledger_profit="2", unit="USD", currency="USD"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows))
+            raw = [item for item in summary["raw_ledger_metrics"] if item["value_field"] == "ledger_profit"]
+            charts = [item for item in summary["signal_charts"] if item["value_field"] == "ledger_profit"]
+            self.assertEqual({item["signal_variant_id"] for item in raw}, {"v1", "v2"})
+            self.assertEqual({item["signal_variant_id"] for item in charts}, {"v1", "v2"})
+            self.assertEqual({item["raw_value_total"] for item in raw}, {1.0, 2.0})
 
     def test_real_data_counts_if_available(self):
         path = Path(r"C:\Users\muuma\Downloads\logs\s23_trades.csv")
