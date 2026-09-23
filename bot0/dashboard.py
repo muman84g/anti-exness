@@ -38,8 +38,464 @@ BOT23_METADATA = Path(os.environ["BOT23_METADATA_PATH"]) if os.environ.get("BOT2
 COLLECTOR_TTL_SECONDS = max(0.1, float(os.environ.get("BOT0_COLLECTOR_TTL_SECONDS", "30")))
 MAX_BODY_BYTES = 1_000_000
 DEAL_TIME_RE = re.compile(r"(?:^|;)deal_time_utc=([^;\s]+)")
-KEY_VALUE_RE = re.compile(r"(?:^|;)([A-Za-z][A-Za-z0-9_]*)=([^;]*)")
+KEY_VALUE_RE = re.compile(r"(?:^|;)\s*([A-Za-z][A-Za-z0-9_]*)\s*=([^;]*)")
 EXECUTION_CLASSES = ("live", "shadow", "unknown")
+
+# Narrow historical identity contract for research_entries_v142 only.
+_RESEARCH_LANES = {
+    "research_nwave_restart_lane_25": ("25", "230047", "nwv_checkpoint_restart", {"nwv_checkpoint_restart"}, "LONG", "s23_rs_l25"),
+    "research_alt_dbreak_lane_26": ("26", "230048", "alternation_double_break", {"alternation_double_break"}, "LONG", "s23_rs_l26"),
+    "research_path_curvature_lane_27": ("27", "230049", "curvature_fade_short", {"curvature_fade_short"}, "LONG", "s23_rs_l27"),
+    "research_path_speed_lane_28": ("28", "230050", "speed_reversal_long", {"speed_reversal_long"}, "SHORT", "s23_rs_l28"),
+    "research_nwave_centroid_lane_29": ("29", "230051", "nwv_base_centroid_migration", {"nwv_base_centroid_migration"}, "SHORT", "s23_rs_l29"),
+    "research_ir_union_lane_30": ("30", "230052", "ir_original_priority_union", {"interrupted_reapproach", "IR_pause_reapproach"}, "LONG", "s23_rs_l30"),
+}
+_RESEARCH_OPPORTUNITY_TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\+00:00\Z")
+_NY0530_SIGNAL = "t0530_edge_break_fade"
+_NY0530_LANES = {
+    f"ny0530_edge_lane_{index}": (str(index + 17), str(230039 + index), f"s23_ed_l{index}")
+    for index in range(1, 5)
+}
+_SIGNAL_ALIASES = ("signal_id", "configured_signal_id", "signal")
+_VARIANT_ALIASES = ("signal_variant_id", "variant", "spec_id")
+_OWNER_KEYS = ("owner_magic", "owner_comment", "close_deal_magic")
+_PROTECTED_NOTE_KEYS = set(_SIGNAL_ALIASES + _VARIANT_ALIASES + _OWNER_KEYS + (
+    "opportunity_id", "strategy_id", "lane_id", "magic", "symbol", "mt5_symbol", "side",
+    "basket_id", "ticket", "position_identifier", "live", "signal_bar_time", "event_time",
+    "release_time", "available_time", "decision_time", "timestamp_utc", "deal_time_utc",
+))
+
+
+def _canonical_key(value: str) -> str:
+    return value.strip().translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+
+
+def _strict_note_fields(note: str, *, family: str, event: str, expected_variant: str) -> tuple[dict[str, list[str]], str | None]:
+    """Parse protected note evidence as one unambiguous JSON or semicolon format."""
+    text = (note or "").strip()
+    if not text:
+        return {}, None
+    fields: dict[str, list[str]] = {}
+    if text.startswith(("{", "[")):
+        class ObjectPairs(list):
+            pass
+        duplicate = False
+        nested_protected = False
+
+        def keep_pairs(pairs: list[tuple[str, Any]]) -> ObjectPairs:
+            nonlocal duplicate
+            output = ObjectPairs()
+            seen: set[str] = set()
+            for key, value in pairs:
+                canonical = _canonical_key(key) if isinstance(key, str) else ""
+                if canonical in seen:
+                    duplicate = True
+                seen.add(canonical)
+                output.append((canonical, value))
+            return output
+
+        try:
+            parsed = json.loads(text, object_pairs_hook=keep_pairs)
+        except (json.JSONDecodeError, TypeError):
+            return {}, f"{family}_note_syntax_invalid"
+        if not isinstance(parsed, ObjectPairs):
+            return {}, f"{family}_note_json_root_invalid"
+
+        def collect(value: Any, *, top_level: bool) -> str | None:
+            nonlocal nested_protected
+            if isinstance(value, ObjectPairs):
+                for key, child in value:
+                    if key in _PROTECTED_NOTE_KEYS:
+                        if not top_level:
+                            nested_protected = True
+                            continue
+                        if not isinstance(child, str) or not child.strip():
+                            return f"{family}_note_empty_or_nonstring_protected_value"
+                        fields.setdefault(key, []).append(child.strip())
+                    if isinstance(child, (ObjectPairs, list)):
+                        reason = collect(child, top_level=False)
+                        if reason:
+                            return reason
+            elif isinstance(value, list):
+                for child in value:
+                    reason = collect(child, top_level=False)
+                    if reason:
+                        return reason
+            return None
+
+        reason = collect(parsed, top_level=True)
+        if reason:
+            return {}, reason
+        if duplicate:
+            return {}, f"{family}_note_duplicate_key"
+        if nested_protected:
+            return {}, f"{family}_note_nested_protected_key"
+        return fields, None
+
+    if ";" in text or "=" in text:
+        seen: set[str] = set()
+        for segment in text.split(";"):
+            match = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*=(.*)", segment)
+            if not match:
+                return {}, f"{family}_note_syntax_invalid"
+            key, raw_value = _canonical_key(match.group(1)), match.group(2)
+            if key in seen:
+                return {}, f"{family}_note_duplicate_key"
+            seen.add(key)
+            value = raw_value.strip()
+            if key in _PROTECTED_NOTE_KEYS:
+                if not value:
+                    return {}, f"{family}_note_empty_protected_value"
+                fields.setdefault(key, []).append(value)
+        return fields, None
+
+    if family == "research" and event in {"entry", "position_open_confirmed", "position_open"}:
+        if text != expected_variant:
+            return {}, "research_bare_note_variant_mismatch"
+        return {"variant": [text]}, None
+    return {}, None
+
+
+def _research_opportunity(value: str) -> tuple[str, datetime, str, str, str] | None:
+    """Parse v142 identity into symbol, entry clock, signal, variant, and side."""
+    parts = value.split("|")
+    if len(parts) != 5 or not all(parts):
+        return None
+    symbol, stamp, signal, variant, side = parts
+    if not _RESEARCH_OPPORTUNITY_TS.fullmatch(stamp):
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo != timezone.utc:
+        return None
+    if not re.fullmatch(r"[A-Z0-9._-]{1,32}", symbol):
+        return None
+    return symbol, parsed, signal, variant, side
+
+
+def _research_owner_conflict(row: dict[str, str], expected: tuple[str, str, str, set[str], str, str], signal: str, variant: str, side: str, symbol: str) -> str | None:
+    lane, magic, expected_signal, variants, expected_side, comment = expected
+    reason = _row_identity_note_reason(
+        row, "research", signal, variant,
+        {"owner_magic": magic, "owner_comment": comment, "close_deal_magic": magic},
+        {"lane_id": lane, "magic": magic, "symbol": symbol, "mt5_symbol": symbol, "side": side},
+    )
+    if reason:
+        return reason
+    fields = {key: str(row.get(key, "")).strip() for key in ("lane_id", "magic", "symbol", "mt5_symbol", "side")}
+    if fields["lane_id"] != lane or fields["magic"] != magic or fields["symbol"] != symbol or fields["mt5_symbol"] != symbol or fields["side"] != side:
+        return "research_lane_identity_mismatch"
+    if signal != expected_signal or variant not in variants or side != expected_side:
+        return "research_opportunity_signal_variant_mismatch"
+    explicit_signal, explicit_variant = _signal_fields(row)
+    if explicit_signal and explicit_signal != signal:
+        return "research_explicit_signal_mismatch"
+    # Entry note is the source-defined variant; close notes can instead contain owner metadata.
+    note = (row.get("note") or "").strip()
+    if note in variants and note != variant:
+        return "research_entry_variant_note_mismatch"
+    if explicit_variant and explicit_variant != variant:
+        return "research_explicit_variant_mismatch"
+    return None
+
+
+def _row_identity_note_reason(row: dict[str, str], family: str, signal: str, variant: str,
+                              expected_owner: dict[str, str], expected_fields: dict[str, str]) -> str | None:
+    note_fields, reason = _strict_note_fields(
+        row.get("note", ""), family=family, event=row.get("event", ""), expected_variant=variant,
+    )
+    if reason:
+        return reason
+    alias_groups = (_SIGNAL_ALIASES, _VARIANT_ALIASES)
+    expected_aliases = (signal, variant)
+    for keys, expected_value in zip(alias_groups, expected_aliases):
+        values = [str(row.get(key, "")).strip() for key in keys if str(row.get(key, "")).strip()]
+        values.extend(value for key in keys for value in note_fields.get(key, []))
+        if len(set(values)) > 1:
+            return f"{family}_identity_alias_conflict"
+        if values and any(value != expected_value for value in values):
+            return f"{family}_identity_expected_mismatch"
+    for key, expected_value in expected_owner.items():
+        values = [str(row.get(key, "")).strip() for _ in (0,) if str(row.get(key, "")).strip()]
+        values.extend(note_fields.get(key, []))
+        if len(set(values)) > 1:
+            return f"{family}_identity_alias_conflict"
+        if values and any(value != expected_value for value in values):
+            return f"{family}_identity_expected_mismatch"
+    for key, note_values in note_fields.items():
+        column_value = str(row.get(key, "")).strip()
+        if column_value and any(value != column_value for value in note_values):
+            return f"{family}_identity_alias_conflict"
+        expected_value = expected_fields.get(key)
+        if expected_value is not None and any(value != expected_value for value in note_values):
+            return f"{family}_identity_expected_mismatch"
+    return None
+
+
+def _research_entry_close_reason(entry: dict[str, str], row: dict[str, str], expected: tuple[str, str, str, set[str], str, str],
+                                signal: str, variant: str, side: str, symbol: str, opportunity_time: datetime,
+                                close_time: datetime, rows: list[dict[str, str]], opportunity: str) -> str | None:
+    for candidate in (entry, row):
+        reason = _research_owner_conflict(candidate, expected, signal, variant, side, symbol)
+        if reason:
+            return reason
+    keys = ("strategy_id", "lane_id", "magic", "symbol", "mt5_symbol", "side", "basket_id", "ticket", "live")
+    if any(not str(entry.get(key, "")).strip() or entry.get(key, "").strip() != row.get(key, "").strip() for key in keys):
+        return "research_entry_close_identity_mismatch"
+    if _parse_bool(entry.get("live")) is None or _parse_bool(entry.get("live")) != _parse_bool(row.get("live")):
+        return "research_entry_close_live_mismatch"
+    if not entry.get("ticket", "").strip():
+        return "research_ticket_missing"
+    entry_position = entry.get("position_identifier", "").strip()
+    closed_position_id = row.get("position_identifier", "").strip()
+    if entry_position and closed_position_id and entry_position != closed_position_id:
+        return "research_position_identifier_mismatch"
+    if entry_position and not closed_position_id and entry_position != row.get("ticket", "").strip():
+        return "research_position_identifier_mismatch"
+    if closed_position_id and not entry_position and closed_position_id != entry.get("ticket", "").strip():
+        return "research_position_identifier_mismatch"
+    if _parse_utc(entry.get("signal_bar_time")) != opportunity_time:
+        return "research_entry_signal_bar_mismatch"
+    event_time = _parse_utc(entry.get("event_time"))
+    if event_time is not None and event_time != opportunity_time:
+        return "research_entry_event_time_mismatch"
+    entry_time = _parse_utc(entry.get("timestamp_utc"))
+    if entry_time is None or entry_time > close_time:
+        return "research_entry_after_broker_close"
+    if entry_time < opportunity_time:
+        return "research_entry_before_opportunity_bar"
+    identities = {value for value in (entry.get("ticket", "").strip(), entry_position, closed_position_id) if value}
+    for other in rows:
+        if other is entry or other is row:
+            continue
+        other_ids = {str(other.get(key, "")).strip() for key in ("ticket", "position_identifier") if str(other.get(key, "")).strip()}
+        if not identities.intersection(other_ids):
+            continue
+        if other.get("event") not in {"entry", "position_open_confirmed", "position_open", "position_close_confirmed", "position_lifecycle_recovered"}:
+            continue
+        evidence_reason = _row_identity_note_reason(
+            other, "research", signal, variant,
+            {"owner_magic": expected[1], "owner_comment": expected[5], "close_deal_magic": expected[1]},
+            {"strategy_id": entry.get("strategy_id", "").strip(), "lane_id": expected[0],
+             "magic": expected[1], "symbol": symbol, "mt5_symbol": symbol, "side": side,
+             "basket_id": entry.get("basket_id", "").strip(), "ticket": entry.get("ticket", "").strip(),
+             "live": entry.get("live", "").strip(), "opportunity_id": opportunity},
+        )
+        if evidence_reason:
+            return "research_conflicting_ticket_position_row"
+        if other.get("event") in {"entry", "position_open_confirmed", "position_open", "position_close_confirmed", "position_lifecycle_recovered"}:
+            recovery_row = other.get("event") == "position_lifecycle_recovered"
+            required_identity_fields = ("strategy_id", "lane_id", "magic", "symbol", "mt5_symbol",
+                                        "basket_id", "ticket", "live")
+            if not recovery_row:
+                required_identity_fields += ("side", "opportunity_id")
+            if any(not str(other.get(key, "")).strip()
+                   or str(other.get(key, "")).strip() != str(entry.get(key, "")).strip()
+                   for key in required_identity_fields):
+                return "research_conflicting_ticket_position_row"
+            if recovery_row and any(str(other.get(key, "")).strip()
+                                    and str(other.get(key, "")).strip() != expected_value
+                                    for key, expected_value in (("side", side), ("opportunity_id", opportunity))):
+                return "research_conflicting_ticket_position_row"
+            other_position = str(other.get("position_identifier", "")).strip()
+            if other_position and entry_position and other_position != entry_position:
+                return "research_conflicting_ticket_position_row"
+            if other_position and not entry_position and other_position != entry.get("ticket", "").strip():
+                return "research_conflicting_ticket_position_row"
+            if recovery_row:
+                recovery_time = _parse_utc(other.get("timestamp_utc"))
+                if recovery_time is None or not entry_time <= recovery_time <= close_time:
+                    return "research_conflicting_ticket_position_row"
+        for key in ("strategy_id", "lane_id", "magic", "symbol", "mt5_symbol", "side", "basket_id", "opportunity_id"):
+            value = str(other.get(key, "")).strip()
+            expected_value = opportunity if key == "opportunity_id" else str(entry.get(key, "")).strip()
+            if value and value != expected_value:
+                return "research_conflicting_ticket_position_row"
+        other_live = _parse_bool(other.get("live"))
+        if other.get("live", "").strip() and (other_live is None or other_live != _parse_bool(entry.get("live"))):
+            return "research_conflicting_ticket_position_row"
+    return None
+
+
+def _ny0530_opportunity(value: str) -> tuple[str, datetime, str] | None:
+    """Parse lane 18-21 identity: physical symbol, UTC signal bar, signal, side."""
+    parts = value.split("|")
+    if len(parts) != 4 or not all(parts):
+        return None
+    symbol, stamp, signal, side = parts
+    if not _RESEARCH_OPPORTUNITY_TS.fullmatch(stamp) or signal != _NY0530_SIGNAL or side not in {"LONG", "SHORT"}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo != timezone.utc or not re.fullmatch(r"[A-Z0-9._-]{1,32}", symbol):
+        return None
+    return symbol, parsed, side
+
+
+def _ny0530_entry_close_match(entry: dict[str, str], row: dict[str, str], expected_strategy: str,
+                               expected: tuple[str, str, str], opportunity: str, parsed: tuple[str, datetime, str],
+                               close_time: datetime, all_rows: list[dict[str, str]]) -> tuple[str | None, str | None]:
+    lane, magic, owner_comment = expected
+    symbol, signal_bar, side = parsed
+    expected_owner = {"owner_magic": magic, "owner_comment": owner_comment, "close_deal_magic": magic}
+    expected_fields = {"strategy_id": expected_strategy, "lane_id": lane, "magic": magic,
+                       "symbol": symbol, "mt5_symbol": symbol, "side": side,
+                       "opportunity_id": opportunity, "basket_id": entry.get("basket_id", "").strip(),
+                       "ticket": entry.get("ticket", "").strip(), "live": entry.get("live", "").strip()}
+    for candidate in (entry, row):
+        reason = _row_identity_note_reason(candidate, "ny0530", _NY0530_SIGNAL, "", expected_owner, expected_fields)
+        if reason:
+            return None, reason
+    entry_symbol = entry.get("symbol", "").strip()
+    close_symbol = row.get("symbol", "").strip()
+    if any((
+        entry.get("opportunity_id", "").strip() != opportunity,
+        row.get("opportunity_id", "").strip() != opportunity,
+        entry.get("strategy_id", "").strip() != expected_strategy,
+        row.get("strategy_id", "").strip() != expected_strategy,
+        entry.get("lane_id", "").strip() != lane,
+        row.get("lane_id", "").strip() != lane,
+        entry.get("magic", "").strip() != magic,
+        row.get("magic", "").strip() != magic,
+        entry_symbol != symbol,
+        close_symbol != symbol,
+        entry.get("symbol", "").strip() != row.get("symbol", "").strip(),
+        entry.get("mt5_symbol", "").strip() != symbol,
+        row.get("mt5_symbol", "").strip() != symbol,
+        entry.get("mt5_symbol", "").strip() != row.get("mt5_symbol", "").strip(),
+        entry.get("side", "").strip() != side,
+        row.get("side", "").strip() != side,
+        not entry.get("basket_id", "").strip(),
+        entry.get("basket_id", "").strip() != row.get("basket_id", "").strip(),
+        not entry.get("ticket", "").strip(),
+        entry.get("ticket", "").strip() != row.get("ticket", "").strip(),
+        _parse_utc(entry.get("signal_bar_time")) != signal_bar,
+        _parse_utc(entry.get("event_time")) != signal_bar,
+        _parse_bool(entry.get("live")) is None,
+        _parse_bool(entry.get("live")) != _parse_bool(row.get("live")),
+    )):
+        return None, "ny0530_entry_close_identity_mismatch"
+    release = _parse_utc(entry.get("release_time"))
+    available = _parse_utc(entry.get("available_time"))
+    decision = _parse_utc(entry.get("decision_time"))
+    entry_time = _parse_utc(entry.get("timestamp_utc"))
+    if not all((release, available, decision, entry_time)) or not (release <= available <= decision <= entry_time <= close_time):
+        return None, "ny0530_entry_close_clock_order_invalid"
+    entry_position = entry.get("position_identifier", "").strip()
+    position_from_close = row.get("position_identifier", "").strip()
+    if entry_position and position_from_close and entry_position != position_from_close:
+        return None, "ny0530_position_identifier_mismatch"
+    if entry_position and not position_from_close and entry_position != row.get("ticket", "").strip():
+        return None, "ny0530_position_identifier_mismatch"
+    if position_from_close and not entry_position and position_from_close != entry.get("ticket", "").strip():
+        return None, "ny0530_position_identifier_mismatch"
+
+    # Reject any other row attached to this ticket/position if it points to a
+    # different opportunity or owner. Blank-ID recovery witnesses are handled below.
+    identities = {value for value in (entry.get("ticket", "").strip(), entry_position, position_from_close) if value}
+    for other in all_rows:
+        if other is entry or other is row:
+            continue
+        other_ids = {str(other.get(key, "")).strip() for key in ("ticket", "position_identifier") if str(other.get(key, "")).strip()}
+        if not identities.intersection(other_ids):
+            continue
+        other_strategy = other.get("strategy_id", "").strip()
+        other_lane = other.get("lane_id", "").strip()
+        other_magic = other.get("magic", "").strip()
+        other_opportunity = other.get("opportunity_id", "").strip()
+        other_side = other.get("side", "").strip()
+        other_symbol = other.get("symbol", "").strip()
+        other_mt5_symbol = other.get("mt5_symbol", "").strip()
+        other_basket = other.get("basket_id", "").strip()
+        other_live = _parse_bool(other.get("live"))
+        if other.get("event") in {"entry", "position_open_confirmed", "position_open", "position_close_confirmed"}:
+            other_reason = _row_identity_note_reason(
+                other, "ny0530", _NY0530_SIGNAL, "", expected_owner,
+                {"strategy_id": expected_strategy, "lane_id": lane, "magic": magic,
+                 "symbol": symbol, "mt5_symbol": symbol, "side": side,
+                 "opportunity_id": opportunity, "basket_id": entry.get("basket_id", "").strip(),
+                 "ticket": entry.get("ticket", "").strip(), "live": entry.get("live", "").strip()},
+            )
+            required = (other_strategy, other_lane, other_magic, other_opportunity, other_side,
+                        other_symbol, other_mt5_symbol, other_basket, other.get("ticket", "").strip(),
+                        other.get("live", "").strip())
+            if other_reason or not all(required) or other_live is None:
+                return None, "ny0530_conflicting_ticket_position_row"
+        elif other.get("event") == "position_lifecycle_recovered":
+            recovery_reason = _row_identity_note_reason(
+                other, "ny0530", _NY0530_SIGNAL, "", expected_owner,
+                {"strategy_id": expected_strategy, "lane_id": lane, "magic": magic,
+                 "symbol": symbol, "mt5_symbol": symbol, "side": side,
+                 "opportunity_id": opportunity, "basket_id": entry.get("basket_id", "").strip(),
+                 "ticket": entry.get("ticket", "").strip(), "live": entry.get("live", "").strip(),
+                 "position_identifier": row.get("position_identifier", "").strip()},
+            )
+            if recovery_reason:
+                return None, "ny0530_recovery_witness_identity_conflict"
+        if ((other_strategy and other_strategy != expected_strategy)
+                or (other_lane and other_lane != lane) or (other_magic and other_magic != magic)
+                or (other_opportunity and other_opportunity != opportunity)
+                or (other_side and other_side != side) or (other_symbol and other_symbol != symbol)
+                or (other_mt5_symbol and other_mt5_symbol != symbol)
+                or (other_basket and other_basket != entry.get("basket_id", "").strip())
+                or (other_live is not None and other_live != _parse_bool(entry.get("live")))):
+            return None, "ny0530_conflicting_ticket_position_row"
+
+    owner_keys = {"owner_magic", "owner_comment", "close_deal_magic"}
+    note_values = _note_key_values(row.get("note", ""), owner_keys | {"deal_time_utc"})
+    if _note_duplicate_conflicts(row.get("note", ""), {"deal_time_utc", "owner_magic", "owner_comment", "close_deal_magic", "signal_id", "configured_signal_id", "signal", "signal_variant_id", "variant", "spec_id"}):
+        return None, "ny0530_conflicting_close_note_fields"
+    supplied_owner_values = {}
+    for key in ("owner_magic", "owner_comment", "close_deal_magic"):
+        values = {value.strip() for value in (str(row.get(key, "")).strip(), *note_values.get(key, [])) if value}
+        if len(values) > 1:
+            return None, "ny0530_conflicting_owner_fields"
+        if values:
+            supplied_owner_values[key] = next(iter(values))
+    expected_owner_values = {"owner_magic": magic, "owner_comment": owner_comment, "close_deal_magic": magic}
+    if any(supplied_owner_values[key] != expected_owner_values[key] for key in supplied_owner_values):
+        return None, "ny0530_owner_fields_mismatch"
+    if {"owner_magic", "owner_comment"}.issubset(supplied_owner_values):
+        return "broker_owner_fields_verified", None
+
+    potential_witnesses = [other for other in all_rows if
+        other.get("event") == "position_lifecycle_recovered"
+        and other.get("reason") == "confirmed_broker_fill_time_restored"
+        and other.get("ticket", "").strip() == entry.get("ticket", "").strip()]
+    witnesses = []
+    for other in potential_witnesses:
+        witness_fields = {"strategy_id": expected_strategy, "lane_id": lane, "magic": magic,
+                          "symbol": symbol, "mt5_symbol": symbol, "side": side,
+                          "opportunity_id": opportunity, "basket_id": entry.get("basket_id", "").strip(),
+                          "ticket": entry.get("ticket", "").strip(), "live": entry.get("live", "").strip(),
+                          "position_identifier": row.get("position_identifier", "").strip()}
+        witness_reason = _row_identity_note_reason(
+            other, "ny0530", _NY0530_SIGNAL, "", expected_owner, witness_fields,
+        )
+        if witness_reason:
+            return None, "ny0530_recovery_witness_identity_conflict"
+        if (not other.get("basket_id", "").strip() or _parse_bool(other.get("live")) is None
+                or other.get("strategy_id", "").strip() != expected_strategy
+                or other.get("lane_id", "").strip() != lane or other.get("magic", "").strip() != magic
+                or other.get("symbol", "").strip() != symbol or other.get("mt5_symbol", "").strip() != symbol
+                or other.get("position_identifier", "").strip() != row.get("position_identifier", "").strip()
+                or other.get("basket_id", "").strip() != entry.get("basket_id", "").strip()
+                or _parse_bool(other.get("live")) != _parse_bool(entry.get("live"))):
+            return None, "ny0530_recovery_witness_identity_conflict"
+        recovery_time = _parse_utc(other.get("timestamp_utc"))
+        if recovery_time is None or not entry_time <= recovery_time <= close_time:
+            return None, "ny0530_recovery_witness_clock_invalid"
+        witnesses.append(other)
+    if len(witnesses) == 1:
+        suffix = "broker_owner_partial" if supplied_owner_values else "broker_owner_unverified"
+        return f"broker_fill_recovery_witness; {suffix}", None
+    if len(witnesses) > 1:
+        return None, "ny0530_ambiguous_recovery_witness"
+    return None, "ny0530_owner_evidence_missing"
 
 
 @dataclass(frozen=True)
@@ -228,6 +684,32 @@ def _note_values(note: str) -> dict[str, str]:
     return {key: value.strip() for key, value in KEY_VALUE_RE.findall(note or "")}
 
 
+def _note_key_values(note: str, keys: set[str]) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for key, value in KEY_VALUE_RE.findall(note or ""):
+        if key in keys:
+            found.setdefault(key, []).append(value.strip())
+    text = (note or "").lstrip()
+    if text.startswith("{"):
+        def preserve_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result = {}
+            for key, value in pairs:
+                if key in keys:
+                    found.setdefault(key, []).append("" if value is None else str(value).strip())
+                result[key] = value
+            return result
+        try:
+            json.loads(text, object_pairs_hook=preserve_pairs)
+        except json.JSONDecodeError:
+            pass
+    return found
+
+
+def _note_duplicate_conflicts(note: str, keys: set[str]) -> set[str]:
+    found = _note_key_values(note, keys)
+    return {key for key, values in found.items() if len(set(values)) > 1}
+
+
 def _signal_fields(row: dict[str, str]) -> tuple[str, str]:
     """Parse signal identity from columns, semicolon key-values, or JSON note."""
     note = row.get("note", "") or ""
@@ -278,6 +760,8 @@ class CloseRow:
     recorded_time: datetime | None
     ledger_profit_source: str = "unknown"
     ledger_profit_unit: str | None = None
+    owner_evidence: str | None = None
+    attribution_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -315,12 +799,16 @@ def _csv_audit(payload: bytes) -> TradeAudit:
             raise DashboardError("invalid_trade_tail")
         text = payload.decode("utf-8")
         reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-        if not reader.fieldnames or None in reader.fieldnames or "event" not in reader.fieldnames:
+        if not reader.fieldnames or None in reader.fieldnames:
             raise DashboardError("invalid_trade_header")
         if any(not isinstance(name, str) or not name.strip() for name in reader.fieldnames):
             raise DashboardError("invalid_trade_header_empty")
-        if len(set(reader.fieldnames)) != len(reader.fieldnames):
+        normalized_headers = [_canonical_key(name) for name in reader.fieldnames]
+        if len(set(normalized_headers)) != len(normalized_headers):
             raise DashboardError("invalid_trade_header_duplicate")
+        if "event" not in normalized_headers:
+            raise DashboardError("invalid_trade_header")
+        reader.fieldnames = normalized_headers
         rows: list[dict[str, str]] = []
         for row in reader:
             if None in row or any(value is None for value in row.values()):
@@ -357,12 +845,23 @@ def _csv_audit(payload: bytes) -> TradeAudit:
         deal_id = row.get("deal_id", "").strip()
         if not deal_id:
             quarantined += 1; reasons.append("missing_deal_id"); continue
+        if _note_duplicate_conflicts(row.get("note", ""), {"deal_time_utc"}):
+            quarantined += 1; reasons.append("conflicting_deal_time_note"); continue
+        column_deal_time = row.get("deal_time_utc", "").strip()
+        note_deal_time = _note_values(row.get("note", "")).get("deal_time_utc", "").strip()
+        if column_deal_time and note_deal_time:
+            column_time = _parse_utc(column_deal_time)
+            note_time = _parse_utc(note_deal_time)
+            if column_time is None or note_time is None or column_time != note_time:
+                quarantined += 1; reasons.append("conflicting_deal_time_sources"); continue
         broker_time, recorded_time = _close_time(row)
         if broker_time is None:
             quarantined += 1; reasons.append("missing_broker_deal_time"); continue
         profit = _finite_float(row.get("profit"))
         if profit is None:
             quarantined += 1; reasons.append("missing_or_nonfinite_profit"); continue
+        owner_evidence = None
+        attribution_reason = None
         opportunity = row.get("opportunity_id", "").strip()
         attribution = "direct" if opportunity else "unresolved"
         if not opportunity:
@@ -381,6 +880,49 @@ def _csv_audit(payload: bytes) -> TradeAudit:
         else:
             attribution = "direct"
         signal, variant = _signal_fields(row)
+        research_spec = _RESEARCH_LANES.get(row.get("strategy_id", "").strip())
+        if research_spec is not None:
+            parsed = _research_opportunity(opportunity)
+            symbol, entry_signal_time, opp_signal, opp_variant, side = parsed if parsed is not None else ("", None, "", "", "")
+            matching_entries = [entry for entry in entries if entry.get("opportunity_id", "").strip() == opportunity] if opportunity else []
+            identity_reason = "research_invalid_opportunity_id" if parsed is None else "research_entry_missing" if not matching_entries else "research_duplicate_entry_opportunity" if len(matching_entries) > 1 else None
+            if identity_reason is None:
+                identity_reason = _research_entry_close_reason(matching_entries[0], row, research_spec, opp_signal, opp_variant, side, symbol, entry_signal_time, broker_time, rows, opportunity)
+            if identity_reason is None:
+                signal, variant = opp_signal, opp_variant
+                attribution = "direct" if row.get("opportunity_id", "").strip() else "unique_entry_join"
+                if attribution == "unique_entry_join":
+                    opportunity = matching_entries[0].get("opportunity_id", "").strip()
+            else:
+                signal, variant = "", ""
+                attribution = "unresolved"
+                attribution_reason = identity_reason
+        elif row.get("strategy_id", "").strip() in _NY0530_LANES:
+            strategy = row.get("strategy_id", "").strip()
+            parsed_ny = _ny0530_opportunity(opportunity)
+            matched = []
+            candidate_reasons = []
+            if parsed_ny is not None:
+                for entry in entries:
+                    if entry.get("opportunity_id", "").strip() != opportunity:
+                        continue
+                    evidence, match_reason = _ny0530_entry_close_match(
+                        entry, row, strategy, _NY0530_LANES[strategy], opportunity, parsed_ny, broker_time, rows,
+                    )
+                    if evidence:
+                        matched.append((entry, evidence))
+                    elif match_reason:
+                        candidate_reasons.append(match_reason)
+            if len(matched) == 1:
+                signal, variant = _NY0530_SIGNAL, ""
+                attribution = "direct"
+                owner_evidence = matched[0][1]
+            else:
+                signal, variant = "", ""
+                attribution = "unresolved"
+                attribution_reason = ("ny0530_invalid_opportunity_id" if parsed_ny is None else
+                                      "ny0530_entry_missing" if not any(entry.get("opportunity_id", "").strip() == opportunity for entry in entries) else
+                                      sorted(candidate_reasons)[0] if candidate_reasons else "ny0530_identity_unresolved")
         # Keep the absence of a variant distinct from an empty CSV cell.
         # This makes the configured (strategy, signal, None) identity exact.
         variant = variant or None
@@ -393,8 +935,8 @@ def _csv_audit(payload: bytes) -> TradeAudit:
         execution = (row.get("execution_class") or "").strip().lower()
         live = _parse_bool(row.get("live"))
         execution = execution if execution in EXECUTION_CLASSES[:2] else "live" if live is True else "shadow" if live is False else "unknown"
-        close = CloseRow(deal_id, row.get("strategy_id", "").strip(), signal, variant, row.get("lane_id", "").strip(), row.get("magic", "").strip(), row.get("basket_id", "").strip(), row.get("ticket", "").strip(), row.get("position_identifier", "").strip(), opportunity, attribution, ledger_profit, profit, profit_unit, currency, execution, broker_time, recorded_time, ledger_profit_source, ledger_profit_unit)
-        semantic = (close.deal_id, close.strategy_id, close.signal_id, close.signal_variant_id, close.lane_id, close.magic, close.basket_id, close.ticket, close.position_identifier, close.opportunity_id, close.opportunity_attribution, close.ledger_profit, close.profit, close.profit_unit, close.ledger_profit_unit, close.currency, close.execution_class, close.close_time, close.ledger_profit_source)
+        close = CloseRow(deal_id, row.get("strategy_id", "").strip(), signal, variant, row.get("lane_id", "").strip(), row.get("magic", "").strip(), row.get("basket_id", "").strip(), row.get("ticket", "").strip(), row.get("position_identifier", "").strip(), opportunity, attribution, ledger_profit, profit, profit_unit, currency, execution, broker_time, recorded_time, ledger_profit_source, ledger_profit_unit, owner_evidence, attribution_reason)
+        semantic = (close.deal_id, close.strategy_id, close.signal_id, close.signal_variant_id, close.lane_id, close.magic, close.basket_id, close.ticket, close.position_identifier, close.opportunity_id, close.opportunity_attribution, close.ledger_profit, close.profit, close.profit_unit, close.ledger_profit_unit, close.currency, close.execution_class, close.close_time, close.ledger_profit_source, close.owner_evidence, close.attribution_reason)
         if deal_id in conflict_ids:
             quarantined += 1; reasons.append("conflicting_duplicate_deal"); continue
         prior = semantic_keys.get(deal_id)
@@ -615,7 +1157,18 @@ def _active_catalog(config: dict[str, Any]) -> tuple[dict[str, str], dict[str, s
             else:
                 signal_status = "blocked"
             if strategy_status == "enabled" and signal_status == "enabled":
-                active_pairs.add((ident, signal, signal_variant))
+                research_spec = _RESEARCH_LANES.get(ident)
+                if (
+                    signal_variant is None
+                    and config.get("research_entry_policy_id") == "research_entries_v142"
+                    and research_spec is not None
+                    and signal == research_spec[2]
+                ):
+                    # The params gate enables the (strategy, signal) pair; the
+                    # frozen source policy defines its permitted variants.
+                    active_pairs.update((ident, signal, variant) for variant in research_spec[3])
+                else:
+                    active_pairs.add((ident, signal, signal_variant))
             prior = signal_states.get(signal)
             if prior == "enabled" or (prior == "blocked" and signal_status == "unknown"):
                 continue
@@ -688,6 +1241,8 @@ def _raw_value_metric(rows: list[CloseRow], target_rows: list[CloseRow], *, stra
         "raw_pf_status": "defined" if gross_loss > 0 else "no_negative_values" if values else "no_values",
         "raw_pf_definition": "sum(positive raw values) / abs(sum(negative raw values)); null when no negative value",
         "aggregation_status": "raw_unverified", "provenance": f"accepted_close.ledger_row.{value_field}",
+        "owner_evidence": {status: sum(row.owner_evidence == status for row in target_rows) for status in sorted({row.owner_evidence for row in target_rows if row.owner_evidence})},
+        "attribution_reasons": {status: sum(row.attribution_reason == status for row in target_rows) for status in sorted({row.attribution_reason for row in target_rows if row.attribution_reason})},
         "coverage": {"accepted_visible_rows": len(target_rows), "denominator_close_rows": len(target_rows), "value_rows": len(values), "missing_value_rows": len(target_rows) - len(values), "ratio": len(values) / len(target_rows) if target_rows else 0.0, "basis": "all accepted visible close rows for exact strategy/signal/execution series"},
     }
 
@@ -821,9 +1376,11 @@ def build_summary(start: datetime | None = None, end: datetime | None = None, co
     strategy_states, signal_states, strategy_views, _, active_pairs = _active_catalog(config)
     visible_strategies = [_safe_strategy(raw) for raw in strategy_views if raw.get("effective_enabled") is True]
     visibility_audit = {**visibility, "hidden_strategy_rows": visibility["hidden_unmapped_strategy"] + visibility["hidden_inactive_strategy"], "hidden_signal_rows": visibility["hidden_unmapped_signal"] + visibility["hidden_inactive_signal"], "unmapped_strategy_rows": visibility["hidden_unmapped_strategy"], "inactive_strategy_rows": visibility["hidden_inactive_strategy"], "unmapped_signal_rows": visibility["hidden_unmapped_signal"], "inactive_signal_rows": visibility["hidden_inactive_signal"], "pair_mismatch_rows": visibility.get("hidden_pair_mismatch", 0)}
+    owner_evidence_audit = {status: sum(row.owner_evidence == status for row in accepted_rows) for status in sorted({row.owner_evidence for row in accepted_rows if row.owner_evidence})}
+    attribution_reason_audit = {status: sum(row.attribution_reason == status for row in accepted_rows) for status in sorted({row.attribution_reason for row in accepted_rows if row.attribution_reason})}
     active_pairs_json = sorted(active_pairs, key=lambda value: (value[0], value[1], "" if value[2] is None else value[2]))
     signal_views = [{"id": signal, "signal_variant_id": variant, "effective_enabled": True} for _, signal, variant in active_pairs_json]
-    return {"service": "bot0", "adapter": "bot23.v4", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": source_meta.get("params", {}).get("sha256"), "root_enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": gate["gates"]["configured_live_enabled"]["value"], "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "historical_attribution_basis": "ledger_row_fields_only; current_params_never_backfill_history", "strategies": visible_strategies, "signals": signal_views, "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "raw_ledger_metrics": raw_metrics, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "signal_charts": _signal_charts(rows, active_signals, snapshot_status=snapshot.status, now=as_of_utc, active_pairs=active_pairs), "audit": {"visibility": visibility_audit, "accepted_rows_total": len(accepted_rows), "accepted_rows_in_period": len(accepted_rows), "visible_rows_in_period": len(rows), "hidden_rows_in_period": len(accepted_rows) - len(rows), "strategy_states": strategy_states, "signal_states": signal_states, "active_pairs": active_pairs_json, "attribution_conflicts": audit.conflicting_deals, "ambiguous_identity_joins": audit.ambiguous_opportunity_joins, "source_quality": {"duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons))}}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": source_meta.get("params"), "trades": source_meta.get("trades"), "optional": _optional_source_views(source_meta, collector), "bot_log": {"path_label": collector.log.name, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count, "rotation_count": snapshot.rotation_count, "read_contract": source_meta.get("read_contract"), "rotation_coverage": source_meta.get("rotation_coverage")}}, "errors": errors}
+    return {"service": "bot0", "adapter": "bot23.v4", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": source_meta.get("params", {}).get("sha256"), "root_enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": gate["gates"]["configured_live_enabled"]["value"], "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "historical_attribution_basis": "ledger_row_fields_only; current_params_never_backfill_history", "strategies": visible_strategies, "signals": signal_views, "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "raw_ledger_metrics": raw_metrics, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "signal_charts": _signal_charts(rows, active_signals, snapshot_status=snapshot.status, now=as_of_utc, active_pairs=active_pairs), "audit": {"visibility": visibility_audit, "accepted_rows_total": len(accepted_rows), "accepted_rows_in_period": len(accepted_rows), "visible_rows_in_period": len(rows), "hidden_rows_in_period": len(accepted_rows) - len(rows), "strategy_states": strategy_states, "signal_states": signal_states, "active_pairs": active_pairs_json, "attribution_conflicts": audit.conflicting_deals, "ambiguous_identity_joins": audit.ambiguous_opportunity_joins, "owner_evidence": owner_evidence_audit, "attribution_reasons": attribution_reason_audit, "source_quality": {"duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons))}}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": source_meta.get("params"), "trades": source_meta.get("trades"), "optional": _optional_source_views(source_meta, collector), "bot_log": {"path_label": collector.log.name, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count, "rotation_count": snapshot.rotation_count, "read_contract": source_meta.get("read_contract"), "rotation_coverage": source_meta.get("rotation_coverage")}}, "errors": errors}
 
 
 INDEX_HTML = """<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>bot0 dashboard</title><style>body{font:14px system-ui,sans-serif;max-width:1400px;margin:2rem auto;padding:0 1rem;background:#f7f7f7;color:#222}section{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #eee}.muted{color:#666}.warn{color:#a50}.bad{color:#b00}</style><h1>bot0 dashboard</h1><p class=\"muted\">read-only / bot23 adapter v4</p><section id=\"summary\">読み込み中...</section><section><h2>live / shadow</h2><table><thead><tr><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"classes\"></tbody></table></section><section><h2>strategy / signal</h2><table><thead><tr><th>kind</th><th>scope</th><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"scopes\"></tbody></table></section><script>const esc=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));const cell=v=>v==null?'unknown':esc(v);async function refresh(){try{const r=await fetch('/api/summary',{cache:'no-store'});if(!r.ok)throw new Error('source unavailable');const d=await r.json(),a=d.accounting||{},i=d.inventory||{},c=d.config||{};document.querySelector('#summary').innerHTML='<p>総計: <b>'+cell(a.closed_deal_count)+' deals</b> / ledger_profit '+cell(a.ledger_profit)+' ('+cell(a.ledger_profit_unit_status)+')</p><p>inventory: '+cell(i.open_position_count)+' / MTM: '+cell(i.mtm_pnl)+'</p><p>configured_live_enabled: '+cell((c.tradable_now||{}).gates?.configured_live_enabled?.status)+' / currency: '+cell(c.account_currency)+'</p><p class=\"muted\">updated '+cell(d.generated_at_utc)+' / errors '+cell((d.errors||[]).join(', '))+'</p>';document.querySelector('#classes').innerHTML=(d.metrics?.by_execution_class||[]).map(m=>'<tr><td>'+cell(m.scope)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');const rows=[...(d.metrics?.by_strategy||[]).map(m=>({...m,kind:'strategy'})),...(d.metrics?.by_signal||[]).map(m=>({...m,kind:'signal'}))];document.querySelector('#scopes').innerHTML=rows.map(m=>'<tr><td>'+cell(m.kind)+'</td><td>'+cell(m.scope)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('')}catch(e){document.querySelector('#summary').innerHTML='<p class=\"bad\">source unavailable; last good snapshot may be unavailable</p>'}}refresh();setInterval(refresh,30000)</script>"""

@@ -17,9 +17,12 @@ import dashboard
 
 FIELDS = [
     "timestamp_utc", "event", "strategy_id", "signal_id", "lane_id", "magic",
-    "symbol", "opportunity_id", "basket_id", "ticket", "position_identifier", "signal_variant_id",
+    "symbol", "mt5_symbol", "side", "opportunity_id", "basket_id", "ticket", "position_identifier",
+    "signal_variant_id", "configured_signal_id", "signal", "variant", "spec_id",
+    "owner_magic", "owner_comment", "close_deal_magic",
     "deal_id", "profit", "profit_unit", "ledger_profit", "currency",
-    "execution_class", "live", "deal_time_utc", "note",
+    "execution_class", "live", "deal_time_utc", "signal_bar_time", "event_time", "release_time",
+    "available_time", "decision_time", "reason", "note",
 ]
 
 
@@ -53,6 +56,315 @@ def close(deal: str, *, opp: str = "opp", ticket: str = "t", pos: str = "p",
 
 
 class DashboardTests(unittest.TestCase):
+    def ny_pair(self, *, lane=1, signal_time="2026-09-23T09:30:00+00:00", side="LONG", owner=True):
+        strategy = f"ny0530_edge_lane_{lane}"
+        lane_id, magic, comment = str(lane + 17), str(230039 + lane), f"s23_ed_l{lane}"
+        opportunity = f"XAUUSD|{signal_time}|t0530_edge_break_fade|{side}"
+        entry = {"event": "entry", "strategy_id": strategy, "lane_id": lane_id, "magic": magic,
+                 "symbol": "XAUUSD", "mt5_symbol": "XAUUSD", "side": side, "opportunity_id": opportunity,
+                 "basket_id": f"basket-{lane}", "ticket": f"ticket-{lane}", "position_identifier": "", "live": "True", "signal_bar_time": signal_time,
+                 "event_time": signal_time, "release_time": "2026-09-23T09:31:00+00:00",
+                 "available_time": "2026-09-23T09:31:00+00:00", "decision_time": "2026-09-23T09:31:12+00:00",
+                 "timestamp_utc": "2026-09-23T09:31:15+00:00", "note": "t0530_edge_w15_onset_hold_15m"}
+        note = f"deal_time_utc=2026-09-23T09:46:20+00:00;owner_magic={magic};owner_comment={comment}" if owner else "deal_time_utc=2026-09-23T09:46:20+00:00"
+        closed = {"event": "position_close_confirmed", "strategy_id": strategy, "lane_id": lane_id, "magic": magic,
+                  "symbol": "XAUUSD", "mt5_symbol": "XAUUSD", "side": side, "opportunity_id": opportunity,
+                  "basket_id": f"basket-{lane}", "ticket": f"ticket-{lane}", "position_identifier": f"ticket-{lane}", "live": "True",
+                  "signal_bar_time": "2026-09-23T09:46:15+00:00", "deal_id": f"deal-{lane}",
+                  "profit": "1", "deal_time_utc": "2026-09-23T09:46:20+00:00", "note": note}
+        return entry, closed
+
+    def research_pair(self, *, opportunity="XAUUSD|2026-09-23T01:20:00+00:00|curvature_fade_short|curvature_fade_short|LONG", close_side="LONG", close_note="deal_time_utc=2026-09-23T02:06:20+00:00;owner_magic=230049;owner_comment=s23_rs_l27", entry_note="curvature_fade_short", entry_ticket="43279674", close_ticket="43279674", entry_position="", close_position="43279674", strategy="research_path_curvature_lane_27", lane="27", magic="230049", symbol="XAUUSD"):
+        entry = {"event": "entry", "strategy_id": strategy, "lane_id": lane, "magic": magic,
+                 "symbol": symbol, "mt5_symbol": symbol, "side": "LONG", "opportunity_id": opportunity, "ticket": entry_ticket,
+                 "position_identifier": entry_position, "basket_id": "research-basket", "live": "True",
+                 "signal_bar_time": "2026-09-23 01:20:00+00:00", "event_time": "2026-09-23T01:20:00+00:00",
+                 "release_time": "2026-09-23T01:20:00+00:00", "available_time": "2026-09-23T01:20:00+00:00",
+                 "decision_time": "2026-09-23T01:20:01+00:00", "timestamp_utc": "2026-09-23T01:21:00+00:00", "note": entry_note}
+        closed = {"event": "position_close_confirmed", "strategy_id": strategy, "lane_id": lane, "magic": magic,
+                  "symbol": symbol, "mt5_symbol": symbol, "side": close_side, "opportunity_id": opportunity, "ticket": close_ticket,
+                  "basket_id": "research-basket", "live": "True", "position_identifier": close_position,
+                  "note": close_note, "deal_id": "40552841", "profit": "-9.41",
+                  "execution_class": "live", "live": "True", "deal_time_utc": "2026-09-23T02:06:20+00:00",
+                  "signal_bar_time": "2026-09-23T02:06:16.605000+00:00"}
+        return entry, closed
+
+    def test_v142_research_identity_restored_without_close_bar_time_join(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self.research_pair()
+            audit = write_sources(Path(tmp), {}, list(rows)).get().audit
+            self.assertEqual(len(audit.closes), 1)
+            self.assertEqual((audit.closes[0].signal_id, audit.closes[0].signal_variant_id), ("curvature_fade_short", "curvature_fade_short"))
+            self.assertEqual(audit.closes[0].profit, -9.41)
+            self.assertEqual(audit.closes[0].close_time, dashboard._parse_utc("2026-09-23T02:06:20+00:00"))
+
+    def test_v142_ir_allows_only_source_defined_variants(self):
+        for variant in ("interrupted_reapproach", "IR_pause_reapproach"):
+            with tempfile.TemporaryDirectory() as tmp:
+                opportunity = f"XAUUSD|2026-09-23T01:20:00+00:00|ir_original_priority_union|{variant}|LONG"
+                entry = {"event": "entry", "strategy_id": "research_ir_union_lane_30", "lane_id": "30", "magic": "230052",
+                         "symbol": "XAUUSD", "mt5_symbol": "XAUUSD", "side": "LONG", "opportunity_id": opportunity, "ticket": "ticket-ir",
+                         "position_identifier": "", "basket_id": "research-ir", "live": "True",
+                         "signal_bar_time": "2026-09-23T01:20:00+00:00", "event_time": "2026-09-23T01:20:00+00:00",
+                         "release_time": "2026-09-23T01:20:00+00:00", "available_time": "2026-09-23T01:20:00+00:00",
+                         "decision_time": "2026-09-23T01:20:01+00:00", "timestamp_utc": "2026-09-23T01:21:00+00:00", "note": variant}
+                closed = {"event": "position_close_confirmed", "strategy_id": "research_ir_union_lane_30", "lane_id": "30", "magic": "230052",
+                          "symbol": "XAUUSD", "mt5_symbol": "XAUUSD", "side": "LONG", "opportunity_id": opportunity, "ticket": "ticket-ir",
+                          "basket_id": "research-ir", "live": "True",
+                          "position_identifier": "ticket-ir", "signal_bar_time": "2026-09-23T02:06:00+00:00",
+                          "deal_id": "ir-deal", "profit": "1", "deal_time_utc": "2026-09-23T02:06:20+00:00",
+                          "note": f"deal_time_utc=2026-09-23T02:06:20+00:00;owner_magic=230052;owner_comment=s23_rs_l30"}
+                audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+                self.assertEqual(audit.closes[0].signal_variant_id, variant)
+
+    def test_v142_research_ambiguity_conflict_and_unknown_fail_closed(self):
+        bad_opportunity = "XAUUSD|2026-09-23T01:20:00+00:00|curvature_fade_short|unknown_variant|LONG"
+        cases = [
+            (self.research_pair(opportunity=bad_opportunity),),
+            (self.research_pair(opportunity="not-a-v142-opportunity"),),
+            (self.research_pair(close_side="SHORT"),),
+            (self.research_pair(close_note="deal_time_utc=2026-09-23T02:06:20+00:00;owner_magic=230050;owner_comment=s23_rs_l27"),),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as tmp:
+                    audit = write_sources(Path(tmp), {}, list(case[0])).get().audit
+                    self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                    self.assertEqual((audit.closes[0].signal_id, audit.closes[0].signal_variant_id), ("", None))
+        with tempfile.TemporaryDirectory() as tmp:
+            entry, closed = self.research_pair()
+            audit = write_sources(Path(tmp), {}, [entry, {**entry}, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_v142_research_position_identity_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry, closed = self.research_pair(close_position="different")
+            audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_v142_research_recovery_rows_on_same_ticket_must_match_entry_identity(self):
+        for field, value in (("magic", "230050"), ("strategy_id", "research_path_speed_lane_28"),
+                             ("symbol", "OTHER"), ("mt5_symbol", "OTHER"),
+                             ("basket_id", "other-basket"), ("live", "False"),
+                             ("opportunity_id", "other-opportunity"), ("side", "SHORT")):
+            entry, closed = self.research_pair()
+            recovery = {**entry, "event": "position_lifecycle_recovered",
+                        "timestamp_utc": "2026-09-23T01:22:00+00:00",
+                        "reason": "confirmed_broker_fill_time_restored", field: value}
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                audit = write_sources(Path(tmp), {}, [entry, recovery, closed]).get().audit
+                self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                self.assertEqual(audit.closes[0].attribution_reason, "research_conflicting_ticket_position_row")
+
+    def test_v142_research_writer_shaped_recovery_allows_omitted_side_and_opportunity(self):
+        entry, closed = self.research_pair()
+        recovery = {key: entry[key] for key in (
+            "strategy_id", "lane_id", "magic", "symbol", "mt5_symbol", "basket_id", "ticket", "live",
+        )}
+        recovery.update({"event": "position_lifecycle_recovered", "position_identifier": entry["ticket"],
+                         "timestamp_utc": "2026-09-23T01:22:00+00:00",
+                         "reason": "confirmed_broker_fill_time_restored",
+                         "note": "previous_entry_time_utc=2026-09-23T01:20:00+00:00;broker_entry_time_utc=2026-09-23T01:20:00+00:00"})
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [entry, recovery, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "direct")
+            self.assertEqual(audit.closes[0].signal_id, "curvature_fade_short")
+
+    def test_v142_research_explicit_identity_and_entry_clock_mismatch_fail_closed(self):
+        for mismatch in ("signal", "entry_clock"):
+            entry, closed = self.research_pair()
+            if mismatch == "signal":
+                closed["signal_id"] = "other_signal"
+            else:
+                entry["signal_bar_time"] = "2026-09-23T01:19:00+00:00"
+            with tempfile.TemporaryDirectory() as tmp:
+                audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+                self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                self.assertEqual(audit.closes[0].signal_id, "")
+
+    def test_ny0530_four_part_identity_checks_lane_entry_clocks_and_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pair1 = self.ny_pair(lane=1)
+            pair2 = self.ny_pair(lane=2)
+            audit = write_sources(Path(tmp), {}, [*pair1, *pair2]).get().audit
+            lane1 = next(row for row in audit.closes if row.deal_id == "deal-1")
+            lane2 = next(row for row in audit.closes if row.deal_id == "deal-2")
+            self.assertEqual((lane1.signal_id, lane1.signal_variant_id, lane1.opportunity_attribution), ("t0530_edge_break_fade", None, "direct"))
+            self.assertEqual((lane2.signal_id, lane2.signal_variant_id), ("t0530_edge_break_fade", None))
+            self.assertEqual(pair1[0]["opportunity_id"], pair2[0]["opportunity_id"])
+
+    def test_ny0530_missing_owner_or_bad_entry_clock_stays_unattributed(self):
+        cases = [list(self.ny_pair(owner=False))]
+        bad_clock = self.ny_pair()
+        bad_clock[0]["available_time"] = "2026-09-23T09:30:30+00:00"
+        cases.append(list(bad_clock))
+        duplicate = self.ny_pair()
+        cases.append([duplicate[0], {**duplicate[0]}, duplicate[1]])
+        conflict = self.ny_pair()
+        competing = {**conflict[0], "opportunity_id": "XAUUSD|2026-09-23T09:29:00+00:00|t0530_edge_break_fade|LONG"}
+        cases.append([conflict[0], competing, conflict[1]])
+        bad_close_time = self.ny_pair()
+        bad_close_time[1]["deal_time_utc"] = "2026-09-23T09:31:14+00:00"
+        bad_close_time[1]["note"] = bad_close_time[1]["note"].replace("2026-09-23T09:46:20+00:00", "2026-09-23T09:31:14+00:00")
+        cases.append(list(bad_close_time))
+        for rows in cases:
+            with self.subTest(rows=rows):
+                with tempfile.TemporaryDirectory() as tmp:
+                    audit = write_sources(Path(tmp), {}, rows).get().audit
+                    self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                    self.assertEqual(audit.closes[0].signal_id, "")
+
+    def test_ny0530_recovery_witness_allows_raw_pair_attribution_and_reports_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry, closed = self.ny_pair(owner=False)
+            recovery = {"event": "position_lifecycle_recovered", "strategy_id": entry["strategy_id"],
+                        "lane_id": entry["lane_id"], "magic": entry["magic"], "symbol": entry["symbol"],
+                        "mt5_symbol": entry["mt5_symbol"], "ticket": entry["ticket"],
+                        "position_identifier": closed["position_identifier"], "reason": "confirmed_broker_fill_time_restored",
+                        "basket_id": entry["basket_id"], "live": entry["live"],
+                        "timestamp_utc": "2026-09-23T09:32:00+00:00"}
+            audit = write_sources(Path(tmp), {}, [entry, recovery, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "direct")
+            self.assertEqual(audit.closes[0].owner_evidence, "broker_fill_recovery_witness; broker_owner_unverified")
+
+    def test_ny0530_present_but_conflicting_owner_fields_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry, closed = self.ny_pair()
+            closed["note"] = closed["note"].replace("owner_comment=s23_ed_l1", "owner_comment=s23_ed_l2")
+            audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_research_wrong_owner_metadata_clocks_and_competing_ticket_fail_closed(self):
+        mutators = (
+            lambda entry, closed: entry.update(mt5_symbol="OTHER"),
+            lambda entry, closed: entry.update(basket_id="other-basket"),
+            lambda entry, closed: entry.update(live="False"),
+            lambda entry, closed: closed.update(note=closed["note"] + ";close_deal_magic=230050"),
+            lambda entry, closed: entry.update(timestamp_utc="2026-09-23T02:07:00+00:00"),
+            lambda entry, closed: entry.update(timestamp_utc="2026-09-23T01:00:00+00:00"),
+            lambda entry, closed: closed.update(note=closed["note"] + ";owner_magic=230050;owner_magic=230049"),
+            lambda entry, closed: closed.update(signal_id="curvature_fade_short", note=closed["note"] + ";signal_id=other"),
+            lambda entry, closed: closed.update(signal_variant_id="curvature_fade_short", note=closed["note"] + ";variant=other"),
+            lambda entry, closed: closed.update(signal_id="curvature_fade_short", configured_signal_id="other"),
+            lambda entry, closed: closed.update(signal_variant_id="curvature_fade_short", variant="other"),
+            lambda entry, closed: closed.update(signal_id="curvature_fade_short", note='{"signal_id":"other","variant":"other"}'),
+            lambda entry, closed: closed.update(note="deal_time_utc=2026-09-23T02:06:20+00:00;owner_magic=230050;owner_magic=;owner_comment=s23_rs_l27"),
+        )
+        for mutate in mutators:
+            with self.subTest(mutate=mutate.__code__.co_firstlineno):
+                entry, closed = self.research_pair()
+                mutate(entry, closed)
+                with tempfile.TemporaryDirectory() as tmp:
+                    audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+                    self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                    self.assertTrue(audit.closes[0].attribution_reason)
+        entry, closed = self.research_pair()
+        competitor = {**entry, "opportunity_id": "XAUUSD|2026-09-23T01:19:00+00:00|curvature_fade_short|curvature_fade_short|LONG"}
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [entry, competitor, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_unattributed_reason_is_exposed_in_api_audit(self):
+        entry, closed = self.research_pair(close_side="SHORT")
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = write_sources(Path(tmp), {}, [entry, closed])
+            reason = collector.get().audit.closes[0].attribution_reason
+            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-23T03:00:00+00:00"))
+            self.assertEqual(summary["audit"]["attribution_reasons"], {reason: 1})
+
+    def test_ny0530_recovery_witness_must_be_unique_and_between_entry_and_close(self):
+        entry, closed = self.ny_pair(owner=False)
+        template = {"event": "position_lifecycle_recovered", "strategy_id": entry["strategy_id"],
+                    "lane_id": entry["lane_id"], "magic": entry["magic"], "symbol": entry["symbol"],
+                    "mt5_symbol": entry["mt5_symbol"], "ticket": entry["ticket"],
+                    "position_identifier": closed["position_identifier"], "reason": "confirmed_broker_fill_time_restored",
+                    "basket_id": entry["basket_id"], "live": entry["live"],
+                    "timestamp_utc": "2026-09-23T09:32:00+00:00"}
+        cases = [[{**template, "timestamp_utc": "2026-09-23T09:31:00+00:00"}],
+                 [{**template, "timestamp_utc": "2026-09-23T09:46:21+00:00"}],
+                 [{**template, "basket_id": ""}],
+                 [{**template, "live": ""}],
+                 [{**template, "basket_id": "", "live": ""}],
+                 [{**template, "note": "signal_id=wrong"}],
+                 [template, {**template}]]
+        for witnesses in cases:
+            with self.subTest(witnesses=len(witnesses), when=witnesses[0]["timestamp_utc"]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    audit = write_sources(Path(tmp), {}, [entry, *witnesses, closed]).get().audit
+                    self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                    self.assertTrue(audit.closes[0].attribution_reason)
+
+    def test_strict_identity_parser_rejects_duplicate_empty_conflicting_and_nested_evidence(self):
+        bad_notes = (
+            'owner_magic=230049; owner_magic=230049',
+            'owner_magic=230049; owner_magic=; owner_comment=s23_rs_l27',
+            '{"signal_id":"curvature_fade_short","signal_id":"curvature_fade_short"}',
+            '{"signal_id":"curvature_fade_short","signal":"other"}',
+            '{"signal_id":"curvature_fade_short","nested":{"owner_magic":"230049"}}',
+            '{"signal_id":null}',
+            '{"signal_id":"curvature_fade_short"};owner_magic=230049',
+        )
+        for note in bad_notes:
+            entry, closed = self.research_pair()
+            closed["note"] = note
+            with self.subTest(note=note), tempfile.TemporaryDirectory() as tmp:
+                audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+                self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                self.assertTrue(audit.closes[0].attribution_reason)
+
+    def test_alias_keys_are_case_space_normalized_and_conflicts_fail_closed(self):
+        entry, closed = self.research_pair()
+        closed["note"] = "Signal_ID=curvature_fade_short; owner_magic=230049; owner_comment=s23_rs_l27"
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "direct")
+        entry, closed = self.research_pair()
+        closed["note"] = " Signal_ID=curvature_fade_short; signal_id=curvature_fade_short "
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_ny0530_competing_ticket_identity_conflicts_and_physical_symbol_fail_closed(self):
+        for field, value in (("side", "SHORT"), ("symbol", "OTHER"), ("mt5_symbol", "OTHER"),
+                             ("basket_id", "other-basket"), ("live", "False")):
+            entry, closed = self.ny_pair(owner=False)
+            competing = {**entry, field: value, "opportunity_id": "XAUUSD|2026-09-23T09:29:00+00:00|t0530_edge_break_fade|LONG"}
+            witness = {"event": "position_lifecycle_recovered", "strategy_id": entry["strategy_id"],
+                       "lane_id": entry["lane_id"], "magic": entry["magic"], "symbol": entry["symbol"],
+                       "mt5_symbol": entry["mt5_symbol"], "ticket": entry["ticket"],
+                       "position_identifier": closed["position_identifier"], "reason": "confirmed_broker_fill_time_restored",
+                       "timestamp_utc": "2026-09-23T09:32:00+00:00"}
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                audit = write_sources(Path(tmp), {}, [entry, competing, witness, closed]).get().audit
+                self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+        entry, closed = self.ny_pair(owner=True)
+        entry["symbol"] = closed["symbol"] = "OTHER"
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+            self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+
+    def test_ny0530_explicit_signal_variant_conflicts_fail_closed(self):
+        for key, value, note_suffix in (("signal_id", "wrong", ""), ("signal_variant_id", "wrong", ""),
+                                        ("signal_id", "t0530_edge_break_fade", ";signal_id=wrong"),
+                                        ("signal_variant_id", "", ";variant=wrong"),
+                                        ("signal_id", "t0530_edge_break_fade", "")):
+            entry, closed = self.ny_pair(owner=True)
+            closed[key] = value
+            closed["note"] += note_suffix
+            if key == "signal_id" and value == "t0530_edge_break_fade" and not note_suffix:
+                closed["configured_signal_id"] = "wrong"
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                audit = write_sources(Path(tmp), {}, [entry, closed]).get().audit
+                self.assertEqual(audit.closes[0].opportunity_attribution, "unresolved")
+                self.assertTrue(audit.closes[0].attribution_reason)
+
+    def test_conflicting_broker_time_sources_are_quarantined(self):
+        row = close("d", deal_time_utc="2026-01-01T00:00:03Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = write_sources(Path(tmp), {}, [row]).get().audit
+            self.assertEqual(audit.closes, ())
+            self.assertIn("conflicting_deal_time_sources", audit.quarantine_reasons)
+
     # Fixture 1: semicolon key-value deal_time is the period clock.
     def test_01_semicolon_deal_time(self):
         row = close("d", timestamp="2026-01-01T00:00:09Z", note="reason=x;deal_time_utc=2026-01-01T00:00:01Z;owner_magic=1")
@@ -587,11 +899,30 @@ class DashboardTests(unittest.TestCase):
             self.skipTest("live exported ledger not present")
         payload = path.read_bytes()
         audit = dashboard._csv_audit(payload)
-        self.assertEqual(audit.source_rows, 25501)
-        self.assertEqual(len(audit.closes), 525)
-        self.assertEqual(audit.direct_opportunity_closes, 494)
+        self.assertEqual(audit.source_rows, 26383)
+        self.assertEqual(len(audit.closes), 546)
+        self.assertEqual(audit.direct_opportunity_closes, 515)
         self.assertEqual(audit.unique_entry_join_closes, 31)
         self.assertEqual(audit.ambiguous_opportunity_joins, 0)
+        params_path = Path(__file__).parents[1] / "bot23" / "s23_params.json"
+        if params_path.is_file():
+            config = json.loads(params_path.read_text(encoding="utf-8"))
+            visible, visibility, _ = dashboard._visible_rows(list(audit.closes), config)
+            self.assertEqual(len(visible), 52)
+            self.assertEqual(visibility["hidden_rows"], 494)
+            self.assertEqual(visibility["hidden_pair_mismatch"], 0)
+            self.assertEqual(sum(row.strategy_id.startswith("ny0530_edge_lane_") and row.signal_id == "t0530_edge_break_fade" for row in visible), 36)
+            self.assertEqual(sum(row.owner_evidence == "broker_fill_recovery_witness; broker_owner_unverified" for row in audit.closes), 30)
+            self.assertEqual(sum(row.owner_evidence == "broker_owner_fields_verified" for row in audit.closes), 6)
+            collector = dashboard.SnapshotCollector(params_path, path, path.parent / "s23_bot.log", ttl_seconds=0.01)
+            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-23T03:00:00Z"))
+            raw = next(item for item in summary["raw_ledger_metrics"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
+            chart = next(item for item in summary["signal_charts"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
+            self.assertEqual((raw["deal_count"], raw["raw_value_total"]), (1, -9.41))
+            self.assertIn({"close_time_utc": "2026-09-23T02:06:20Z", "deal_id": "40552841", "cumulative_value": -9.41}, chart["points"])
+            self.assertEqual(summary["audit"]["owner_evidence"]["broker_fill_recovery_witness; broker_owner_unverified"], 30)
+            self.assertIsNone(summary["accounting"]["realized_pnl"])
+            self.assertIsNone(summary["accounting"]["execution_classes"]["live"]["profit_factor"])
 
 
 if __name__ == "__main__":

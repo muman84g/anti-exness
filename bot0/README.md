@@ -26,6 +26,42 @@ unexpected historical variant. Inactive and
 unmapped accepted rows remain visible in the audit section with counts; they
 are never remapped to a current strategy or signal.
 
+For `research_entries_v142` lanes 25–30 only, the dashboard strictly parses the
+five-field opportunity identity (`symbol|signal_bar_utc|signal_id|variant|side`)
+and restores signal/variant only after matching one entry row (including its
+`signal_bar_time`) and checking its strategy, lane, magic, physical and MT5 symbols, side, basket,
+live flag, ticket, position identity, and entry record time against the close.
+Owner magic/comment and any explicit signal/variant fields must agree.
+Unknown variants, malformed IDs, repeated entries with the same opportunity,
+competing entries on the same ticket/position, and any mismatch stay
+unattributed. Failure reasons are included in the API audit. The close's `signal_bar_time` describes the
+exit bar and is not compared with the entry opportunity clock. Only the two
+source-defined IR variants are accepted on lane 30; the other five lanes require
+their signal ID as the variant. Current params only control the existing enabled
+pair visibility gate.
+
+For the four NY0530 lanes (18–21), the four-field opportunity identity is
+`physical_symbol|signal_bar_utc|t0530_edge_break_fade|LONG/SHORT`, with no
+variant. Entry signal/event bars and the release, available, decision, entry,
+and broker close clocks must be ordered and match the identity. The strategy,
+lane, magic, symbol, MT5 symbol, side, live flag, basket, ticket, and available
+position identifiers must agree; conflicting rows on the same ticket or
+position block attribution. A recovery witness must be unique and recorded
+between the entry and broker close, and must carry the same nonempty basket and
+live flag. A position identifier present on only one side must equal the shared
+ticket. A broker deal time repeated in both a CSV column and note must agree or
+the close is quarantined. Owner magic/comment/deal magic are checked whenever
+present. When they are absent, a matching `position_lifecycle_recovered` row
+with `confirmed_broker_fill_time_restored` is required and the API marks the raw
+series `broker_fill_recovery_witness; broker_owner_unverified`. This supports
+raw ledger display only; it does not establish broker ownership or verified
+currency PnL.
+
+The 2026-09-23 `research_path_curvature_lane_27` close for deal `40552841` now
+appears under `curvature_fade_short` in raw `profit` and its chart at `-9.41`.
+The CSV has no explicit profit unit or currency for that deal, so verified
+realized currency PnL and PF remain null.
+
 Metrics and curves are split by `live`, `shadow`, and `unknown`, then by
 strategy and signal. The dashboard never presents a combined live/shadow PnL.
 Verified realized PnL and PF require explicit account currency and a matching
