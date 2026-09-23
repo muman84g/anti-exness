@@ -15,7 +15,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1303,6 +1303,132 @@ def _svg_chart(points: list[float], *, width: int = 560, height: int = 190) -> s
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img"><line x1="{pad}" y1="{height-pad}" x2="{width-pad}" y2="{height-pad}" stroke="#bbb"/><polyline fill="none" stroke="#1769aa" points="{path}"/></svg>'
 
 
+def _overview_period_bounds(as_of_utc: datetime) -> dict[str, tuple[datetime, datetime]]:
+    """Return current UTC day/week/month windows, each clipped at as_of_utc."""
+    end = as_of_utc.astimezone(timezone.utc)
+    day_start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = (day_start - timedelta(days=day_start.weekday()))
+    month_start = day_start.replace(day=1)
+    return {
+        "day": (day_start, end),
+        "week": (week_start, end),
+        "month": (month_start, end),
+    }
+
+
+def _time_svg_chart(points: list[dict[str, Any]], start: datetime, end: datetime, *, width: int = 560, height: int = 190) -> str:
+    """Plot cumulative values against UTC time, retaining a zero anchor."""
+    pad = 30
+    if not points:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img"><text x="{width / 2:.1f}" y="{height / 2:.1f}" text-anchor="middle">no complete values</text></svg>'
+    start_ts, end_ts = start.timestamp(), end.timestamp()
+    if end_ts <= start_ts:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img"><text x="{width / 2:.1f}" y="{height / 2:.1f}" text-anchor="middle">empty period</text></svg>'
+    values = [float(point["cumulative_value"]) for point in points]
+    lo, hi = min(0.0, min(values)), max(0.0, max(values))
+    span = hi - lo or 1.0
+    coords = []
+    for point in points:
+        when = _parse_utc(point["close_time_utc"])
+        if when is None:
+            continue
+        x = pad + (width - 2 * pad) * (when.timestamp() - start_ts) / (end_ts - start_ts)
+        y = height - pad - (float(point["cumulative_value"]) - lo) / span * (height - 2 * pad)
+        coords.append((x, y))
+    if not coords:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img"><text x="{width / 2:.1f}" y="{height / 2:.1f}" text-anchor="middle">no complete values</text></svg>'
+    zero_y = height - pad - (0.0 - lo) / span * (height - 2 * pad)
+    path = [f"M {coords[0][0]:.2f} {coords[0][1]:.2f}"]
+    for x, y in coords[1:]:
+        path.extend((f"H {x:.2f}", f"V {y:.2f}"))
+    # Extend the last realized value horizontally to the visible period end.
+    path.append(f"H {width-pad:.2f}")
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img">'
+            f'<line x1="{pad}" y1="{zero_y:.2f}" x2="{width-pad}" y2="{zero_y:.2f}" stroke="#bbb"/>'
+            f'<path fill="none" stroke="#1769aa" d="{" ".join(path)}"/>'
+            f'<text x="{pad}" y="{height-6}" font-size="10">{_iso(start)}</text>'
+            f'<text x="{width-pad}" y="{height-6}" text-anchor="end" font-size="10">{_iso(end)}</text></svg>')
+
+
+def _overview_series(rows: list[CloseRow], *, period_start: datetime, period_end: datetime, snapshot_status: str) -> dict[str, Any]:
+    """Create separate current-live raw-profit curves without mixing units."""
+    live_rows = sorted((row for row in rows if row.execution_class == "live" and _within(row.close_time, period_start, period_end)), key=lambda row: (row.close_time, row.deal_id))
+    value_groups: dict[tuple[str | None, str | None], list[CloseRow]] = {}
+    for row in live_rows:
+        if row.profit is not None:
+            value_groups.setdefault((row.profit_unit, row.currency), []).append(row)
+    if not value_groups and live_rows:
+        value_groups[(None, None)] = []
+    denominator = len(live_rows)
+    multiple = len([group for group in value_groups.values() if group]) > 1
+    series = []
+    for (unit, currency), group in sorted(value_groups.items(), key=lambda item: (item[0][0] or "", item[0][1] or "")):
+        total = 0.0
+        points = [{"close_time_utc": _iso(period_start), "deal_id": None, "cumulative_value": 0.0}]
+        for row in group:
+            total += row.profit or 0.0
+            points.append({"close_time_utc": _iso(row.close_time), "deal_id": row.deal_id, "cumulative_value": total})
+        value_count = len(group)
+        coverage_ratio = value_count / denominator if denominator else 0.0
+        coverage_status = "complete" if denominator and value_count == denominator else "empty" if not denominator else "incomplete"
+        series_status = "stale" if snapshot_status != "fresh" and value_count else "stale_empty" if snapshot_status != "fresh" else "empty" if not denominator else "blocked_no_values" if not value_count else "separate_exact_group" if multiple else "blocked_incomplete_coverage" if value_count != denominator else "raw_unverified"
+        series.append({
+            "value_field": "profit", "execution_class": "live", "value_unit": unit, "currency": currency,
+            "raw_value_total": total if value_count else None, "deal_count": value_count,
+            "period_live_close_count": denominator, "status": series_status,
+            "coverage": {"denominator_live_visible_close_rows": denominator, "value_rows": value_count, "missing_value_rows": denominator - value_count, "ratio": coverage_ratio, "status": coverage_status},
+            "points": points if value_count else [],
+            "svg": _time_svg_chart(points, period_start, period_end) if value_count else _time_svg_chart([], period_start, period_end),
+            "basis": "current-effective visible live closes; accepted close profit only; deal_time_utc; UTC [start,end); raw unverified",
+        })
+    status = "stale" if snapshot_status != "fresh" and denominator else "stale_empty" if snapshot_status != "fresh" else "empty" if not denominator else "multiple_exact_series" if multiple else "incomplete_coverage" if len(value_groups) == 1 and len(next(iter(value_groups.values()))) != denominator else "raw_unverified"
+    return {"execution_class": "live", "value_field": "profit", "period_live_close_count": denominator, "series": series, "status": status}
+
+
+def _overview_summary(rows: list[CloseRow], active_pairs: set[tuple[str, str, str | None]], *, as_of_utc: datetime, snapshot_status: str, source_start: datetime | None = None, source_end: datetime | None = None) -> dict[str, Any]:
+    periods = {}
+    for period_id, (start, end) in _overview_period_bounds(as_of_utc).items():
+        clipped_start = max(start, source_start) if source_start is not None else start
+        clipped_end = min(end, source_end) if source_end is not None else end
+        # Intervals are half-open: touching at one boundary is an empty
+        # intersection. Preserve natural zero-width periods (e.g. as_of at
+        # UTC midnight) as ordinary empty periods, not request clipping.
+        no_overlap = (
+            start < end
+            and (source_start is not None or source_end is not None)
+            and clipped_end <= clipped_start
+        )
+        if no_overlap:
+            empty_at = start if source_end is not None and source_end < start else end if source_start is not None and source_start > end else clipped_start
+            clipped_start = clipped_end = empty_at
+        period_rows = [row for row in rows if _within(row.close_time, clipped_start, clipped_end)] if not no_overlap else []
+        curves = _overview_series(period_rows, period_start=clipped_start, period_end=clipped_end, snapshot_status=snapshot_status)
+        identity_rows = []
+        for strategy, signal, variant in sorted(active_pairs, key=lambda value: (value[0], value[1], value[2] or "")):
+            matching = [row for row in period_rows if row.execution_class == "live" and row.strategy_id == strategy and row.signal_id == signal and row.signal_variant_id == variant]
+            groups: dict[tuple[str | None, str | None], list[CloseRow]] = {}
+            for row in matching:
+                if row.profit is not None:
+                    groups.setdefault((row.profit_unit, row.currency), []).append(row)
+            if not groups:
+                groups[(None, None)] = []
+            for (unit, currency), values in sorted(groups.items(), key=lambda item: (item[0][0] or "", item[0][1] or "")):
+                value_total = sum(row.profit or 0.0 for row in values) if values else None
+                identity_rows.append({
+                    "strategy_id": strategy, "signal_id": signal, "signal_variant_id": variant or None,
+                    "execution_class": "live", "value_field": "profit", "value_unit": unit, "currency": currency,
+                    "raw_value_total": value_total, "deal_count": len(values), "period_live_close_count": len(matching),
+                    "status": "stale" if snapshot_status != "fresh" and matching else "stale_empty" if snapshot_status != "fresh" else "empty" if not matching else "blocked_no_values" if not values else "blocked_incomplete_coverage" if len(values) != len(matching) else "raw_unverified",
+                    "coverage": {"denominator_live_visible_close_rows": len(matching), "value_rows": len(values), "missing_value_rows": len(matching) - len(values), "ratio": len(values) / len(matching) if matching else 0.0},
+                })
+        periods[period_id] = {
+            "period": {"from_utc": _iso(clipped_start), "to_utc_exclusive": _iso(clipped_end), "base_from_utc": _iso(start), "base_to_utc_exclusive": _iso(end), "request_from_utc": _iso(source_start), "request_to_utc_exclusive": _iso(source_end), "request_clipped": clipped_start != start or clipped_end != end, "status": "outside_request_window" if no_overlap else curves["status"]},
+            "as_of_utc": _iso(as_of_utc), "status": "outside_request_window" if no_overlap else curves["status"], "curves": curves,
+            "signal_totals": identity_rows,
+        }
+    return {"time_basis": "UTC", "interval_convention": "[start,end)", "as_of_utc": _iso(as_of_utc), "value_field": "profit", "execution_class": "live", "aggregation_status": "raw_unverified; separate exact unit/currency groups", "periods": periods}
+
+
 def _signal_charts(rows: list[CloseRow], active_signals: set[str], *, snapshot_status: str, now: datetime | None = None, active_pairs: set[tuple[str, str, str | None]] | None = None) -> list[dict[str, Any]]:
     start, end = _chart_period_bounds(now)
     month_rows = [row for row in rows if _within(row.close_time, start, end)]
@@ -1346,6 +1472,7 @@ def _optional_source_views(source_meta: dict[str, Any], collector: SnapshotColle
 
 
 def build_summary(start: datetime | None = None, end: datetime | None = None, collector: SnapshotCollector = DEFAULT_COLLECTOR, *, as_of_utc: datetime | None = None) -> dict[str, Any]:
+    overview_as_of = (as_of_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     snapshot = collector.get(); config, audit = snapshot.config, snapshot.audit
     accepted_rows = [row for row in audit.closes if _within(row.close_time, start, end)]
     rows, visibility, active_signals = _visible_rows(accepted_rows, config)
@@ -1380,7 +1507,7 @@ def build_summary(start: datetime | None = None, end: datetime | None = None, co
     attribution_reason_audit = {status: sum(row.attribution_reason == status for row in accepted_rows) for status in sorted({row.attribution_reason for row in accepted_rows if row.attribution_reason})}
     active_pairs_json = sorted(active_pairs, key=lambda value: (value[0], value[1], "" if value[2] is None else value[2]))
     signal_views = [{"id": signal, "signal_variant_id": variant, "effective_enabled": True} for _, signal, variant in active_pairs_json]
-    return {"service": "bot0", "adapter": "bot23.v4", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": source_meta.get("params", {}).get("sha256"), "root_enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": gate["gates"]["configured_live_enabled"]["value"], "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "historical_attribution_basis": "ledger_row_fields_only; current_params_never_backfill_history", "strategies": visible_strategies, "signals": signal_views, "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "raw_ledger_metrics": raw_metrics, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "signal_charts": _signal_charts(rows, active_signals, snapshot_status=snapshot.status, now=as_of_utc, active_pairs=active_pairs), "audit": {"visibility": visibility_audit, "accepted_rows_total": len(accepted_rows), "accepted_rows_in_period": len(accepted_rows), "visible_rows_in_period": len(rows), "hidden_rows_in_period": len(accepted_rows) - len(rows), "strategy_states": strategy_states, "signal_states": signal_states, "active_pairs": active_pairs_json, "attribution_conflicts": audit.conflicting_deals, "ambiguous_identity_joins": audit.ambiguous_opportunity_joins, "owner_evidence": owner_evidence_audit, "attribution_reasons": attribution_reason_audit, "source_quality": {"duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons))}}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": source_meta.get("params"), "trades": source_meta.get("trades"), "optional": _optional_source_views(source_meta, collector), "bot_log": {"path_label": collector.log.name, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count, "rotation_count": snapshot.rotation_count, "read_contract": source_meta.get("read_contract"), "rotation_coverage": source_meta.get("rotation_coverage")}}, "errors": errors}
+    return {"service": "bot0", "adapter": "bot23.v4", "generated_at_utc": _iso(datetime.now(timezone.utc)), "period": {"from_utc": _iso(start), "to_utc_exclusive": _iso(end)}, "config": {"bot": str(config.get("bot_number", "23")), "strategy_id": config.get("strategy_id"), "candidate_id": config.get("candidate_id"), "generation": _config_generation(config), "sha256": source_meta.get("params", {}).get("sha256"), "root_enabled": _parse_bool(config.get("enabled")), "configured_live_enabled": gate["gates"]["configured_live_enabled"]["value"], "account_currency": currency, "currency_status": "known" if currency else "unknown", "tradable_now": gate}, "historical_attribution_basis": "ledger_row_fields_only; current_params_never_backfill_history", "strategies": visible_strategies, "signals": signal_views, "metrics": {"by_strategy": _grouped_metrics(rows, "strategy_id", currency), "by_signal": _grouped_metrics(rows, "signal_id", currency), "by_execution_class": [_metric(items, execution, execution, currency) for execution, items in by_execution.items()]}, "raw_ledger_metrics": raw_metrics, "equity_curve": {"by_execution_class": [point for execution, items in by_execution.items() for point in _equity(items, execution, execution, currency)], "by_strategy": _grouped_curve(rows, "strategy_id", currency), "by_signal": _grouped_curve(rows, "signal_id", currency)}, "overview": _overview_summary(rows, active_pairs, as_of_utc=overview_as_of, snapshot_status=snapshot.status, source_start=start, source_end=end), "signal_charts": _signal_charts(rows, active_signals, snapshot_status=snapshot.status, now=overview_as_of, active_pairs=active_pairs), "audit": {"visibility": visibility_audit, "accepted_rows_total": len(accepted_rows), "accepted_rows_in_period": len(accepted_rows), "visible_rows_in_period": len(rows), "hidden_rows_in_period": len(accepted_rows) - len(rows), "strategy_states": strategy_states, "signal_states": signal_states, "active_pairs": active_pairs_json, "attribution_conflicts": audit.conflicting_deals, "ambiguous_identity_joins": audit.ambiguous_opportunity_joins, "owner_evidence": owner_evidence_audit, "attribution_reasons": attribution_reason_audit, "source_quality": {"duplicate_deal_rows": audit.duplicate_deals, "conflicting_deal_rows": audit.conflicting_deals, "quarantined_rows": audit.quarantined_rows, "quarantine_reasons": sorted(set(audit.quarantine_reasons))}}, "accounting": accounting, "inventory": {"open_position_count": None, "mtm_pnl": None, "currency": currency, "status": "unknown", "reason": "no_readonly_broker_position_and_bid_ask_snapshot"}, "sources": {"params": source_meta.get("params"), "trades": source_meta.get("trades"), "optional": _optional_source_views(source_meta, collector), "bot_log": {"path_label": collector.log.name, "runtime_liveness": "unknown"}, "collector": {"status": snapshot.status, "last_error": snapshot.last_error, "snapshot_age_seconds": max(0.0, time.monotonic() - snapshot.collected_at), "collection_count": snapshot.collect_count, "rotation_count": snapshot.rotation_count, "read_contract": source_meta.get("read_contract"), "rotation_coverage": source_meta.get("rotation_coverage")}}, "errors": errors}
 
 
 INDEX_HTML = """<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>bot0 dashboard</title><style>body{font:14px system-ui,sans-serif;max-width:1400px;margin:2rem auto;padding:0 1rem;background:#f7f7f7;color:#222}section{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #eee}.muted{color:#666}.warn{color:#a50}.bad{color:#b00}</style><h1>bot0 dashboard</h1><p class=\"muted\">read-only / bot23 adapter v4</p><section id=\"summary\">読み込み中...</section><section><h2>live / shadow</h2><table><thead><tr><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"classes\"></tbody></table></section><section><h2>strategy / signal</h2><table><thead><tr><th>kind</th><th>scope</th><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id=\"scopes\"></tbody></table></section><script>const esc=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));const cell=v=>v==null?'unknown':esc(v);async function refresh(){try{const r=await fetch('/api/summary',{cache:'no-store'});if(!r.ok)throw new Error('source unavailable');const d=await r.json(),a=d.accounting||{},i=d.inventory||{},c=d.config||{};document.querySelector('#summary').innerHTML='<p>総計: <b>'+cell(a.closed_deal_count)+' deals</b> / ledger_profit '+cell(a.ledger_profit)+' ('+cell(a.ledger_profit_unit_status)+')</p><p>inventory: '+cell(i.open_position_count)+' / MTM: '+cell(i.mtm_pnl)+'</p><p>configured_live_enabled: '+cell((c.tradable_now||{}).gates?.configured_live_enabled?.status)+' / currency: '+cell(c.account_currency)+'</p><p class=\"muted\">updated '+cell(d.generated_at_utc)+' / errors '+cell((d.errors||[]).join(', '))+'</p>';document.querySelector('#classes').innerHTML=(d.metrics?.by_execution_class||[]).map(m=>'<tr><td>'+cell(m.scope)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');const rows=[...(d.metrics?.by_strategy||[]).map(m=>({...m,kind:'strategy'})),...(d.metrics?.by_signal||[]).map(m=>({...m,kind:'signal'}))];document.querySelector('#scopes').innerHTML=rows.map(m=>'<tr><td>'+cell(m.kind)+'</td><td>'+cell(m.scope)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('')}catch(e){document.querySelector('#summary').innerHTML='<p class=\"bad\">source unavailable; last good snapshot may be unavailable</p>'}}refresh();setInterval(refresh,30000)</script>"""
@@ -1394,8 +1521,10 @@ body{font:14px system-ui,sans-serif;max-width:1500px;margin:2rem auto;padding:0 
 section{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0;overflow:auto}
 table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #eee;white-space:nowrap}
 .muted{color:#666}.warn{color:#a50}.bad{color:#b00}.chart{display:inline-block;vertical-align:top;margin:0 1rem 1rem 0;border:1px solid #eee;padding:.5rem}.chart svg{width:560px;max-width:100%;height:190px}
+.overview-period{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:1rem;border-top:1px solid #ddd;padding:.75rem 0}.overview-period:first-child{border-top:0}.overview-period svg{width:100%;height:190px}.overview-side{max-height:260px;overflow:auto}.overview-side table{font-size:12px}.overview-side th,.overview-side td{white-space:normal}.overview-series{border-top:1px solid #eee;padding-top:.4rem}
 </style></head><body><h1>bot0 dashboard</h1>
 <p class="muted">read-only / bot23 adapter v4 / current effective strategies and signals only</p>
+<section><h2>UTC損益の概況</h2><p class="muted">当日・今週（月曜始まり）・今月を表示。liveのprofit列だけを使った未検証の生値です。通貨・単位の違いは合算せず、欠損や古いデータは状態とcoverageで示します。</p><div id="overview">読み込み中...</div></section>
 <section id="summary">読み込み中...</section>
 <section><h2>live / shadow</h2><table><thead><tr><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id="classes"></tbody></table></section>
 <section><h2>strategy / signal</h2><table><thead><tr><th>kind</th><th>scope</th><th>variant</th><th>class</th><th>deals</th><th>win rate</th><th>PF</th><th>PnL</th><th>status</th></tr></thead><tbody id="scopes"></tbody></table></section>
@@ -1405,14 +1534,18 @@ table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;bo
 <script>
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cell=v=>v==null?'unknown':esc(v);
+const periodNames={day:'本日 UTC',week:'今週 UTC（月曜始まり）',month:'今月 UTC'};
+const rawNumber=v=>v==null?'—':Number(v).toFixed(2);
+function renderOverview(o){const periods=o?.periods||{};return ['day','week','month'].map(k=>{const p=periods[k];if(!p)return '';const c=p.curves||{},series=c.series||[],totals=p.signal_totals||[];const curveHtml=series.length?series.map(s=>'<div class="overview-series"><b>'+cell(s.value_unit||'unit unknown')+' / '+cell(s.currency||'currency unknown')+'</b> · '+cell(s.status)+' · '+cell(s.deal_count)+'/'+cell(s.period_live_close_count)+' closes · raw '+rawNumber(s.raw_value_total)+'<div>'+s.svg+'</div></div>').join(''):'<p class="muted">期間内のlive closeなし</p>';const rows=totals.map(t=>'<tr><td>'+cell(t.signal_id)+'<br><span class="muted">'+cell(t.strategy_id)+' / '+cell(t.signal_variant_id)+'</span></td><td>'+rawNumber(t.raw_value_total)+'<br><span class="muted">'+cell(t.value_unit||'unit ?')+' / '+cell(t.currency||'currency ?')+'</span></td><td>'+cell(t.deal_count)+'/'+cell(t.period_live_close_count)+'<br>'+cell(t.status)+'</td></tr>').join('');return '<div class="overview-period"><div><h3>'+periodNames[k]+'</h3><p class="muted">'+cell(p.period?.from_utc)+' – '+cell(p.period?.to_utc_exclusive)+' / '+cell(p.status||c.status)+'</p>'+curveHtml+'</div><div class="overview-side"><b>シグナル別</b><table><thead><tr><th>signal</th><th>raw合計</th><th>件数 / 状態</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'}).join('')||'<p class="muted">overview unavailable</p>'}
 async function refresh(){try{const r=await fetch('/api/summary',{cache:'no-store'});if(!r.ok)throw new Error('source unavailable');const d=await r.json(),a=d.accounting||{},i=d.inventory||{},c=d.config||{};
+document.querySelector('#overview').innerHTML=renderOverview(d.overview);
 document.querySelector('#summary').innerHTML='<p>表示対象: <b>'+cell(a.closed_deal_count)+' deals</b> / raw ledger_profit '+cell(a.ledger_profit)+' ('+cell(a.ledger_profit_unit_status)+') / '+cell(a.ledger_profit_reason)+'</p><p>inventory: '+cell(i.open_position_count)+' / MTM: '+cell(i.mtm_pnl)+'</p><p>configured_live_enabled: '+cell((c.tradable_now||{}).gates?.configured_live_enabled?.status)+' / currency: '+cell(c.account_currency)+'</p><p class="muted">updated '+cell(d.generated_at_utc)+' / errors '+cell((d.errors||[]).join(', '))+'</p>';
 document.querySelector('#classes').innerHTML=(d.metrics?.by_execution_class||[]).map(m=>'<tr><td>'+cell(m.scope)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');
 const rows=[...(d.metrics?.by_strategy||[]).map(m=>({...m,kind:'strategy'})),...(d.metrics?.by_signal||[]).map(m=>({...m,kind:'signal'}))];document.querySelector('#scopes').innerHTML=rows.map(m=>'<tr><td>'+cell(m.kind)+'</td><td>'+cell(m.scope)+'</td><td>'+cell(m.signal_variant_id)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.win_rate)+'</td><td>'+cell(m.profit_factor)+'</td><td>'+cell(m.realized_pnl)+'</td><td>'+cell(m.aggregation_status)+'</td></tr>').join('');
 document.querySelector('#raw').innerHTML=(d.raw_ledger_metrics||[]).map(m=>'<tr><td>'+cell(m.strategy_id)+'</td><td>'+cell(m.signal_id)+'</td><td>'+cell(m.signal_variant_id)+'</td><td>'+cell(m.execution_class)+'</td><td>'+cell(m.value_field)+'</td><td>'+cell(m.value_unit)+'</td><td>'+cell(m.currency)+'</td><td>'+cell(m.deal_count)+'</td><td>'+cell(m.raw_value_total)+'</td><td>'+cell(m.raw_profit_factor)+'</td><td>'+cell((m.coverage||{}).ratio)+'</td></tr>').join('');
 document.querySelector('#charts').innerHTML=(d.signal_charts||[]).map(ch=>'<div class="chart"><h3>'+cell(ch.strategy_id)+' / '+cell(ch.signal_id)+' / '+cell(ch.signal_variant_id)+' / '+cell(ch.value_field)+' / '+cell(ch.execution_class)+'</h3><p>'+cell(ch.period?.from_utc)+' – '+cell(ch.period?.to_utc_exclusive)+' / '+cell(ch.status)+' / '+cell(ch.basis)+'</p>'+ch.svg+'</div>').join('')||'<p class="muted">no active signals</p>';
 document.querySelector('#audit').textContent=JSON.stringify(d.audit||{},null,2);
-}catch(e){document.querySelector('#summary').innerHTML='<p class="bad">source unavailable; last good snapshot may be unavailable</p>'}}refresh();setInterval(refresh,30000);
+}catch(e){document.querySelector('#summary').innerHTML='<p class="bad">source unavailable; last good snapshot may be unavailable</p>';document.querySelector('#overview').innerHTML='<p class="bad">損益概況を取得できません。前回の曲線は最新でない可能性があります。</p>'}}refresh();setInterval(refresh,30000);
 </script></body></html>"""
 
 

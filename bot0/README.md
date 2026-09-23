@@ -84,6 +84,25 @@ and stale-empty states are explicit. No CDN or chart library is required.
 Open position count and MTM are null because no read-only current position plus
 Bid/Ask snapshot is part of this service.
 
+The first dashboard section and additive `/api/summary.overview` key show the
+current UTC day, Monday-start UTC week, and UTC calendar month. Their intervals
+are half-open and clipped at `as_of_utc`, so the entire 23:59 minute is included
+when that day is complete while the next period's exact boundary is excluded.
+Optional API `from` and `to` bounds also clip the overview; the API reports the
+base and clipped UTC ranges. Curves use visible current-effective live closes
+from the accepted snapshot and the broker `deal_time_utc`; equal close times are
+ordered by `deal_id`, and the x-axis is proportional to elapsed UTC time. The
+curve is a step line: it stays flat between closes, updates at each close, and
+extends the final value to the visible period end. Overview totals
+use only the ledger `profit` field. They are raw unverified values, never fall
+back to `ledger_profit`, and are split by exact unit and currency. The curve
+coverage denominator is every visible live close in that period; missing values
+and mixed exact groups are labeled incomplete/separate instead of being
+presented as complete. The compact per-period signal table uses the same live
+rows, field, exact unit/currency groups, and coverage policy as its curve.
+If an API refresh fails, the top overview is cleared and displays an unavailable
+message instead of leaving the prior successful curve looking current.
+
 For a reproducible chart end, call `GET /api/summary?as_of_utc=2026-02-28T12:00:00Z`.
 The optional `from` and `to` parameters still limit the summary source rows;
 the chart reports the intersection with its request-relative window.

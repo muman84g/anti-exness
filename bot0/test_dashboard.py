@@ -604,6 +604,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(contract["allowed_methods"], ["GET"])
         self.assertEqual(contract["http_authentication"], "basic_required")
         with tempfile.TemporaryDirectory() as tmp:
+            fixture = write_sources(Path(tmp), {}, [close("api")])
             server, thread, patcher, previous, password = self._start_authenticated_server(Path(tmp))
             try:
                 host, port = server.server_address
@@ -650,6 +651,12 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertIn(b'"status":"ok"', body)
                 self.assertEqual(request("/", credentials=("bot0", password))[0], 200)
+                build_summary = dashboard.build_summary
+                with mock.patch.object(dashboard, "build_summary", side_effect=lambda start=None, end=None, as_of_utc=None: build_summary(start, end, collector=fixture, as_of_utc=as_of_utc)):
+                    summary_status, _, summary_body = request("/api/summary?from=2026-01-01T00:00:00Z&to=2026-01-01T00:00:10Z&as_of_utc=2026-01-01T00:00:30Z", credentials=("bot0", password))
+                self.assertEqual(summary_status, 200, summary_body.decode("utf-8", errors="replace"))
+                self.assertIn(b'"overview"', summary_body)
+                self.assertIn(b'"request_clipped":true', summary_body)
                 self.assertEqual(request("/unknown", credentials=("bot0", password))[0], 404)
                 self.assertEqual(request("/api/health", credentials=("bot0", password), method="POST")[0], 405)
             finally:
@@ -893,6 +900,145 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual({item["signal_variant_id"] for item in charts}, {"v1", "v2"})
             self.assertEqual({item["raw_value_total"] for item in raw}, {1.0, 2.0})
 
+    def test_overview_utc_day_week_month_rollover_and_exclusive_as_of(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [
+                close("before_month", profit="4", unit="USD", currency="USD", note="deal_time_utc=2026-04-30T23:59:59Z", timestamp="2026-04-30T23:59:59Z", ticket="a"),
+                close("month_start", profit="3", unit="USD", currency="USD", note="deal_time_utc=2026-05-01T00:00:00Z", timestamp="2026-05-01T00:00:00Z", ticket="b"),
+                close("before_asof", profit="2", unit="USD", currency="USD", note="deal_time_utc=2026-05-01T00:00:59Z", timestamp="2026-05-01T00:00:59Z", ticket="c"),
+                close("at_asof", profit="90", unit="USD", currency="USD", note="deal_time_utc=2026-05-01T00:01:00Z", timestamp="2026-05-01T00:01:00Z", ticket="d"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), {}, rows), as_of_utc=dashboard._parse_utc("2026-05-01T00:01:00Z"))
+            overview = summary["overview"]["periods"]
+            self.assertEqual((overview["day"]["period"]["from_utc"], overview["day"]["period"]["to_utc_exclusive"]), ("2026-05-01T00:00:00Z", "2026-05-01T00:01:00Z"))
+            self.assertFalse(overview["day"]["period"]["request_clipped"])
+            self.assertEqual(overview["day"]["period"]["status"], "raw_unverified")
+            self.assertEqual(overview["week"]["period"]["from_utc"], "2026-04-27T00:00:00Z")
+            self.assertEqual(overview["month"]["period"]["from_utc"], "2026-05-01T00:00:00Z")
+            self.assertEqual(overview["day"]["curves"]["period_live_close_count"], 2)
+            self.assertEqual(overview["day"]["curves"]["series"][0]["raw_value_total"], 5.0)
+            self.assertEqual(overview["week"]["curves"]["series"][0]["raw_value_total"], 9.0)
+            self.assertEqual(overview["month"]["curves"]["series"][0]["raw_value_total"], 5.0)
+            day_signal = overview["day"]["signal_totals"][0]
+            self.assertIsNone(day_signal["signal_variant_id"])
+            self.assertEqual((day_signal["deal_count"], day_signal["raw_value_total"]), (2, 5.0))
+
+    def test_overview_intersects_request_from_to_and_reports_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = write_sources(Path(tmp), {}, [
+                close("inside", profit="7", ticket="inside", note="deal_time_utc=2026-05-01T00:00:40Z"),
+                close("outside", profit="90", ticket="outside", note="deal_time_utc=2026-05-01T00:00:55Z"),
+            ])
+            summary = dashboard.build_summary(
+                dashboard._parse_utc("2026-05-01T00:00:30Z"), dashboard._parse_utc("2026-05-01T00:00:50Z"),
+                collector=collector, as_of_utc=dashboard._parse_utc("2026-05-01T00:01:00Z"),
+            )
+            day = summary["overview"]["periods"]["day"]
+            self.assertEqual(day["period"]["from_utc"], "2026-05-01T00:00:30Z")
+            self.assertEqual(day["period"]["to_utc_exclusive"], "2026-05-01T00:00:50Z")
+            self.assertTrue(day["period"]["request_clipped"])
+            self.assertEqual(day["curves"]["period_live_close_count"], 1)
+            self.assertEqual(day["curves"]["series"][0]["raw_value_total"], 7.0)
+
+    def test_overview_touching_half_open_boundaries_are_outside_but_natural_midnight_is_empty(self):
+        as_of = dashboard._parse_utc("2026-05-01T00:01:00Z")
+        day_start = dashboard._parse_utc("2026-05-01T00:00:00Z")
+        cases = (
+            ("to_equals_base_start", None, day_start),
+            ("from_equals_base_end", as_of, None),
+        )
+        for label, request_start, request_end in cases:
+            with self.subTest(boundary=label):
+                overview = dashboard._overview_summary(
+                    [], set(), as_of_utc=as_of, snapshot_status="fresh",
+                    source_start=request_start, source_end=request_end,
+                )
+                day = overview["periods"]["day"]
+                self.assertEqual(day["status"], "outside_request_window")
+                self.assertEqual(day["period"]["status"], "outside_request_window")
+                self.assertEqual(day["period"]["from_utc"], day["period"]["to_utc_exclusive"])
+
+        midnight = dashboard._parse_utc("2026-05-01T00:00:00Z")
+        natural = dashboard._overview_summary(
+            [], set(), as_of_utc=midnight, snapshot_status="fresh",
+        )["periods"]["day"]
+        self.assertEqual(natural["status"], "empty")
+        self.assertEqual(natural["period"]["status"], "empty")
+        self.assertEqual(natural["period"]["from_utc"], natural["period"]["to_utc_exclusive"])
+
+    def test_overview_current_effective_live_profit_coverage_and_separate_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"enabled": True, "live_trading_enabled": True, "strategies": [
+                {"id": "s", "enabled": True, "signal_id": "sig"},
+                {"id": "off", "enabled": False, "signal_id": "disabled_sig"},
+            ]}
+            rows = [
+                close("usd", profit="2", unit="USD", currency="USD", ticket="usd", note="deal_time_utc=2026-01-01T00:00:01Z"),
+                close("jpy", profit="3", unit="JPY", currency="JPY", ticket="jpy", note="deal_time_utc=2026-01-01T00:00:02Z"),
+                close("missing", profit="", unit="", currency="", ticket="missing", note="deal_time_utc=2026-01-01T00:00:03Z"),
+                close("shadow", profit="1000", unit="USD", currency="USD", execution_class="shadow", live="False", ticket="shadow", note="deal_time_utc=2026-01-01T00:00:04Z"),
+                close("disabled", strategy_id="off", signal="disabled_sig", profit="500", unit="USD", currency="USD", ticket="disabled", note="deal_time_utc=2026-01-01T00:00:05Z"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), config, rows), as_of_utc=dashboard._parse_utc("2026-01-01T00:10:00Z"))
+            day = summary["overview"]["periods"]["day"]
+            self.assertEqual(day["curves"]["period_live_close_count"], 2)
+            self.assertEqual(day["curves"]["status"], "multiple_exact_series")
+            self.assertEqual({(s["value_unit"], s["currency"]) for s in day["curves"]["series"]}, {("USD", "USD"), ("JPY", "JPY")})
+            self.assertTrue(all(s["coverage"]["denominator_live_visible_close_rows"] == 2 for s in day["curves"]["series"]))
+            self.assertTrue(all(s["coverage"]["status"] == "incomplete" for s in day["curves"]["series"]))
+            self.assertIn("missing_or_nonfinite_profit", summary["audit"]["source_quality"]["quarantine_reasons"])
+            self.assertEqual({row["signal_id"] for row in day["signal_totals"]}, {"sig"})
+            self.assertTrue(all(row["execution_class"] == "live" and row["value_field"] == "profit" for row in day["signal_totals"]))
+
+    def test_overview_defensively_marks_missing_profit_without_ledger_fallback(self):
+        start = dashboard._parse_utc("2026-01-01T00:00:00Z")
+        end = dashboard._parse_utc("2026-01-01T00:10:00Z")
+        rows = [
+            dashboard.CloseRow("a", "s", "sig", None, "", "", "", "a", "", "", "direct", None, 2.0, "USD", "USD", "live", dashboard._parse_utc("2026-01-01T00:00:01Z"), None),
+            dashboard.CloseRow("b", "s", "sig", None, "", "", "", "b", "", "", "direct", None, 3.0, "USD", "USD", "live", dashboard._parse_utc("2026-01-01T00:00:02Z"), None),
+            dashboard.CloseRow("missing", "s", "sig", None, "", "", "", "m", "", "", "direct", 88.0, None, "USD", "USD", "live", dashboard._parse_utc("2026-01-01T00:00:03Z"), None),
+        ]
+        overview = dashboard._overview_series(rows, period_start=start, period_end=end, snapshot_status="fresh")
+        series = overview["series"][0]
+        self.assertEqual(series["raw_value_total"], 5.0)
+        self.assertEqual(series["deal_count"], 2)
+        self.assertEqual(series["coverage"]["denominator_live_visible_close_rows"], 3)
+        self.assertEqual(series["coverage"]["missing_value_rows"], 1)
+        self.assertEqual(series["status"], "blocked_incomplete_coverage")
+
+    def test_overview_equal_timestamp_order_is_stable_by_deal_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [
+                close("z", profit="2", ticket="tz", note="deal_time_utc=2026-01-01T00:00:05Z"),
+                close("a", profit="-1", ticket="ta", note="deal_time_utc=2026-01-01T00:00:05Z"),
+            ]
+            summary = dashboard.build_summary(collector=write_sources(Path(tmp), {}, rows), as_of_utc=dashboard._parse_utc("2026-01-01T00:01:00Z"))
+            series = summary["overview"]["periods"]["day"]["curves"]["series"][0]
+            self.assertEqual([point["deal_id"] for point in series["points"]], [None, "a", "z"])
+            self.assertEqual([point["cumulative_value"] for point in series["points"]], [0.0, -1.0, 1.0])
+            self.assertIn("viewBox", series["svg"])
+            self.assertIn("<path", series["svg"])
+            self.assertNotIn("<polyline", series["svg"])
+            step_svg = dashboard._time_svg_chart([
+                {"close_time_utc": "2026-01-01T00:00:00Z", "cumulative_value": 0},
+                {"close_time_utc": "2026-01-01T00:02:00Z", "cumulative_value": 1},
+                {"close_time_utc": "2026-01-01T00:08:00Z", "cumulative_value": 2},
+            ], dashboard._parse_utc("2026-01-01T00:00:00Z"), dashboard._parse_utc("2026-01-01T00:10:00Z"))
+            self.assertIn("H 130.00", step_svg)
+            self.assertIn("H 430.00", step_svg)
+            self.assertIn("H 530.00", step_svg)
+
+    def test_overview_empty_stale_state_and_top_ui_mount(self):
+        as_of = dashboard._parse_utc("2026-01-01T00:10:00Z")
+        overview = dashboard._overview_summary([], {("s", "sig", None)}, as_of_utc=as_of, snapshot_status="stale")
+        for period in overview["periods"].values():
+            self.assertEqual(period["curves"]["status"], "stale_empty")
+            self.assertEqual(period["signal_totals"][0]["status"], "stale_empty")
+        self.assertLess(dashboard.INDEX_HTML.index('id="overview"'), dashboard.INDEX_HTML.index('id="summary"'))
+        self.assertIn("今週 UTC", dashboard.INDEX_HTML)
+        self.assertIn("今月 UTC", dashboard.INDEX_HTML)
+        self.assertIn("損益概況を取得できません", dashboard.INDEX_HTML)
+
     def test_real_data_counts_if_available(self):
         path = Path(r"C:\Users\muuma\Downloads\logs\s23_trades.csv")
         if not path.is_file():
@@ -915,7 +1061,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(sum(row.owner_evidence == "broker_fill_recovery_witness; broker_owner_unverified" for row in audit.closes), 30)
             self.assertEqual(sum(row.owner_evidence == "broker_owner_fields_verified" for row in audit.closes), 6)
             collector = dashboard.SnapshotCollector(params_path, path, path.parent / "s23_bot.log", ttl_seconds=0.01)
-            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-23T03:00:00Z"))
+            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-24T00:00:00Z"))
             raw = next(item for item in summary["raw_ledger_metrics"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
             chart = next(item for item in summary["signal_charts"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
             self.assertEqual((raw["deal_count"], raw["raw_value_total"]), (1, -9.41))
@@ -923,6 +1069,18 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(summary["audit"]["owner_evidence"]["broker_fill_recovery_witness; broker_owner_unverified"], 30)
             self.assertIsNone(summary["accounting"]["realized_pnl"])
             self.assertIsNone(summary["accounting"]["execution_classes"]["live"]["profit_factor"])
+            month = summary["overview"]["periods"]["month"]
+            ny_totals = [row for row in month["signal_totals"] if row["strategy_id"].startswith("ny0530_edge_lane_")]
+            self.assertEqual(sum(row["deal_count"] for row in ny_totals), 36)
+            pair_counts = {row["strategy_id"]: row["deal_count"] for row in ny_totals}
+            self.assertEqual(pair_counts, {"ny0530_edge_lane_1": 18, "ny0530_edge_lane_2": 10, "ny0530_edge_lane_3": 5, "ny0530_edge_lane_4": 3})
+            self.assertEqual(sum({(row["strategy_id"], row["signal_id"], row["signal_variant_id"]): row["period_live_close_count"] for row in month["signal_totals"]}.values()), month["curves"]["period_live_close_count"])
+            curve_totals = {(row["value_unit"], row["currency"]): row["raw_value_total"] for row in month["curves"]["series"]}
+            signal_totals = {}
+            for row in month["signal_totals"]:
+                key = (row["value_unit"], row["currency"])
+                signal_totals[key] = signal_totals.get(key, 0.0) + (row["raw_value_total"] or 0.0)
+            self.assertEqual(signal_totals, curve_totals)
 
 
 if __name__ == "__main__":
