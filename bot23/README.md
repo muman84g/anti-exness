@@ -1,8 +1,21 @@
 # Bot23 integrated inventory and independent session overlays
 
-## 2026-09-20 current local entry profile
+## 2026-09-24 current local entry profile
 
-The checked-in local profile enables only the four NY05:30 edge lanes
+New entries remain enabled for the four NY05:30 lanes (18–21) and research
+`ir_original_priority_union` lane 30 only. Research lanes 25–29 are disabled
+for new entries. Their definitions, magics, ownership state and existing-position
+sync/close paths remain intact; `research_entries_enabled` stays true for lane
+30. The research session calendar expires at `2026-09-25T20:59:00Z` and then
+blocks new IR entries until a separately verified calendar is installed.
+This is a local configuration change; a Git push does not activate it in the
+CentOS container. Other entry families remain disabled.
+Canonical Git/LF params SHA-256: `c36cd228379d87d283d5348825e18e72e0d917708a799eb8bad6fe097d0529a4`.
+Windows source bytes with mixed line endings: `bbe1ba65530fa9aef91d6fd4982e2dfd65406df2eed24d0f4a2fca22320ec768`.
+
+## 2026-09-20 prior local entry profile
+
+The 2026-09-20 local profile enabled only the four NY05:30 edge lanes
 (`ny0530_edge_lane_1` through `ny0530_edge_lane_4`). ZA, Morning, Midday,
 Pre-EU30, TrendRecovery, Q01, M15, H7, and inventory range-fade new entries
 are disabled. Global `enabled=true`, `live_trading_enabled=true`, and
@@ -786,10 +799,10 @@ standalone GitHub clone, set `BOTTER_RESEARCH_ROOT` to the separate research
 checkout root; otherwise that one external-artifact check is reported as
 skipped while the self-contained bot23 suite continues.
 
-Local release-candidate runner SHA-256:
+Historical 2026-09-18 release-candidate runner SHA-256:
 `d8579971ed0b35d3016ad9f23099d838b7e74e0335ca507504d281593d911f7b`.
 
-Local release-candidate params SHA-256:
+Historical 2026-09-18 release-candidate params SHA-256:
 `f5b3a384c5c20cfdca409f45242a4fb20a5b1e088ec97a7e8b850c6aa71ba912`.
 Local release-candidate regression SHA-256:
 `e9c7bc36c9a393ce7c151c169c3aae4e71486df689da61b8e8ae673536fdd6a9`.
@@ -822,7 +835,12 @@ an external deployment check.
 All hashes above identify the local source candidate. Runtime deployment and
 process identity must be verified separately; these hashes do not replace the
 canonical research identities in `SOURCE_BACKTEST.md`.
-# 2026-09-21 研究entry採用（lanes 25–30）
+# 2026-09-21 研究entry採用（lanes 25–30、履歴）
+
+以下は当時の有効化と評価の記録であり、現在の有効laneは冒頭の
+2026-09-24 profileを参照する。2026-09-23の修正再走査では旧「0件」判定と
+旧研究シグナル合算値を無効化しており、この節の旧Leakcheck/Forward数値を
+現行判断に流用しない。
 
 `NWAVE-RESTART`、`ALT-DBREAK`、`PATH-CURVATURE`、`PATH-SPEED`、
 `NWAVE-CENTROID`、および `IR原案 + IR_pause_reapproach` を有効化した。

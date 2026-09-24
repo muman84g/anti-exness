@@ -41,6 +41,15 @@ migration/restart, EA compile/attach, service recreation, quote freshness, and
 live orders remain unverified. The explicit research calendar expires at
 2026-09-25T20:59:00Z and fails closed for new research entries after expiry.
 
+2026-09-24 bot23 current local selection: NY05:30 lanes 18–21 and research
+IR priority union lane 30 accept new entries. Research lanes 25–29 are
+`enabled=false` for new entries while their magics, state, ownership, and
+existing-position sync/close paths remain registered. This supersedes the
+2026-09-21 all-research-lanes-enabled setting and the older bot23 row's v37
+bridge reference; the bridge source identity remains
+`2026-09-21-s23-research-v38`. The calendar expiry above is unchanged.
+Git delivery alone does not establish CentOS pull or runtime activation.
+
 ## Rules
 
 2026-09-14 bot23 supplement: predecessor local candidate was

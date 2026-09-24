@@ -1,8 +1,21 @@
 # Source Backtest
 
-## 2026-09-20 current local entry profile
+## 2026-09-24 current local entry selection
 
-- The checked-in local profile enables only the four `t0530_edge_break_fade`
+The locally selected new-entry set is NY05:30 lanes 18–21 plus research
+`ir_original_priority_union` lane 30. Research lanes 25–29 are set to
+`enabled=false` after review of the 2024–2025 DEV diagnostic curves; this is
+an operator risk decision, not a new profitability or overfitting proof.
+Existing owned positions in those lanes continue through the same sync and
+close paths. All six research lane identities, magics, state schema, and the
+research module/policy hash remain unchanged. The explicit research calendar
+expires at `2026-09-25T20:59:00Z`; after that, new IR entries fail closed until
+a separately verified extension is installed. This local edit and Git delivery
+are separate from CentOS pull, container recreation, and runtime activation.
+
+## 2026-09-20 prior local entry profile
+
+- The 2026-09-20 local profile enabled only the four `t0530_edge_break_fade`
   lanes, `ny0530_edge_lane_1` through `ny0530_edge_lane_4`.
 - ZA, Morning, Midday, Pre-EU30, TrendRecovery, Q01, M15, H7, and inventory
   range-fade new entries are disabled. Global enable/live flags are unchanged.
@@ -627,7 +640,14 @@ zero mismatches.
 - The reverse_d60 source switch was explicitly requested on 2026-08-26. Deployment,
   restart, state reset, log reset, EA attachment, and actual order submission
   remain separate runtime actions.
-# 研究entry lanes 25–30 採用記録（2026-09-21）
+# 研究entry lanes 25–30 採用記録（2026-09-21、履歴）
+
+以下の当時の採用記録と集計は現行の有効laneを表さない。現在は冒頭の
+2026-09-24 selectionが優先する。2026-09-23の修正再走査で旧「0件」判定と
+旧研究シグナル合算値を無効化したため、下表の旧Leakcheck/Forward値を
+現行の採否・損益根拠に流用しない。修正結果は
+`C:/Users/muuma/Downloads/codex-temp/bot23_overfit_reevaluation_20260923/research_replay_corrected_v13/results/fixed_v013/`
+と独立監査 `independent_chart_input_audit_v002/receipt.json` に記録した。
 
 採用した正本は `bot23_candidate_spec_v142/report.md` の固定式。DEVで条件を固定した後、
 leakcheckとforwardをシグナル別に評価した。leak+forward結果は次の通り（損益は0.01 lot相当、
