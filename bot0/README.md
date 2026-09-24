@@ -170,4 +170,6 @@ sudo firewall-cmd --reload
 its password to tracked files.
 
 `python -m unittest discover -s bot0 -v` runs fixtures for the frozen
-contracts, including the real exported ledger count when it is available.
+contracts. The optional real-export count check runs only when both the
+bot23 trade export and params match the recorded 2026-09-23 fixture hashes;
+newer live exports are skipped rather than compared with stale counts.

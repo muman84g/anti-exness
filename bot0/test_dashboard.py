@@ -1,6 +1,7 @@
 import ast
 import base64
 import csv
+import hashlib
 import http.client
 import json
 import os
@@ -1041,46 +1042,52 @@ class DashboardTests(unittest.TestCase):
 
     def test_real_data_counts_if_available(self):
         path = Path(r"C:\Users\muuma\Downloads\logs\s23_trades.csv")
+        params_path = Path(__file__).parents[1] / "bot23" / "s23_params.json"
         if not path.is_file():
             self.skipTest("live exported ledger not present")
+        if not params_path.is_file():
+            self.skipTest("bot23 params not present")
         payload = path.read_bytes()
+        params_payload = params_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != "a5c6ac60673cb3abf97f4d973ae16aeb9c4d8e2da15dcc548868d3a7f797fd5b":
+            self.skipTest("live exported ledger differs from the frozen 2026-09-23 fixture")
+        if hashlib.sha256(params_payload).hexdigest() != "32cefcb120d0877381df227e6286f022d59c29a3eb1add28c768175bc7e6c323":
+            self.skipTest("bot23 params differ from the frozen 2026-09-23 fixture")
         audit = dashboard._csv_audit(payload)
         self.assertEqual(audit.source_rows, 26383)
         self.assertEqual(len(audit.closes), 546)
         self.assertEqual(audit.direct_opportunity_closes, 515)
         self.assertEqual(audit.unique_entry_join_closes, 31)
         self.assertEqual(audit.ambiguous_opportunity_joins, 0)
-        params_path = Path(__file__).parents[1] / "bot23" / "s23_params.json"
-        if params_path.is_file():
-            config = json.loads(params_path.read_text(encoding="utf-8"))
-            visible, visibility, _ = dashboard._visible_rows(list(audit.closes), config)
-            self.assertEqual(len(visible), 52)
-            self.assertEqual(visibility["hidden_rows"], 494)
-            self.assertEqual(visibility["hidden_pair_mismatch"], 0)
-            self.assertEqual(sum(row.strategy_id.startswith("ny0530_edge_lane_") and row.signal_id == "t0530_edge_break_fade" for row in visible), 36)
-            self.assertEqual(sum(row.owner_evidence == "broker_fill_recovery_witness; broker_owner_unverified" for row in audit.closes), 30)
-            self.assertEqual(sum(row.owner_evidence == "broker_owner_fields_verified" for row in audit.closes), 6)
-            collector = dashboard.SnapshotCollector(params_path, path, path.parent / "s23_bot.log", ttl_seconds=0.01)
-            summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-24T00:00:00Z"))
-            raw = next(item for item in summary["raw_ledger_metrics"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
-            chart = next(item for item in summary["signal_charts"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
-            self.assertEqual((raw["deal_count"], raw["raw_value_total"]), (1, -9.41))
-            self.assertIn({"close_time_utc": "2026-09-23T02:06:20Z", "deal_id": "40552841", "cumulative_value": -9.41}, chart["points"])
-            self.assertEqual(summary["audit"]["owner_evidence"]["broker_fill_recovery_witness; broker_owner_unverified"], 30)
-            self.assertIsNone(summary["accounting"]["realized_pnl"])
-            self.assertIsNone(summary["accounting"]["execution_classes"]["live"]["profit_factor"])
-            month = summary["overview"]["periods"]["month"]
-            ny_totals = [row for row in month["signal_totals"] if row["strategy_id"].startswith("ny0530_edge_lane_")]
-            self.assertEqual(sum(row["deal_count"] for row in ny_totals), 36)
-            pair_counts = {row["strategy_id"]: row["deal_count"] for row in ny_totals}
-            self.assertEqual(pair_counts, {"ny0530_edge_lane_1": 18, "ny0530_edge_lane_2": 10, "ny0530_edge_lane_3": 5, "ny0530_edge_lane_4": 3})
-            self.assertEqual(sum({(row["strategy_id"], row["signal_id"], row["signal_variant_id"]): row["period_live_close_count"] for row in month["signal_totals"]}.values()), month["curves"]["period_live_close_count"])
-            curve_totals = {(row["value_unit"], row["currency"]): row["raw_value_total"] for row in month["curves"]["series"]}
-            signal_totals = {}
-            for row in month["signal_totals"]:
-                key = (row["value_unit"], row["currency"])
-                signal_totals[key] = signal_totals.get(key, 0.0) + (row["raw_value_total"] or 0.0)
-            self.assertEqual(signal_totals, curve_totals)
+        config = json.loads(params_payload.decode("utf-8"))
+        visible, visibility, _ = dashboard._visible_rows(list(audit.closes), config)
+        self.assertEqual(len(visible), 52)
+        self.assertEqual(visibility["hidden_rows"], 494)
+        self.assertEqual(visibility["hidden_pair_mismatch"], 0)
+        self.assertEqual(sum(row.strategy_id.startswith("ny0530_edge_lane_") and row.signal_id == "t0530_edge_break_fade" for row in visible), 36)
+        self.assertEqual(sum(row.owner_evidence == "broker_fill_recovery_witness; broker_owner_unverified" for row in audit.closes), 30)
+        self.assertEqual(sum(row.owner_evidence == "broker_owner_fields_verified" for row in audit.closes), 6)
+        collector = dashboard.SnapshotCollector(params_path, path, path.parent / "s23_bot.log", ttl_seconds=0.01)
+        summary = dashboard.build_summary(collector=collector, as_of_utc=dashboard._parse_utc("2026-09-24T00:00:00Z"))
+        raw = next(item for item in summary["raw_ledger_metrics"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
+        chart = next(item for item in summary["signal_charts"] if item["strategy_id"] == "research_path_curvature_lane_27" and item["value_field"] == "profit")
+        self.assertEqual((raw["deal_count"], raw["raw_value_total"]), (1, -9.41))
+        self.assertIn({"close_time_utc": "2026-09-23T02:06:20Z", "deal_id": "40552841", "cumulative_value": -9.41}, chart["points"])
+        self.assertEqual(summary["audit"]["owner_evidence"]["broker_fill_recovery_witness; broker_owner_unverified"], 30)
+        self.assertIsNone(summary["accounting"]["realized_pnl"])
+        self.assertIsNone(summary["accounting"]["execution_classes"]["live"]["profit_factor"])
+        month = summary["overview"]["periods"]["month"]
+        ny_totals = [row for row in month["signal_totals"] if row["strategy_id"].startswith("ny0530_edge_lane_")]
+        self.assertEqual(sum(row["deal_count"] for row in ny_totals), 36)
+        pair_counts = {row["strategy_id"]: row["deal_count"] for row in ny_totals}
+        self.assertEqual(pair_counts, {"ny0530_edge_lane_1": 18, "ny0530_edge_lane_2": 10, "ny0530_edge_lane_3": 5, "ny0530_edge_lane_4": 3})
+        self.assertEqual(sum({(row["strategy_id"], row["signal_id"], row["signal_variant_id"]): row["period_live_close_count"] for row in month["signal_totals"]}.values()), month["curves"]["period_live_close_count"])
+        curve_totals = {(row["value_unit"], row["currency"]): row["raw_value_total"] for row in month["curves"]["series"]}
+        signal_totals = {}
+        for row in month["signal_totals"]:
+            key = (row["value_unit"], row["currency"])
+            signal_totals[key] = signal_totals.get(key, 0.0) + (row["raw_value_total"] or 0.0)
+        self.assertEqual(signal_totals, curve_totals)
 
 
 if __name__ == "__main__":
