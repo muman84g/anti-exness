@@ -14,6 +14,7 @@ from unittest import mock
 from pathlib import Path
 
 import dashboard
+import healthcheck
 
 
 FIELDS = [
@@ -585,9 +586,9 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(sources["metadata"]["present"])
             self.assertEqual(sources["metadata"]["content_role"], "identity_only; not_accounting_input")
 
-    def _start_authenticated_server(self, root: Path, password: str = "unit-test-secret"):
+    def _start_authenticated_server(self, root: Path, password: str = "unit-test-secret", username: str = "bot0"):
         auth_file = root / "auth.json"
-        auth_file.write_text(json.dumps({"username": "bot0", "password": password}), encoding="utf-8")
+        auth_file.write_text(json.dumps({"username": username, "password": password}), encoding="utf-8")
         env = {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}
         patcher = mock.patch.dict(os.environ, env, clear=False)
         patcher.start()
@@ -668,10 +669,30 @@ class DashboardTests(unittest.TestCase):
     def test_12_auth_startup_fails_closed_without_valid_password_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             auth_file = Path(tmp) / "auth.json"
+            auth_file.write_text(json.dumps({"username": "bot0"}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "password"):
+                    dashboard.load_auth_config()
+                with mock.patch.object(dashboard, "ThreadingHTTPServer") as server_ctor:
+                    with self.assertRaisesRegex(RuntimeError, "password"):
+                        dashboard.main()
+                    server_ctor.assert_not_called()
+
             auth_file.write_text(json.dumps({"username": "bot0", "password": ""}), encoding="utf-8")
             with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "password"):
                     dashboard.load_auth_config()
+
+            auth_file.write_text(json.dumps({"username": "bot0", "password": " \t "}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "password"):
+                    dashboard.load_auth_config()
+                with self.assertRaisesRegex(RuntimeError, "password"):
+                    healthcheck._credentials()
+                with mock.patch.object(healthcheck, "urlopen") as health_urlopen:
+                    with self.assertRaisesRegex(RuntimeError, "password"):
+                        healthcheck.main()
+                    health_urlopen.assert_not_called()
                 with mock.patch.object(dashboard, "ThreadingHTTPServer") as server_ctor:
                     with self.assertRaisesRegex(RuntimeError, "password"):
                         dashboard.main()
@@ -682,13 +703,51 @@ class DashboardTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "BOT0_AUTH_FILE"):
                     dashboard.load_auth_config()
 
-    def test_13_auth_file_username_must_match_configured_user(self):
+    def test_13_auth_file_is_authoritative_and_shared_with_healthcheck(self):
         with tempfile.TemporaryDirectory() as tmp:
-            auth_file = Path(tmp) / "auth.json"
-            auth_file.write_text(json.dumps({"username": "other", "password": "unit-test-secret"}), encoding="utf-8")
+            root = Path(tmp)
+            server, thread, patcher, previous, password = self._start_authenticated_server(root, username="other.user-1")
+            try:
+                self.assertEqual(dashboard.AUTH_CONFIG.username, "other.user-1")
+                host, port = server.server_address
+
+                def request(username: str, supplied_password: str) -> int:
+                    connection = http.client.HTTPConnection(host, port, timeout=2)
+                    token = base64.b64encode(f"{username}:{supplied_password}".encode()).decode()
+                    connection.request("GET", "/api/health", headers={"Authorization": f"Basic {token}"})
+                    response = connection.getresponse()
+                    response.read()
+                    status = response.status
+                    connection.close()
+                    return status
+
+                self.assertEqual(request("bot0", password), 401)
+                self.assertEqual(request("other.user-1", password), 200)
+
+                env = os.environ.copy()
+                env["BOT0_PORT"] = str(port)
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("healthcheck.py"))],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertNotIn(password, result.args)
+                self.assertNotIn(password, result.stdout)
+                self.assertNotIn(password, result.stderr)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+                dashboard.AUTH_CONFIG = previous
+                patcher.stop()
+
+            auth_file = root / "malformed.json"
             with mock.patch.dict(os.environ, {"BOT0_AUTH_FILE": str(auth_file), "BOT0_AUTH_USER": "bot0"}, clear=False):
-                with self.assertRaisesRegex(RuntimeError, "username"):
-                    dashboard.load_auth_config()
+                for username in ("", "has space", "has:colon", "has\tcontrol", "a" * 65):
+                    auth_file.write_text(json.dumps({"username": username, "password": "unit-test-secret"}), encoding="utf-8")
+                    with self.subTest(username=username):
+                        with self.assertRaisesRegex(RuntimeError, "username"):
+                            dashboard.load_auth_config()
 
     def test_14_healthcheck_reads_auth_file_without_secret_in_command(self):
         with tempfile.TemporaryDirectory() as tmp:

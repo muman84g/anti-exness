@@ -130,30 +130,27 @@ account currency and explicit profit units produce cumulative monetary values;
 empty buckets keep realized PnL, PF, and currency null with `blocked_no_values`;
 `unknown` execution rows remain null and blocked.
 
-For direct Windows browser access, the Compose service publishes
-`0.0.0.0:8230:8230`; open `http://<CentOS-IP>:8230/` and use the Basic auth
-identity in the external JSON file. The password file must stay outside Git.
-Create it on CentOS, for example:
+For direct browser access, the Compose service publishes `0.0.0.0:8230:8230`; open
+`http://<CentOS-IP>:8230/` and use the Basic auth identity from `bot0/bot0-auth.json`.
+Before starting the service, manually upload the local auth JSON to that relative path
+under the repository directory. It must contain `username` and `password` string fields;
+keep the real values only in that ignored file and never add them to Git or `.env`.
+
+The auth file is mounted read-only at `/run/secrets/bot0-auth.json`. The container runs
+as UID/GID `65532:65532`, so after upload, set ownership and restrictive permissions on
+CentOS and recreate the service to load the file:
 
 ```bash
-sudo install -d -o 65532 -g 65532 -m 700 /etc/exness-bot
-sudo tee /etc/exness-bot/bot0-auth.json >/dev/null <<'EOF'
-{"username":"bot0","password":"<set-on-CentOS>"}
-EOF
-sudo chown 65532:65532 /etc/exness-bot/bot0-auth.json
-sudo chmod 400 /etc/exness-bot/bot0-auth.json
-printf 'BOT0_AUTH_FILE_HOST=/etc/exness-bot/bot0-auth.json\n' >> .env
+cd /home/muu/python_program/anti-exness
+sudo chown 65532:65532 bot0/bot0-auth.json
+sudo chmod 400 bot0/bot0-auth.json
+docker compose up -d --build --no-deps --force-recreate exness-bot-0
 ```
 
-The file is mounted read-only and the container process runs as UID/GID
-`65532:65532`, so the ownership and mode above let the process read the file
-while keeping it private on CentOS. Keep `.env` untracked. Create the auth file
-before building or starting the service, then run from the repository root:
-
-```bash
-docker compose build exness-bot-0
-docker compose up -d exness-bot-0
-```
+Check `docker compose ps exness-bot-0` for a healthy status; the container
+healthcheck authenticates to `/api/health` using the same JSON file. Then open
+`http://<CentOS-IP>:8230/` in a browser and confirm login with the file's identity.
+Do not put the password on a command line.
 
 The endpoint uses HTTP Basic auth over plain HTTP. Credentials and dashboard
 data are therefore visible to anyone who can observe the network path; restrict
@@ -166,8 +163,28 @@ sudo firewall-cmd --permanent --add-port=8230/tcp
 sudo firewall-cmd --reload
 ```
 
-`.env` is protected by the repository `.gitignore`; never add the auth JSON or
-its password to tracked files.
+
+Keep the previous CentOS auth file at `/etc/exness-bot/bot0-auth.json` and its
+`BOT0_AUTH_FILE_HOST` entry in `.env` until you successfully log in with the new
+repository-relative file. If login fails, restore the prior auth mount source in
+`docker-compose.yml`:
+
+```yaml
+volumes:
+  - type: bind
+    source: ${BOT0_AUTH_FILE_HOST:?Set BOT0_AUTH_FILE_HOST to an external bot0 auth JSON file}
+    target: /run/secrets/bot0-auth.json
+    read_only: true
+    bind:
+      create_host_path: false
+```
+
+Then recreate only bot0. Keep the old `/etc` file and `.env` entry until login
+works again:
+
+```bash
+docker compose up -d --no-deps --force-recreate exness-bot-0
+```
 
 `python -m unittest discover -s bot0 -v` runs fixtures for the frozen
 contracts. The optional real-export count check runs only when both the

@@ -22,9 +22,10 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import parse_qs, urlsplit
 
+from auth_config import load_auth_credentials
+
 DEFAULT_HOST = os.environ.get("BOT0_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("BOT0_PORT", "8230"))
-DEFAULT_AUTH_USER = "bot0"
 AUTH_REALM = "bot0"
 MAX_AUTH_HEADER_BYTES = 8192
 MAX_AUTH_B64_BYTES = 4096
@@ -513,23 +514,7 @@ class DashboardError(Exception):
 
 def load_auth_config() -> AuthConfig:
     """Load the required Basic auth identity from a Git-external JSON file."""
-    auth_file_value = os.environ.get("BOT0_AUTH_FILE", "").strip()
-    if not auth_file_value:
-        raise RuntimeError("BOT0_AUTH_FILE is required")
-    auth_path = Path(auth_file_value)
-    try:
-        payload = json.loads(auth_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("invalid BOT0_AUTH_FILE") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("invalid BOT0_AUTH_FILE")
-    username = payload.get("username")
-    password = payload.get("password")
-    expected_username = os.environ.get("BOT0_AUTH_USER", DEFAULT_AUTH_USER).strip()
-    if not isinstance(username, str) or not username.strip() or username != expected_username:
-        raise RuntimeError("invalid BOT0_AUTH_FILE username")
-    if not isinstance(password, str) or not password.strip():
-        raise RuntimeError("BOT0_AUTH_FILE password is required")
+    username, password = load_auth_credentials()
     credential_digest = hashlib.sha256(f"{username}:{password}".encode("utf-8")).digest()
     return AuthConfig(username=username, credential_digest=credential_digest)
 

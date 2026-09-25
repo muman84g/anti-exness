@@ -19,7 +19,7 @@ services:
       - "0.0.0.0:8230:8230"
     volumes:
       - type: bind
-        source: ${BOT0_AUTH_FILE_HOST:?Set BOT0_AUTH_FILE_HOST to an external bot0 auth JSON file}
+        source: ./bot0/bot0-auth.json
         target: /run/secrets/bot0-auth.json
         read_only: true
         bind:
@@ -41,7 +41,6 @@ services:
       BOT0_HOST: 0.0.0.0
       BOT0_PORT: "8230"
       BOT0_AUTH_FILE: /run/secrets/bot0-auth.json
-      BOT0_AUTH_USER: ${BOT0_AUTH_USER:-bot0}
     healthcheck:
       test: ["CMD", "python", "/app/bot0/healthcheck.py"]
       interval: 30s
