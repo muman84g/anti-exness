@@ -64,3 +64,10 @@ restart, EA compile/attach, reconciliation, and runtime activation are unproved.
 - For each live bot, prefer one fixed parent folder named `backtestNN_botXX`; put current live-aligned source under `live_bot_backtest/` and non-current material under the parent `legacy/`.
 - `live_config.py` is local sensitive config. It may be edited only when the user explicitly authorizes live config changes, and its contents must not be printed, staged, committed, pushed, or uploaded.
 - Do not edit login/account fields unless the user explicitly asks for those exact fields: `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`, account IDs, and login/bootstrap initialization.
+
+
+## bot30 sampled-current shadow追加（2026-10-12）
+
+| bot | service/container | local folder | source backtest | source detail | status / note |
+| --- | --- | --- | --- | --- | --- |
+| bot30 / s30 readonly | `exness-bot-30` | `bot30` | source005固定native bytes + 新portable stream binding | `CENTOS_SHADOW.md` / `source_bindings.json`: `R3_CURRENT_QUEUE_CONTROL_V001`、`PRIORITY_R3_NORESET_V001`、`H_BE_P2_PRIORITY01_V001`、`L_RESET`、CloseBy install0。 | `bot30_shadow.py` + `BotBridge_s30_readonly.mq5`。250ms sampled current Bid/Ask、未発注virtual shadow。legacy S23 main/EAは選ばない。cold completed Bid M1 warmup、新activation、実decision cutoff後market/stop fill、bounded journal fresh replay。Git公開とCentOS build/start、EA attach、口座接続、経済採用は別工程。 |

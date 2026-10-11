@@ -870,3 +870,44 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - BOT_MANUAL_ALERT_ENABLED=1
       - BOT_MANUAL_ALERT_MIN_INTERVAL_SECONDS=300
+
+  # Bot30 sampled-current Bid/Ask, no-order native R3 shadow only.
+  exness-bot-30:
+    build:
+      context: ./bot30
+      dockerfile: Dockerfile
+      args:
+        BOT30_BASE_IMAGE: exness-bot:latest
+    image: exness-bot30-shadow:v001
+    container_name: exness-bot-30
+    entrypoint: ["/bin/bash", "/app/entrypoint.sh"]
+    restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./bot30/state/s30_shadow:/app/bot30/state/s30_shadow
+      - ./bot30/logs/s30_shadow:/app/bot30/logs/s30_shadow
+      - ./bot30/config/shadow_v001.json:/app/bot30/config/shadow_v001.json:ro
+      - ./bot30/startup.ini:/app/startup.ini:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+    network_mode: "host"
+    environment:
+      - DISPLAY=:123
+      - VNC_PORT=5924
+      - NOVNC_PORT=6104
+      - WINEPREFIX=/root/.wine
+      - BOT_MODULE_DIR=/app/bot30
+      - BOT_RUNNER_FILE=bot30_shadow.py
+      - BOT_SUFFIX=s30_readonly
+      - EA_BRIDGE_EXPERT_NAME=BotBridge_s30_readonly
+      - EA_BRIDGE_SOURCE_FILE=/app/bot30/BotBridge_s30_readonly.mq5
+      - EA_BRIDGE_COMMAND_FILE=cmd_s30_readonly.txt
+      - EA_BRIDGE_RESPONSE_FILE=res_s30_readonly.txt
+      - EA_BRIDGE_HEARTBEAT_FILE=heartbeat_s30_readonly.txt
+      - EA_BRIDGE_LOCK_FILE=ea_bridge_s30_readonly.lock
+      - BOT30_CONFIG=/app/bot30/config/shadow_v001.json
+      - BOT30_STATE_DIR=/app/bot30/state/s30_shadow
+      - BOT30_LOG_DIR=/app/bot30/logs/s30_shadow

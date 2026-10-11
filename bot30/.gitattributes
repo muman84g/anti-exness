@@ -1,0 +1,19 @@
+# Publication owner must merge these scoped rules into bot30/.gitattributes.
+/vendor_runtime/** -text
+/source_bindings.json -text
+/runtime_manifest_v001.json -text
+/clock_contract_v002.json -text
+/portable_factory.py -text
+/portable_control.py -text
+/stream_harness.py -text
+/shadow_bridge.py -text
+/shadow_state.py -text
+/bot30_shadow.py -text
+/BotBridge_s30_readonly.mq5 -text
+/config/shadow_v001.json -text
+/.gitattributes -text
+/Dockerfile -text
+/.dockerignore -text
+/requirements-shadow.txt -text
+/CENTOS_SHADOW.md -text
+/tests/** -text

@@ -1,0 +1,58 @@
+{
+  "identity": "bot30_native_entry_close_improvement_v001",
+  "status": "FROZEN_RULES_PENDING_SOURCE_RECEIPT_AND_INDEPENDENT_GO",
+  "spec_path": "C:/Users/muuma/Documents/Codex/2026-10-09/bot30-entry-close-improvement/outputs/improvement_v001/design/strategy_comparison_spec_v001.json",
+  "spec_sha256": "5b66597d5692413bf58cf79b0f694fd72af6f404082b8ec26299336d8183fb43",
+  "native_core": {
+    "directory": "C:/botter/backtest/output/backtest_30/code/native_v006",
+    "h2_engine.py": "47da2b8b6cbe3a6fc24426e9a11ca55642096e2cf1ad55744e863cf80b9b7396",
+    "lifecycle_market_adapter.py": "786f6490999379d63ffd3646a65a04b15911abd136923096160c2f5a82bb4c2a",
+    "a3_lifecycle_boundary.py": "cd15541aef8b459a31ef79e905c33e32907d1c60596a20e2b47397eaac83dac8"
+  },
+  "variants": [
+    {"id": "B0_NATIVE", "change": "none"},
+    {
+      "id": "E1_P1_RANGE_AND",
+      "change": "P1 breakout admission only: prior completed M1 high-low >= 600000 micro and 10*range >= 7*modeled ATR14",
+      "unknown_bar_policy": "require exactly the immediately prior minute; missing, stale, current, or invalid ATR/bar is unknown and rejects the P1 gate",
+      "preserve_native_p1_p2_collision_refusal": true
+    },
+    {
+      "id": "X1_INITIAL_DECISION_REF_BE_TRAIL",
+      "change": "initial-ticket BE/trail reference is that initial OPEN command's BUY Ask or SELL Bid",
+      "preserve": ["fill-price accounting", "fill-anchor TP1000", "hedge fill anchor", "P1/P2", "close selection", "market latency", "STOP order"],
+      "unsupported_mapping": "native partial fill or retry fails closed with a preserved run failure; no actual deal injection"
+    }
+  ],
+  "shared_model": {
+    "lifecycle_mode": "L_RESET",
+    "activation_raw_utc_assumption": "2026.10.08 13:29:24.000",
+    "boundary_removed_raw_utc_assumption": "2026.10.08 13:45:46.316",
+    "boundary_loaded_raw_utc_assumption": "2026.10.08 13:45:46.317",
+    "boundary_ready_raw_utc_assumption": "2026.10.08 13:45:57.394",
+    "initial_state": "flat, no pending order, shock unlocked; unverified model counterfactual",
+    "execution": "ordered quote events, market first strictly later row and millisecond after command+100ms, fullfill; STOP typed ACK then later row and millisecond at trigger; zero modeled slippage",
+    "fee_usd_per_lot_round_trip": "11.000000",
+    "accounting": "native fills; independent ledger; open fee reserved, exit fee realized",
+    "price_micro_per_point": 1000,
+    "contract_size": 100,
+    "source_clocks": "assumed UTC event time only; release, ingestion, availability, actual cutoff, timezone and DST unknown",
+    "windows": "one continuous source stream per comparison; common C inclusive and EOF separately; no state reset at C"
+  },
+  "market_run_gate": {
+    "requires_fixed_copy_coverage_receipt": true,
+    "requires_parent_launch_go": true,
+    "requires_independent_review_go": true,
+    "retry": 0,
+    "worker_count": 1,
+    "aggregate_runtime_seconds": 600,
+    "aggregate_rss_bytes": 1073741824,
+    "aggregate_output_bytes": 134217728,
+    "output_limit_enforced_during_writes": true
+  },
+  "status_claims": {
+    "ea_equivalence": false,
+    "candidate_ranking": false,
+    "deployment_or_live_readiness": false
+  }
+}

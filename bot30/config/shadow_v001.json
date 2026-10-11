@@ -1,0 +1,23 @@
+{
+  "schema": "bot30_sampled_shadow_config_v001",
+  "mode": "SAMPLED_CURRENT_BID_ASK_SHADOW",
+  "symbol": "XAUUSD",
+  "magic": 30,
+  "poll_ms": 250,
+  "max_rss_bytes": 268435456,
+  "rss_observation_ms": 1000,
+  "state_subdirectory": "s30_shadow",
+  "binding": {
+    "binding_id": "EXNESS_MT5_SERVER_UTC0_V001",
+    "expected_company": "",
+    "expected_server": "",
+    "ea_source_sha256": "f43e0b0f1419b672aec9b4dd500386934353575208977d8dac683b5a730995f5",
+    "time_basis": "UTC_EPOCH_MILLISECONDS",
+    "timezone": "UTC",
+    "dst_conversion": "NONE_UTC_EPOCH",
+    "clock_evidence_refs": [
+      "https://get.exness.help/hc/en-us/articles/360014390760-What-is-the-default-timezone-set-for-MetaTrader",
+      "https://get.exness.help/hc/en-us/articles/4405235684498-Instrument-trading-hours"
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "artifact": "bot30_cent_os_shadow_portable_bindings_v001",
+  "authority_source_freeze_sha256": "b9759add7213f2a344bf37410fad146d35627fc6d50cfbae23dc5a369e4b7d36",
+  "authority_source_freeze_bytes": 25745,
+  "portable_root": ".",
+  "vendor_root": "vendor_runtime",
+  "files": [
+    {
+      "path": "vendor_runtime/research/work/improvement_v001/replay/research_runner_budget3600_v001.py",
+      "label": "runner",
+      "sha256": "0fa3fd0fadb9212175d23157ccf66d3f899255ee894c61b4e5e1ceffe963c689",
+      "bytes": 27970
+    },
+    {
+      "path": "vendor_runtime/research/work/discovery_v005/run_main_budget3600_v001.py",
+      "label": "run_main",
+      "sha256": "368ae857fb9966e5048aefa43ac407be71442341966cd70e455091a99cb60d4c",
+      "bytes": 62579
+    },
+    {
+      "path": "vendor_runtime/backtest/code/research_entry_close.py",
+      "label": "research_wrapper",
+      "sha256": "16c0c2b368c9864f7c06338c6db02d6f10368557dc177193d8e2a557d374b475",
+      "bytes": 17220
+    },
+    {
+      "path": "vendor_runtime/backtest/candidate-config/variants_v001.json",
+      "label": "variants_config",
+      "sha256": "c38adcb23a0a402e3a1fe9b2acb38b7fca9717676d6b75990213f5328d40ee5d",
+      "bytes": 3213
+    },
+    {
+      "path": "vendor_runtime/diagnostics/p2_priority_v001/research_hbe_p2_priority_v001.py",
+      "label": "priority_factory",
+      "sha256": "85682d5eee03e4a3128ea1f0f81e06d1a96711aed8d49bce1986c2cc7e3b3b5d",
+      "bytes": 8184
+    },
+    {
+      "path": "vendor_runtime/diagnostics/structure_identification_v001/research_h_be_hedge_scope_v001.py",
+      "label": "hbe_baseline",
+      "sha256": "fa6e78a907cbbcee766f993f25dd8c24df02d503517abf9ca30a5f3d6cb84981",
+      "bytes": 8800
+    },
+    {
+      "path": "vendor_runtime/diagnostics/mechanism_selection_v001/research_p2_count_v001.py",
+      "label": "count_component",
+      "sha256": "713e3478d76874b64989362c260159c67b6a04723fba7635e26e984a295cd166",
+      "bytes": 6083
+    },
+    {
+      "path": "vendor_runtime/backtest/code/native_v006/h2_engine.py",
+      "label": "native/h2_engine.py",
+      "sha256": "47da2b8b6cbe3a6fc24426e9a11ca55642096e2cf1ad55744e863cf80b9b7396",
+      "bytes": 110638
+    },
+    {
+      "path": "vendor_runtime/backtest/code/native_v006/lifecycle_market_adapter.py",
+      "label": "native/lifecycle_market_adapter.py",
+      "sha256": "786f6490999379d63ffd3646a65a04b15911abd136923096160c2f5a82bb4c2a",
+      "bytes": 9226
+    },
+    {
+      "path": "vendor_runtime/backtest/code/native_v006/a3_lifecycle_boundary.py",
+      "label": "native/a3_lifecycle_boundary.py",
+      "sha256": "cd15541aef8b459a31ef79e905c33e32907d1c60596a20e2b47397eaac83dac8",
+      "bytes": 5010
+    },
+    {
+      "path": "vendor_runtime/support/quote_connection.py",
+      "label": "quote_validator",
+      "sha256": "4907684931e4f9e04959490a12aef1b10abb1699153b2ebc327f239146de7112",
+      "bytes": 5430
+    },
+    {
+      "path": "clock_contract_v002.json",
+      "label": "clock_contract",
+      "sha256": "3aa6a1cc5b0f8a531ae37a255cdae410d237d9bc5ba697454e4443ef92fe82aa",
+      "bytes": 2768
+    },
+    {
+      "path": "vendor_runtime/support/r3_memory_adapter_v001.py",
+      "label": "r3_memory_adapter",
+      "sha256": "30251ac4e063f500f8e2b2d56ec37f55342651c9861def10c586c06cd4ec29a7",
+      "bytes": 18235
+    },
+    {
+      "path": "vendor_runtime/support/quantity_rules_v004.py",
+      "label": "quantity_rules",
+      "sha256": "e1c56a83f3d3a57f6e85b0c7c3b04b154641a3eb9e9a20bd5ecb3bd84f6212e4",
+      "bytes": 8100
+    }
+  ]
+}
